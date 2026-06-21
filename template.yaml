@@ -1,0 +1,282 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Zoolanding generic content hub BFF for protected content authoring flows
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - test
+      - prod
+  ContentHubConfigJsonBase64:
+    Type: String
+    Default: eyJ2ZXJzaW9uIjoxLCJwcm9maWxlcyI6W119
+    NoEcho: true
+  AuthSessionTableName:
+    Type: String
+  AuthUserStateTableName:
+    Type: String
+  LogLevel:
+    Type: String
+    Default: INFO
+    AllowedValues:
+      - DEBUG
+      - INFO
+      - WARNING
+      - ERROR
+
+Globals:
+  Function:
+    Runtime: python3.13
+    Timeout: 30
+    MemorySize: 256
+    Tracing: PassThrough
+
+Resources:
+  ContentHubApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName:
+        Ref: EnvironmentName
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 20
+        ThrottlingRateLimit: 10
+
+  ContentHubMetadataTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+
+  ContentHubMediaTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+
+  ContentHubModerationTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+
+  ContentHubInteractionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+
+  ContentHubPackagesBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+
+  ContentHubFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName:
+        Fn::Sub: ${AWS::StackName}-FunctionRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ContentHubPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                Resource:
+                  - Fn::Sub: arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${AuthSessionTableName}
+                  - Fn::Sub: arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${AuthUserStateTableName}
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:Query
+                  - dynamodb:UpdateItem
+                Resource:
+                  - Fn::GetAtt:
+                      - ContentHubMetadataTable
+                      - Arn
+                  - Fn::GetAtt:
+                      - ContentHubMediaTable
+                      - Arn
+                  - Fn::GetAtt:
+                      - ContentHubModerationTable
+                      - Arn
+                  - Fn::GetAtt:
+                      - ContentHubInteractionsTable
+                      - Arn
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource:
+                  Fn::Sub: ${ContentHubPackagesBucket.Arn}/content-hubs/${EnvironmentName}/*
+
+  ContentHubFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: lambda_function.lambda_handler
+      FunctionName:
+        Fn::Sub: ${AWS::StackName}-Function
+      Description: Provides protected generic content hub read/action workflows for Zoolanding drafts.
+      Role:
+        Fn::GetAtt:
+          - ContentHubFunctionRole
+          - Arn
+      Environment:
+        Variables:
+          CONTENT_HUB_ENVIRONMENT:
+            Ref: EnvironmentName
+          CONTENT_HUB_CONFIG_JSON_BASE64:
+            Ref: ContentHubConfigJsonBase64
+          AUTH_SESSION_TABLE_NAME:
+            Ref: AuthSessionTableName
+          AUTH_USER_STATE_TABLE_NAME:
+            Ref: AuthUserStateTableName
+          CONTENT_HUB_METADATA_TABLE_NAME:
+            Ref: ContentHubMetadataTable
+          CONTENT_HUB_MEDIA_TABLE_NAME:
+            Ref: ContentHubMediaTable
+          CONTENT_HUB_MODERATION_TABLE_NAME:
+            Ref: ContentHubModerationTable
+          CONTENT_HUB_INTERACTIONS_TABLE_NAME:
+            Ref: ContentHubInteractionsTable
+          CONTENT_HUB_PACKAGES_BUCKET_NAME:
+            Ref: ContentHubPackagesBucket
+          LOG_LEVEL:
+            Ref: LogLevel
+      Events:
+        Read:
+          Type: HttpApi
+          Properties:
+            ApiId:
+              Ref: ContentHubApi
+            Method: POST
+            Path: /features/content-hub/read
+        Action:
+          Type: HttpApi
+          Properties:
+            ApiId:
+              Ref: ContentHubApi
+            Method: POST
+            Path: /features/content-hub/action
+        OptionsRead:
+          Type: HttpApi
+          Properties:
+            ApiId:
+              Ref: ContentHubApi
+            Method: OPTIONS
+            Path: /features/content-hub/read
+        OptionsAction:
+          Type: HttpApi
+          Properties:
+            ApiId:
+              Ref: ContentHubApi
+            Method: OPTIONS
+            Path: /features/content-hub/action
+
+Outputs:
+  ApiEndpoint:
+    Description: Content hub HTTP API endpoint.
+    Value:
+      Fn::Sub: https://${ContentHubApi}.execute-api.${AWS::Region}.amazonaws.com/${EnvironmentName}
+  FunctionName:
+    Description: Content hub Lambda function name.
+    Value:
+      Ref: ContentHubFunction
+  MetadataTableName:
+    Description: Content hub metadata table name.
+    Value:
+      Ref: ContentHubMetadataTable
+  MediaTableName:
+    Description: Content hub media table name.
+    Value:
+      Ref: ContentHubMediaTable
+  ModerationTableName:
+    Description: Content hub moderation table name.
+    Value:
+      Ref: ContentHubModerationTable
+  InteractionsTableName:
+    Description: Content hub interactions table name.
+    Value:
+      Ref: ContentHubInteractionsTable
+  PackagesBucketName:
+    Description: Content hub package bucket name.
+    Value:
+      Ref: ContentHubPackagesBucket
+
