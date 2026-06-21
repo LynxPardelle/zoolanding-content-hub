@@ -71,11 +71,13 @@ jobs:
           pathlib.Path(os.environ["OUTPUT_CONFIG_PATH"]).write_text(base64.b64encode(compact).decode("ascii"), encoding="utf-8")
           PY
       - name: Configure AWS credentials
+        if: vars.CONTENT_HUB_CONFIG_READY == 'true'
         uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
       - name: Test and deploy
+        if: vars.CONTENT_HUB_CONFIG_READY == 'true'
         shell: bash
         env:
           AUTH_SESSION_TABLE_NAME: ${{ vars.AUTH_SESSION_TABLE_NAME }}
