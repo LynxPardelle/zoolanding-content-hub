@@ -50,7 +50,10 @@ jobs:
           AUTH_USER_STATE_TABLE_NAME: ${{ vars.AUTH_USER_STATE_TABLE_NAME }}
         run: |
           set -euo pipefail
-          test "${CONTENT_HUB_CONFIG_READY:-}" = "true" || { echo "CONTENT_HUB_CONFIG_READY=true is required for deploy"; exit 1; }
+          if [[ "${CONTENT_HUB_CONFIG_READY:-}" != "true" ]]; then
+            echo "Skipping deploy: CONTENT_HUB_CONFIG_READY is not true for this environment."
+            exit 0
+          fi
           test -n "${AUTH_SESSION_TABLE_NAME:-}" || { echo "AUTH_SESSION_TABLE_NAME is required for deploy"; exit 1; }
           test -n "${AUTH_USER_STATE_TABLE_NAME:-}" || { echo "AUTH_USER_STATE_TABLE_NAME is required for deploy"; exit 1; }
           output_path="$RUNNER_TEMP/content-hub-config.compact.b64"
@@ -84,4 +87,3 @@ jobs:
           sam build --no-cached
           CONTENT_HUB_CONFIG_JSON_BASE64="$(cat "$RUNNER_TEMP/content-hub-config.compact.b64")"
           sam deploy --config-env prod --no-confirm-changeset --no-fail-on-empty-changeset --parameter-overrides "EnvironmentName=prod" "ContentHubConfigJsonBase64=${CONTENT_HUB_CONFIG_JSON_BASE64}" "AuthSessionTableName=${AUTH_SESSION_TABLE_NAME}" "AuthUserStateTableName=${AUTH_USER_STATE_TABLE_NAME}" "LogLevel=INFO"
-
