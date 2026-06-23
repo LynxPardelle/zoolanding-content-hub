@@ -59,6 +59,7 @@ READ_CAPABILITIES = {
 
 ACTION_CAPABILITIES = {
     "createArticle": "edit",
+    "upsertTaxonomy": "edit",
     "updatePackage": "edit",
     "validate": "edit",
     "submitReview": "edit",
@@ -66,8 +67,18 @@ ACTION_CAPABILITIES = {
     "publish": "publish",
     "schedule": "publish",
     "uploadAsset": "media",
+    "queueComment": "moderate",
     "moderateComment": "moderate",
+    "recordInteraction": "read",
 }
+
+PII_KEY_RE = re.compile(
+    r"(?:email|e-mail|phone|telefono|tel[eé]fono|address|direccion|direcci[oó]n|"
+    r"full[_-]?name|nombre|apellido|ip[_-]?address|session|cookie|user[_-]?agent)",
+    re.I,
+)
+EMAIL_VALUE_RE = re.compile(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}")
+PHONE_VALUE_RE = re.compile(r"(?:\+?\d[\d\s().-]{7,}\d)")
 
 
 class ContentHubError(Exception):
@@ -216,6 +227,8 @@ def _handle_action(
 ) -> dict[str, Any]:
     if action_kind == "createArticle":
         return _create_article(payload, session, profile, hub)
+    if action_kind == "upsertTaxonomy":
+        return _upsert_taxonomy(payload, binding, session, profile, hub)
     if action_kind == "updatePackage":
         return _update_package(payload, binding, session, profile, hub)
     if action_kind == "validate":
@@ -228,8 +241,12 @@ def _handle_action(
         return _schedule_article(payload, binding, session, profile, hub)
     if action_kind == "uploadAsset":
         return _upload_asset(payload, session, profile, hub)
+    if action_kind == "queueComment":
+        return _queue_comment(payload, binding, session, profile, hub)
     if action_kind == "moderateComment":
         return _moderate_comment(payload, binding, session, profile, hub)
+    if action_kind == "recordInteraction":
+        return _record_interaction(payload, binding, session, profile, hub)
     if action_kind == "restoreRevision":
         return _restore_revision(payload, binding, session, profile, hub)
     raise ContentHubError("Unsupported content hub action")
@@ -243,6 +260,7 @@ def _create_article(payload: dict[str, Any], session: dict[str, Any], profile: d
     revision_id = _safe_id(_input_field(payload, "revisionId") or "rev_001")
     now = _now_iso()
     summary = _safe_text(_input_field(payload, "summary") or "", max_length=320)
+    visibility = _visibility(_input_field(payload, "visibility") or "public")
     article = {
         "pk": f"HUB#{hub['hubId']}",
         "sk": f"ARTICLE#{article_id}",
@@ -252,9 +270,19 @@ def _create_article(payload: dict[str, Any], session: dict[str, Any], profile: d
         "ownerDraftDomain": hub["ownerDraftDomain"],
         "originDraftDomain": profile["domain"],
         "status": "draft",
-        "visibility": _visibility(_input_field(payload, "visibility") or "public"),
+        "visibility": visibility,
         "title": title,
         "summary": summary,
+        "slug": slug,
+        "seoTitle": _safe_text(_input_field(payload, "seoTitle") or title, max_length=160),
+        "seoDescription": _safe_text(_input_field(payload, "seoDescription") or summary, max_length=320),
+        "robots": _robots_policy(_input_field(payload, "robots") or "index,follow"),
+        "category": _taxonomy_ref(_input_field(payload, "category")),
+        "tags": _taxonomy_refs(_input_field(payload, "tags")),
+        "commentPolicy": _comment_policy(_input_field(payload, "commentPolicy") or "moderated"),
+        "contentSafety": _content_safety(payload),
+        "canonicalMode": _canonical_mode(_input_field(payload, "canonicalMode") or "self"),
+        "canonicalUrl": _safe_canonical_url(_input_field(payload, "canonicalUrl") or ""),
         "primaryLocale": locale,
         "latestRevisionId": revision_id,
         "createdAt": now,
@@ -268,6 +296,45 @@ def _create_article(payload: dict[str, Any], session: dict[str, Any], profile: d
     store.put_metadata(revision)
     store.put_json(revision["packageKey"], package)
     return {"article": _article_summary(article), "revision": _revision_summary(revision)}
+
+
+def _upsert_taxonomy(
+    payload: dict[str, Any],
+    binding: dict[str, Any],
+    session: dict[str, Any],
+    profile: dict[str, Any],
+    hub: dict[str, Any],
+) -> dict[str, Any]:
+    del profile
+    kind = _safe_id(binding.get("taxonomyKind") or _input_field(payload, "taxonomyKind") or _input_field(payload, "kind"))
+    if kind not in {"category", "tag"}:
+        raise ContentHubError("Invalid taxonomy kind")
+    label = _safe_text(_input_field(payload, "label") or _input_field(payload, "name") or kind, max_length=120)
+    slug = _slug(_input_field(payload, "slug") or label)
+    taxonomy_id = _safe_id(_input_field(payload, "taxonomyId") or f"{kind}_{slug}")
+    now = _now_iso()
+    existing = _store().get_metadata(f"HUB#{hub['hubId']}", f"TAXONOMY#{kind}#{taxonomy_id}") or {}
+    item = {
+        "pk": f"HUB#{hub['hubId']}",
+        "sk": f"TAXONOMY#{kind}#{taxonomy_id}",
+        "itemFamily": "TAXONOMY",
+        "hubId": hub["hubId"],
+        "taxonomyId": taxonomy_id,
+        "kind": kind,
+        "slug": slug,
+        "label": label,
+        "description": _safe_text(_input_field(payload, "description") or "", max_length=320),
+        "locale": _locale(_input_field(payload, "language") or hub.get("defaultLocale") or "es"),
+        "seoTitle": _safe_text(_input_field(payload, "seoTitle") or label, max_length=160),
+        "seoDescription": _safe_text(_input_field(payload, "seoDescription") or "", max_length=320),
+        "parentId": _optional_safe_id(_input_field(payload, "parentId")),
+        "visible": _safe_bool(_input_field(payload, "visible"), default=True),
+        "createdAt": existing.get("createdAt") or now,
+        "updatedAt": now,
+        "updatedBy": session["subject"],
+    }
+    _store().put_metadata(item)
+    return {"taxonomy": _taxonomy_summary(item)}
 
 
 def _update_package(
@@ -294,6 +361,7 @@ def _update_package(
         "i18n": _safe_json_node(_input_field(payload, "i18n") or {}),
         "updatedAt": now,
     }
+    metadata_updates = _article_metadata_updates(payload)
     store = _store()
     store.put_metadata(revision)
     store.put_json(revision["packageKey"], package)
@@ -302,6 +370,7 @@ def _update_package(
         "status": "draft",
         "updatedAt": now,
         "updatedBy": session["subject"],
+        **metadata_updates,
     })
     return {"revision": _revision_summary(revision), "packageKey": revision["packageKey"]}
 
@@ -344,6 +413,8 @@ def _publish_article(
         raise ContentHubNotFound("Revision not found")
     package = store.get_json(revision["packageKey"])
     path = _article_path(_input_field(payload, "path") or f"/blog/{_slug(article.get('title') or article_id)}")
+    canonical_mode = _canonical_mode(_input_field(payload, "canonicalMode") or article.get("canonicalMode") or "self")
+    canonical_url = _safe_canonical_url(_input_field(payload, "canonicalUrl") or article.get("canonicalUrl") or "")
     now = _now_iso()
     bundle = {
         "version": 1,
@@ -354,13 +425,22 @@ def _publish_article(
         "renderDomain": render_domain,
         "locale": locale,
         "path": path,
+        "safeArticlePath": path,
         "status": "published",
         "publishedAt": now,
+        "title": article.get("title"),
+        "summary": article.get("summary"),
+        "slug": article.get("slug") or _slug(article.get("title") or article_id),
+        "category": _taxonomy_ref(article.get("category")),
+        "tags": _taxonomy_refs(article.get("tags")),
+        "commentPolicy": _comment_policy(article.get("commentPolicy") or "moderated"),
+        "contentSafety": _content_safety_from_value(article.get("contentSafety")),
         "seo": {
-            "title": _safe_text(_input_field(payload, "seoTitle") or article.get("title") or article_id, max_length=160),
-            "description": _safe_text(_input_field(payload, "seoDescription") or article.get("summary") or "", max_length=320),
-            "canonical": path,
-            "robots": "index,follow",
+            "title": _safe_text(_input_field(payload, "seoTitle") or article.get("seoTitle") or article.get("title") or article_id, max_length=160),
+            "description": _safe_text(_input_field(payload, "seoDescription") or article.get("seoDescription") or article.get("summary") or "", max_length=320),
+            "canonical": _canonical_for_publish(canonical_mode, canonical_url, path),
+            "canonicalMode": canonical_mode,
+            "robots": _robots_policy(_input_field(payload, "robots") or article.get("robots") or "index,follow"),
         },
         "structuredData": [],
         "components": package.get("components") if isinstance(package, dict) else [],
@@ -375,6 +455,8 @@ def _publish_article(
         "publishedAt": now,
         "latestRevisionId": revision_id,
         "path": path,
+        "canonicalMode": canonical_mode,
+        "canonicalUrl": canonical_url,
         "updatedAt": now,
         "updatedBy": session["subject"],
     })
@@ -461,6 +543,38 @@ def _upload_asset(payload: dict[str, Any], session: dict[str, Any], profile: dic
     return {"asset": _asset_summary(item)}
 
 
+def _queue_comment(
+    payload: dict[str, Any],
+    binding: dict[str, Any],
+    session: dict[str, Any],
+    profile: dict[str, Any],
+    hub: dict[str, Any],
+) -> dict[str, Any]:
+    del profile
+    article_id = _safe_id(binding.get("articleId") or _input_field(payload, "articleId"))
+    text = _safe_text(_input_field(payload, "commentText") or _input_field(payload, "body") or "", max_length=2000)
+    if not text:
+        raise ContentHubError("Comment text is required")
+    now = _now_iso()
+    comment_seed = f"{article_id}:{now}:{session['subject']}"
+    comment_id = _safe_id(_input_field(payload, "commentId") or f"cmt_{hashlib.sha256(comment_seed.encode()).hexdigest()[:16]}")
+    item = {
+        "pk": f"HUB#{hub['hubId']}",
+        "sk": f"MODERATION#queued#{now}#{comment_id}",
+        "itemFamily": "MODERATION",
+        "hubId": hub["hubId"],
+        "articleId": article_id,
+        "commentId": comment_id,
+        "status": "queued",
+        "bodyPreview": _redacted_preview(text, 240),
+        "bodyHash": _sha256(text),
+        "createdByHash": _sha256(session["subject"]),
+        "queuedAt": now,
+    }
+    _store().put_moderation(item)
+    return {"comment": _moderation_summary(item)}
+
+
 def _moderate_comment(
     payload: dict[str, Any],
     binding: dict[str, Any],
@@ -485,6 +599,41 @@ def _moderate_comment(
     }
     _store().put_moderation(item)
     return {"moderation": _moderation_summary(item)}
+
+
+def _record_interaction(
+    payload: dict[str, Any],
+    binding: dict[str, Any],
+    session: dict[str, Any],
+    profile: dict[str, Any],
+    hub: dict[str, Any],
+) -> dict[str, Any]:
+    del profile
+    event_type = _safe_id(_input_field(payload, "eventType") or _input_field(payload, "interactionType") or "reaction")
+    if event_type not in {"reaction", "like", "cta", "form"}:
+        raise ContentHubError("Invalid interaction type")
+    article_id_value = binding.get("articleId") or _input_field(payload, "articleId")
+    article_id = _optional_safe_id(article_id_value)
+    now = _now_iso()
+    interaction_seed = f"{event_type}:{now}:{session['subject']}"
+    interaction_id = _safe_id(_input_field(payload, "interactionId") or f"evt_{hashlib.sha256(interaction_seed.encode()).hexdigest()[:16]}")
+    item = {
+        "pk": f"HUB#{hub['hubId']}",
+        "sk": f"INTERACTION#{event_type}#{now}#{interaction_id}",
+        "itemFamily": "INTERACTION",
+        "hubId": hub["hubId"],
+        "interactionId": interaction_id,
+        "eventType": event_type,
+        "articleId": article_id,
+        "targetId": _optional_safe_id(_input_field(payload, "targetId")),
+        "value": _safe_text(_input_field(payload, "value") or "", max_length=120),
+        "path": _optional_article_path(_input_field(payload, "path")),
+        "metadata": _safe_event_metadata(_input_field(payload, "metadata") or {}),
+        "actorHash": _sha256(session["subject"]),
+        "createdAt": now,
+    }
+    _store().put_interaction(item)
+    return {"interaction": _interaction_summary(item)}
 
 
 def _restore_revision(
@@ -717,6 +866,9 @@ class DynamoContentHubStore:
     def query_moderation(self, pk: str, sk_prefix: str) -> list[dict[str, Any]]:
         return _query_items(self.table(self.moderation_table_name), pk, sk_prefix)
 
+    def put_interaction(self, item: dict[str, Any]) -> None:
+        self.table(self.interactions_table_name).put_item(Item=_without_empty(item))
+
     def put_json(self, key: str, payload: dict[str, Any]) -> None:
         self.s3.put_object(
             Bucket=self.packages_bucket_name,
@@ -792,6 +944,25 @@ def _input_field(payload: dict[str, Any], key: str) -> Any:
         "slug": ["articleSlug"],
         "seoTitle": ["articleSeoTitle"],
         "seoDescription": ["articleSeoDescription"],
+        "robots": ["seoRobots", "articleRobots"],
+        "category": ["categoryId", "articleCategory", "articleCategoryId", "primaryCategory", "primaryCategoryId"],
+        "tags": ["tagIds", "articleTags"],
+        "commentPolicy": ["comments.policy", "articleCommentPolicy"],
+        "contentSafety": ["safety", "articleContentSafety"],
+        "canonicalMode": ["canonical.mode", "articleCanonicalMode"],
+        "canonicalUrl": ["canonical.url", "canonical.path", "canonicalPath", "articleCanonicalUrl"],
+        "taxonomyKind": ["kind"],
+        "label": ["taxonomyLabel", "displayName"],
+        "description": ["taxonomyDescription"],
+        "parentId": ["parentTaxonomyId"],
+        "visible": ["isVisible"],
+        "commentText": ["comment.body", "comment.text"],
+        "body": ["commentBody"],
+        "eventType": ["event.kind", "interaction.kind"],
+        "interactionType": ["eventType"],
+        "targetId": ["event.targetId", "interaction.targetId"],
+        "value": ["event.value", "interaction.value"],
+        "metadata": ["event.metadata", "interaction.metadata"],
         "scheduledAt": ["publishAt"],
         "moderationStatus": ["decision"],
         "fileName": ["upload.fileName", "metadata.fileName"],
@@ -833,6 +1004,22 @@ def _article_package(
         "originDraftDomain": profile["domain"],
         "status": "draft",
         "visibility": article["visibility"],
+        "title": article.get("title"),
+        "summary": article.get("summary"),
+        "slug": article.get("slug"),
+        "seo": {
+            "title": article.get("seoTitle"),
+            "description": article.get("seoDescription"),
+            "robots": article.get("robots"),
+        },
+        "category": _taxonomy_ref(article.get("category")),
+        "tags": _taxonomy_refs(article.get("tags")),
+        "commentPolicy": article.get("commentPolicy"),
+        "contentSafety": _content_safety_from_value(article.get("contentSafety")),
+        "canonical": {
+            "mode": article.get("canonicalMode"),
+            "url": article.get("canonicalUrl"),
+        },
         "primaryLocale": article["primaryLocale"],
         "revisionId": revision["revisionId"],
         "components": _safe_json_node(_input_field(payload, "components") or []),
@@ -870,8 +1057,18 @@ def _article_summary(item: dict[str, Any]) -> dict[str, Any]:
         "articleId": item.get("articleId"),
         "title": item.get("title"),
         "summary": item.get("summary"),
+        "slug": item.get("slug"),
         "status": item.get("status"),
         "visibility": item.get("visibility"),
+        "seoTitle": item.get("seoTitle"),
+        "seoDescription": item.get("seoDescription"),
+        "robots": item.get("robots"),
+        "category": _taxonomy_ref(item.get("category")),
+        "tags": _taxonomy_refs(item.get("tags")),
+        "commentPolicy": item.get("commentPolicy"),
+        "contentSafety": _content_safety_from_value(item.get("contentSafety")),
+        "canonicalMode": item.get("canonicalMode"),
+        "canonicalUrl": item.get("canonicalUrl"),
         "primaryLocale": item.get("primaryLocale"),
         "latestRevisionId": item.get("latestRevisionId"),
         "path": item.get("path"),
@@ -886,8 +1083,13 @@ def _taxonomy_summary(item: dict[str, Any]) -> dict[str, Any]:
         "kind": item.get("kind"),
         "slug": item.get("slug"),
         "label": item.get("label"),
+        "description": item.get("description"),
         "locale": item.get("locale"),
+        "seoTitle": item.get("seoTitle"),
+        "seoDescription": item.get("seoDescription"),
+        "parentId": item.get("parentId"),
         "visible": item.get("visible", True),
+        "updatedAt": item.get("updatedAt"),
     }
 
 
@@ -918,9 +1120,25 @@ def _asset_summary(item: dict[str, Any]) -> dict[str, Any]:
 
 def _moderation_summary(item: dict[str, Any]) -> dict[str, Any]:
     return {
+        "articleId": item.get("articleId"),
         "commentId": item.get("commentId"),
         "status": item.get("status"),
+        "bodyPreview": item.get("bodyPreview"),
+        "queuedAt": item.get("queuedAt"),
         "moderatedAt": item.get("moderatedAt"),
+    }
+
+
+def _interaction_summary(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "interactionId": item.get("interactionId"),
+        "eventType": item.get("eventType"),
+        "articleId": item.get("articleId"),
+        "targetId": item.get("targetId"),
+        "value": item.get("value"),
+        "path": item.get("path"),
+        "metadata": item.get("metadata"),
+        "createdAt": item.get("createdAt"),
     }
 
 
@@ -1144,6 +1362,168 @@ def _safe_public_url(value: Any) -> str:
     if not url.startswith("https://") or "\\" in url or UNSAFE_VALUE_RE.search(url) or re.search(r"[\s\x00-\x1f\x7f]", url):
         raise ContentHubError("Invalid public asset URL")
     return url
+
+
+def _safe_canonical_url(value: Any) -> str:
+    url = _clean_string(value)
+    if not url:
+        return ""
+    if url.startswith("/"):
+        return _article_path(url)
+    if not url.startswith("https://") or "\\" in url or UNSAFE_VALUE_RE.search(url) or re.search(r"[\s\x00-\x1f\x7f]", url):
+        raise ContentHubError("Invalid canonical URL")
+    return url[:400]
+
+
+def _canonical_mode(value: Any) -> str:
+    mode = _safe_id(value)
+    if mode not in {"self", "custom", "none"}:
+        raise ContentHubError("Invalid canonical mode")
+    return mode
+
+
+def _canonical_for_publish(mode: str, canonical_url: str, path: str) -> str:
+    if mode == "none":
+        return ""
+    if mode == "custom":
+        if not canonical_url:
+            raise ContentHubError("Canonical URL is required")
+        return canonical_url
+    return path
+
+
+def _robots_policy(value: Any) -> str:
+    robots = _clean_string(value).lower().replace(" ", "")
+    allowed = {"index,follow", "noindex,follow", "index,nofollow", "noindex,nofollow"}
+    if robots not in allowed:
+        raise ContentHubError("Invalid robots policy")
+    return robots
+
+
+def _comment_policy(value: Any) -> str:
+    policy = _safe_id(value)
+    if policy not in {"disabled", "moderated", "authenticated"}:
+        raise ContentHubError("Invalid comment policy")
+    return policy
+
+
+def _content_safety(payload: dict[str, Any]) -> dict[str, Any]:
+    return _content_safety_from_value(_input_field(payload, "contentSafety") or {})
+
+
+def _content_safety_from_value(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {"rating": "general", "warnings": []}
+    rating = _safe_id(value.get("rating") or value.get("audience") or "general")
+    if rating not in {"general", "sensitive", "restricted"}:
+        raise ContentHubError("Invalid content safety rating")
+    return {
+        "rating": rating,
+        "warnings": [_safe_text(item, max_length=80) for item in _list_value(value.get("warnings"))[:10]],
+    }
+
+
+def _taxonomy_ref(value: Any) -> dict[str, Any]:
+    if value is None or value == "":
+        return {}
+    if isinstance(value, str):
+        text = _clean_string(value)
+        if not text:
+            return {}
+        return {"taxonomyId": _safe_id(text)}
+    if not isinstance(value, dict):
+        raise ContentHubError("Invalid taxonomy reference")
+    taxonomy_id = _optional_safe_id(value.get("taxonomyId") or value.get("id"))
+    slug = _slug(value.get("slug")) if _clean_string(value.get("slug")) else ""
+    label = _safe_text(value.get("label") or value.get("name") or "", max_length=120)
+    return _without_empty({"taxonomyId": taxonomy_id, "slug": slug, "label": label})
+
+
+def _taxonomy_refs(value: Any) -> list[dict[str, Any]]:
+    refs = []
+    for item in _list_value(value):
+        ref = _taxonomy_ref(item)
+        if ref:
+            refs.append(ref)
+    return refs[:20]
+
+
+def _article_metadata_updates(payload: dict[str, Any]) -> dict[str, Any]:
+    updates: dict[str, Any] = {}
+    field_builders = {
+        "seoTitle": lambda: _safe_text(_input_field(payload, "seoTitle"), max_length=160),
+        "seoDescription": lambda: _safe_text(_input_field(payload, "seoDescription"), max_length=320),
+        "robots": lambda: _robots_policy(_input_field(payload, "robots")),
+        "category": lambda: _taxonomy_ref(_input_field(payload, "category")),
+        "tags": lambda: _taxonomy_refs(_input_field(payload, "tags")),
+        "commentPolicy": lambda: _comment_policy(_input_field(payload, "commentPolicy")),
+        "contentSafety": lambda: _content_safety(payload),
+        "canonicalMode": lambda: _canonical_mode(_input_field(payload, "canonicalMode")),
+        "canonicalUrl": lambda: _safe_canonical_url(_input_field(payload, "canonicalUrl")),
+    }
+    for field, builder in field_builders.items():
+        if _input_field(payload, field) is not None:
+            updates[field] = builder()
+    return updates
+
+
+def _safe_event_metadata(value: Any) -> dict[str, Any]:
+    if value in (None, ""):
+        return {}
+    if not isinstance(value, dict):
+        raise ContentHubError("Invalid interaction metadata")
+    output = {}
+    for key, entry in list(value.items())[:20]:
+        safe_key = _safe_id(key)
+        if PII_KEY_RE.search(safe_key) or SECRET_KEY_RE.search(safe_key):
+            raise ContentHubError("Interaction metadata cannot include private fields")
+        if isinstance(entry, bool) or isinstance(entry, int) or isinstance(entry, float):
+            output[safe_key] = entry
+        elif isinstance(entry, str):
+            text = _safe_text(entry, max_length=160)
+            if EMAIL_VALUE_RE.search(text) or PHONE_VALUE_RE.search(text):
+                raise ContentHubError("Interaction metadata cannot include private values")
+            output[safe_key] = text
+        elif entry is None:
+            continue
+        else:
+            raise ContentHubError("Interaction metadata must be scalar")
+    return output
+
+
+def _redacted_preview(value: str, max_length: int) -> str:
+    text = EMAIL_VALUE_RE.sub("[redacted-email]", value)
+    text = PHONE_VALUE_RE.sub("[redacted-phone]", text)
+    return _safe_text(text, max_length=max_length)
+
+
+def _safe_bool(value: Any, *, default: bool) -> bool:
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        return value
+    text = _clean_string(value).lower()
+    if text in {"true", "1", "yes", "si", "sí"}:
+        return True
+    if text in {"false", "0", "no"}:
+        return False
+    raise ContentHubError("Invalid boolean value")
+
+
+def _optional_safe_id(value: Any) -> str:
+    return _safe_id(value) if _clean_string(value) else ""
+
+
+def _optional_article_path(value: Any) -> str:
+    return _article_path(value) if _clean_string(value) else ""
+
+
+def _list_value(value: Any) -> list[Any]:
+    if value is None or value == "":
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
 
 
 def _string_list(value: Any) -> list[str]:
