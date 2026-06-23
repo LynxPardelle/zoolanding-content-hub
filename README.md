@@ -56,6 +56,8 @@ Required GitHub environment inputs:
 - `AWS_ROLE_ARN` variable.
 - `AWS_REGION` variable, default `us-east-1`.
 
+The Lambda defaults to 512 MB through the `FunctionMemorySize` SAM parameter. This gives more CPU to the cold read path that loads AWS SDK/DynamoDB clients while keeping the runtime configurable per environment.
+
 ## Local Tests
 
 ```powershell
@@ -63,4 +65,3 @@ python -m unittest discover -s tests -p "test_*.py"
 sam validate
 pip-audit -r requirements.txt
 ```
-
