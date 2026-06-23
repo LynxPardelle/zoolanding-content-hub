@@ -81,6 +81,7 @@ class FakeStore:
         self.metadata = {}
         self.media = {}
         self.moderation = {}
+        self.interactions = {}
         self.objects = {}
         self.bytes = {}
         self.roles = roles or ["zoosite-admin"]
@@ -139,6 +140,9 @@ class FakeStore:
 
     def query_moderation(self, pk, sk_prefix):
         return [dict(item) for (item_pk, item_sk), item in self.moderation.items() if item_pk == pk and item_sk.startswith(sk_prefix)]
+
+    def put_interaction(self, item):
+        self.interactions[(item["pk"], item["sk"])] = dict(item)
 
     def put_json(self, key, payload):
         self.objects[key] = dict(payload)
@@ -227,6 +231,85 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertEqual(len(body(read)["data"]["items"]), 1)
         self.assertNotIn("packageKey", read["body"])
 
+    def test_create_article_stores_blog_metadata_and_public_summary(self):
+        self.store.roles = ["zoosite-blog-editor"]
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {
+                "articleTitle": "SEO local",
+                "articleSummary": "Guía de posicionamiento local",
+                "articleSeoTitle": "SEO local para veterinarias",
+                "articleSeoDescription": "Descripción SEO segura",
+                "categoryId": "cat-seo",
+                "articleTags": ["tag-seo", {"taxonomyId": "tag-vet", "slug": "veterinarias", "label": "Veterinarias"}],
+                "articleCommentPolicy": "authenticated",
+                "articleContentSafety": {"rating": "sensitive", "warnings": ["salud"]},
+                "articleCanonicalMode": "custom",
+                "articleCanonicalUrl": "https://zoositioweb.com.mx/blog/seo-local",
+            },
+        )
+        self.assertEqual(create["statusCode"], 200)
+        article = body(create)["data"]["article"]
+        self.assertEqual(article["seoTitle"], "SEO local para veterinarias")
+        self.assertEqual(article["category"]["taxonomyId"], "cat-seo")
+        self.assertEqual(article["tags"][1]["slug"], "veterinarias")
+        self.assertEqual(article["commentPolicy"], "authenticated")
+        self.assertEqual(article["contentSafety"]["rating"], "sensitive")
+        self.assertEqual(article["canonicalMode"], "custom")
+
+        read = self.request("/features/content-hub/read", {"read": "articleList"}, csrf=False)
+        self.assertEqual(body(read)["data"]["items"][0]["canonicalUrl"], "https://zoositioweb.com.mx/blog/seo-local")
+        self.assertNotIn("updatedBy", read["body"])
+
+    def test_create_article_accepts_draft_policy_aliases_and_comma_tags(self):
+        self.store.roles = ["zoosite-blog-editor"]
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {
+                "articleTitle": "Editor visual",
+                "articleTags": "seo, blog-builder",
+                "articleCanonicalPolicy": "creator-domain",
+                "articleCommentPolicy": "authenticated-moderated",
+                "articleContentSafetyPolicy": "advanced-freeform",
+                "articleVisibility": "private-draft",
+            },
+        )
+        self.assertEqual(create["statusCode"], 200)
+        article = body(create)["data"]["article"]
+        self.assertEqual(article["canonicalMode"], "self")
+        self.assertEqual(article["commentPolicy"], "authenticated")
+        self.assertEqual(article["contentSafety"]["rating"], "sensitive")
+        self.assertEqual(article["visibility"], "private")
+        self.assertEqual([item["taxonomyId"] for item in article["tags"]], ["seo", "blog-builder"])
+
+    def test_taxonomy_upsert_and_list_exposes_safe_fields(self):
+        self.store.roles = ["zoosite-blog-editor"]
+        upsert = self.request(
+            "/features/content-hub/action",
+            {"action": "upsertTaxonomy", "taxonomyKind": "category"},
+            {
+                "taxonomyId": "cat-blog",
+                "translation": "Blog",
+                "description": "Categoría principal",
+                "seoTitle": "Blog Zoosite",
+                "visible": True,
+            },
+        )
+        self.assertEqual(upsert["statusCode"], 200)
+        self.assertEqual(body(upsert)["data"]["taxonomy"]["slug"], "blog")
+
+        read = self.request(
+            "/features/content-hub/read",
+            {"read": "taxonomyList", "taxonomyKind": "category"},
+            csrf=False,
+        )
+        data = body(read)["data"]
+        self.assertEqual(len(data["categories"]), 1)
+        self.assertEqual(data["categories"][0]["seoTitle"], "Blog Zoosite")
+        self.assertNotIn("updatedBy", read["body"])
+
     def test_config_is_cached_for_same_environment(self):
         first = content_hub.load_config()
         with patch("lambda_function.json.loads") as loads:
@@ -276,7 +359,15 @@ class ContentHubHandlerTests(unittest.TestCase):
         create = self.request(
             "/features/content-hub/action",
             {"action": "createArticle"},
-            {"title": "Publicar", "summary": "Descripción"},
+            {
+                "title": "Publicar",
+                "summary": "Descripción",
+                "category": {"taxonomyId": "cat-blog", "slug": "blog", "label": "Blog"},
+                "tags": ["tag-seo"],
+                "commentPolicy": "moderated",
+                "canonicalMode": "custom",
+                "canonicalUrl": "https://zoositioweb.com.mx/blog/publicar",
+            },
         )
         article_id = body(create)["data"]["article"]["articleId"]
         publish = self.request(
@@ -287,8 +378,101 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertEqual(publish["statusCode"], 200)
         data = body(publish)["data"]
         self.assertEqual(data["path"], "/blog/publicar")
-        self.assertIn(data["publishedBundleKey"], self.store.objects)
+        self.assertNotIn("publishedBundleKey", data)
+        self.assertNotIn("publishedBundleKey", publish["body"])
+        bundle = next(item for item in self.store.objects.values() if item.get("safeArticlePath") == "/blog/publicar")
+        self.assertEqual(bundle["safeArticlePath"], "/blog/publicar")
+        self.assertEqual(bundle["category"]["taxonomyId"], "cat-blog")
+        self.assertEqual(bundle["tags"][0]["taxonomyId"], "tag-seo")
+        self.assertEqual(bundle["commentPolicy"], "moderated")
+        self.assertEqual(bundle["seo"]["canonicalMode"], "custom")
+        self.assertEqual(bundle["seo"]["canonical"], "https://zoositioweb.com.mx/blog/publicar")
+        self.assertEqual(bundle["analytics"]["piiPolicy"], "no-pii")
         self.assertNotIn("bucket", publish["body"].lower())
+
+    def test_public_preview_uses_latest_revision_when_revision_id_is_omitted(self):
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Preview latest"},
+        )
+        article_id = body(create)["data"]["article"]["articleId"]
+        publish = self.request(
+            "/features/content-hub/action",
+            {"action": "publish", "articleId": article_id},
+            {"path": "/blog/preview-latest"},
+        )
+        self.assertEqual(publish["statusCode"], 200)
+
+        preview = self.request(
+            "/features/content-hub/read",
+            {"read": "publicBundlePreview", "articleId": article_id},
+            csrf=False,
+        )
+        self.assertEqual(preview["statusCode"], 200)
+        self.assertEqual(body(preview)["data"]["bundle"]["articleId"], article_id)
+
+    def test_update_package_and_restore_do_not_expose_storage_keys(self):
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Restaurar"},
+        )
+        article_id = body(create)["data"]["article"]["articleId"]
+        update = self.request(
+            "/features/content-hub/action",
+            {"action": "updatePackage"},
+            {"articleId": article_id, "revisionId": "rev_restore", "components": []},
+        )
+        self.assertEqual(update["statusCode"], 200)
+        self.assertNotIn("packageKey", update["body"])
+
+        restore = self.request(
+            "/features/content-hub/action",
+            {"action": "restoreRevision"},
+            {"articleId": article_id, "revisionId": "rev_restore"},
+        )
+        self.assertEqual(restore["statusCode"], 200)
+        self.assertEqual(body(restore)["data"]["revisionId"], "rev_restore")
+
+    def test_queue_comment_redacts_private_contact_values(self):
+        response = self.request(
+            "/features/content-hub/action",
+            {"action": "queueComment", "articleId": "art_123"},
+            {"commentText": "Escríbeme a persona@example.com o +52 555 555 5555"},
+        )
+        self.assertEqual(response["statusCode"], 200)
+        queued = body(response)["data"]["comment"]
+        self.assertEqual(queued["status"], "queued")
+        self.assertIn("[redacted-email]", queued["bodyPreview"])
+        self.assertIn("[redacted-phone]", queued["bodyPreview"])
+        self.assertNotIn("persona@example.com", response["body"])
+
+    def test_record_interaction_accepts_safe_metadata_and_rejects_pii(self):
+        response = self.request(
+            "/features/content-hub/action",
+            {"action": "recordInteraction", "articleId": "art_123"},
+            {
+                "eventType": "cta",
+                "targetId": "newsletter-button",
+                "value": "click",
+                "path": "/blog/publicar",
+                "metadata": {"placement": "hero", "variant": "a"},
+            },
+        )
+        self.assertEqual(response["statusCode"], 200)
+        interaction = body(response)["data"]["interaction"]
+        self.assertEqual(interaction["metadata"]["placement"], "hero")
+        self.assertNotIn("actorHash", response["body"])
+
+        rejected = self.request(
+            "/features/content-hub/action",
+            {"action": "recordInteraction", "articleId": "art_123"},
+            {"eventType": "form", "metadata": {"email": "persona@example.com"}},
+        )
+        self.assertEqual(rejected["statusCode"], 400)
+        self.assertNotIn("persona@example.com", rejected["body"])
+
 
     def test_media_upload_accepts_public_metadata_without_signed_url(self):
         response = self.request(
@@ -303,6 +487,24 @@ class ContentHubHandlerTests(unittest.TestCase):
         )
         self.assertEqual(response["statusCode"], 200)
         self.assertEqual(body(response)["data"]["asset"]["kind"], "image")
+
+    def test_media_upload_accepts_browser_upload_bridge_data_base64(self):
+        response = self.request(
+            "/features/content-hub/action",
+            {"action": "uploadAsset"},
+            {
+                "upload": {
+                    "name": "foto.png",
+                    "mimeType": "image/png",
+                    "dataBase64": base64.b64encode(b"asset").decode("ascii"),
+                },
+                "metadata": {"alt": "Foto del editor"},
+            },
+        )
+        self.assertEqual(response["statusCode"], 200)
+        asset = body(response)["data"]["asset"]
+        self.assertEqual(asset["kind"], "image")
+        self.assertEqual(asset["fileName"], "foto.png")
 
     def test_media_upload_rejects_signed_url(self):
         response = self.request(
