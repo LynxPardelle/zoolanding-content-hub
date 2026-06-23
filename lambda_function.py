@@ -526,6 +526,9 @@ def _set_article_status(
     return {"articleId": article_id, "status": status}
 
 
+_CONFIG_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
+
+
 def load_config() -> dict[str, Any]:
     raw = os.getenv(CONFIG_ENV_JSON)
     if not raw:
@@ -534,6 +537,10 @@ def load_config() -> dict[str, Any]:
             raw = base64.b64decode(encoded).decode("utf-8")
     if not raw:
         raise ContentHubConfigError("Content hub config is required")
+    cache_key = (raw, os.getenv(ENVIRONMENT_ENV, "dev"))
+    cached = _CONFIG_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
     try:
         config = json.loads(raw)
     except Exception as exc:
@@ -542,7 +549,10 @@ def load_config() -> dict[str, Any]:
     if config.get("version") != 1 or not isinstance(config.get("profiles"), list):
         raise ContentHubConfigError("Content hub config version/profiles are invalid")
     profiles = [_normalize_profile(profile) for profile in config["profiles"]]
-    return {"version": 1, "profiles": profiles}
+    normalized = {"version": 1, "profiles": profiles}
+    _CONFIG_CACHE.clear()
+    _CONFIG_CACHE[cache_key] = normalized
+    return normalized
 
 
 def _normalize_profile(profile: Any) -> dict[str, Any]:
@@ -661,39 +671,51 @@ class DynamoContentHubStore:
         self.interactions_table_name = _env_required(INTERACTIONS_TABLE_ENV)
         self.packages_bucket_name = _env_required(PACKAGES_BUCKET_ENV)
         self.dynamodb = _dynamodb_resource()
-        self.s3 = _s3_client()
+        self._s3 = None
+        self._tables: dict[str, Any] = {}
+
+    def table(self, table_name: str) -> Any:
+        if table_name not in self._tables:
+            self._tables[table_name] = self.dynamodb.Table(table_name)
+        return self._tables[table_name]
+
+    @property
+    def s3(self) -> Any:
+        if self._s3 is None:
+            self._s3 = _s3_client()
+        return self._s3
 
     def get_auth_session(self, session_hash: str) -> Optional[dict[str, Any]]:
-        return self.dynamodb.Table(self.auth_session_table_name).get_item(Key={"sessionIdHash": session_hash}).get("Item")
+        return self.table(self.auth_session_table_name).get_item(Key={"sessionIdHash": session_hash}).get("Item")
 
     def get_auth_user(self, tenant_profile_key: str, user_key: str) -> Optional[dict[str, Any]]:
-        return self.dynamodb.Table(self.auth_user_table_name).get_item(
+        return self.table(self.auth_user_table_name).get_item(
             Key={"tenantProfileKey": tenant_profile_key, "userKey": user_key}
         ).get("Item")
 
     def get_metadata(self, pk: str, sk: str) -> Optional[dict[str, Any]]:
-        return self.dynamodb.Table(self.metadata_table_name).get_item(Key={"pk": pk, "sk": sk}).get("Item")
+        return self.table(self.metadata_table_name).get_item(Key={"pk": pk, "sk": sk}).get("Item")
 
     def put_metadata(self, item: dict[str, Any]) -> None:
-        self.dynamodb.Table(self.metadata_table_name).put_item(Item=_without_empty(item))
+        self.table(self.metadata_table_name).put_item(Item=_without_empty(item))
 
     def update_metadata(self, pk: str, sk: str, updates: dict[str, Any]) -> dict[str, Any]:
-        return _update_item(self.dynamodb.Table(self.metadata_table_name), {"pk": pk, "sk": sk}, updates)
+        return _update_item(self.table(self.metadata_table_name), {"pk": pk, "sk": sk}, updates)
 
     def query_metadata(self, pk: str, sk_prefix: str) -> list[dict[str, Any]]:
-        return _query_items(self.dynamodb.Table(self.metadata_table_name), pk, sk_prefix)
+        return _query_items(self.table(self.metadata_table_name), pk, sk_prefix)
 
     def put_media(self, item: dict[str, Any]) -> None:
-        self.dynamodb.Table(self.media_table_name).put_item(Item=_without_empty(item))
+        self.table(self.media_table_name).put_item(Item=_without_empty(item))
 
     def query_media(self, pk: str, sk_prefix: str) -> list[dict[str, Any]]:
-        return _query_items(self.dynamodb.Table(self.media_table_name), pk, sk_prefix)
+        return _query_items(self.table(self.media_table_name), pk, sk_prefix)
 
     def put_moderation(self, item: dict[str, Any]) -> None:
-        self.dynamodb.Table(self.moderation_table_name).put_item(Item=_without_empty(item))
+        self.table(self.moderation_table_name).put_item(Item=_without_empty(item))
 
     def query_moderation(self, pk: str, sk_prefix: str) -> list[dict[str, Any]]:
-        return _query_items(self.dynamodb.Table(self.moderation_table_name), pk, sk_prefix)
+        return _query_items(self.table(self.moderation_table_name), pk, sk_prefix)
 
     def put_json(self, key: str, payload: dict[str, Any]) -> None:
         self.s3.put_object(

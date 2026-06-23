@@ -168,6 +168,7 @@ class ContentHubHandlerTests(unittest.TestCase):
     def tearDown(self):
         self.store_patch.stop()
         self.env_patch.stop()
+        content_hub._CONFIG_CACHE.clear()
 
     def request(self, path, binding, extra=None, **kwargs):
         payload = {
@@ -225,6 +226,36 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertEqual(read["statusCode"], 200)
         self.assertEqual(len(body(read)["data"]["items"]), 1)
         self.assertNotIn("packageKey", read["body"])
+
+    def test_config_is_cached_for_same_environment(self):
+        first = content_hub.load_config()
+        with patch("lambda_function.json.loads") as loads:
+            second = content_hub.load_config()
+        self.assertIs(second, first)
+        loads.assert_not_called()
+
+    def test_store_does_not_create_s3_client_until_object_storage_is_used(self):
+        env = {
+            "AUTH_SESSION_TABLE_NAME": "auth-session",
+            "AUTH_USER_STATE_TABLE_NAME": "auth-user",
+            "CONTENT_HUB_METADATA_TABLE_NAME": "metadata",
+            "CONTENT_HUB_MEDIA_TABLE_NAME": "media",
+            "CONTENT_HUB_MODERATION_TABLE_NAME": "moderation",
+            "CONTENT_HUB_INTERACTIONS_TABLE_NAME": "interactions",
+            "CONTENT_HUB_PACKAGES_BUCKET_NAME": "packages",
+        }
+        fake_dynamodb = unittest.mock.Mock()
+        with patch.dict(os.environ, env, clear=True), \
+             patch("lambda_function._dynamodb_resource", return_value=fake_dynamodb), \
+             patch("lambda_function._s3_client") as s3_client:
+            store = content_hub.DynamoContentHubStore()
+            s3_client.assert_not_called()
+
+            store.query_metadata("HUB#zoosite-main", "ARTICLE#")
+            s3_client.assert_not_called()
+
+            _ = store.s3
+            s3_client.assert_called_once()
 
     def test_editor_cannot_publish_without_publish_role(self):
         self.store.roles = ["zoosite-blog-editor"]
