@@ -262,6 +262,28 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertEqual(body(read)["data"]["items"][0]["canonicalUrl"], "https://zoositioweb.com.mx/blog/seo-local")
         self.assertNotIn("updatedBy", read["body"])
 
+    def test_create_article_accepts_draft_policy_aliases_and_comma_tags(self):
+        self.store.roles = ["zoosite-blog-editor"]
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {
+                "articleTitle": "Editor visual",
+                "articleTags": "seo, blog-builder",
+                "articleCanonicalPolicy": "creator-domain",
+                "articleCommentPolicy": "authenticated-moderated",
+                "articleContentSafetyPolicy": "advanced-freeform",
+                "articleVisibility": "private-draft",
+            },
+        )
+        self.assertEqual(create["statusCode"], 200)
+        article = body(create)["data"]["article"]
+        self.assertEqual(article["canonicalMode"], "self")
+        self.assertEqual(article["commentPolicy"], "authenticated")
+        self.assertEqual(article["contentSafety"]["rating"], "sensitive")
+        self.assertEqual(article["visibility"], "private")
+        self.assertEqual([item["taxonomyId"] for item in article["tags"]], ["seo", "blog-builder"])
+
     def test_taxonomy_upsert_and_list_exposes_safe_fields(self):
         self.store.roles = ["zoosite-blog-editor"]
         upsert = self.request(
@@ -269,7 +291,7 @@ class ContentHubHandlerTests(unittest.TestCase):
             {"action": "upsertTaxonomy", "taxonomyKind": "category"},
             {
                 "taxonomyId": "cat-blog",
-                "label": "Blog",
+                "translation": "Blog",
                 "description": "Categoría principal",
                 "seoTitle": "Blog Zoosite",
                 "visible": True,
@@ -356,8 +378,9 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertEqual(publish["statusCode"], 200)
         data = body(publish)["data"]
         self.assertEqual(data["path"], "/blog/publicar")
-        self.assertIn(data["publishedBundleKey"], self.store.objects)
-        bundle = self.store.objects[data["publishedBundleKey"]]
+        self.assertNotIn("publishedBundleKey", data)
+        self.assertNotIn("publishedBundleKey", publish["body"])
+        bundle = next(item for item in self.store.objects.values() if item.get("safeArticlePath") == "/blog/publicar")
         self.assertEqual(bundle["safeArticlePath"], "/blog/publicar")
         self.assertEqual(bundle["category"]["taxonomyId"], "cat-blog")
         self.assertEqual(bundle["tags"][0]["taxonomyId"], "tag-seo")
@@ -366,6 +389,51 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertEqual(bundle["seo"]["canonical"], "https://zoositioweb.com.mx/blog/publicar")
         self.assertEqual(bundle["analytics"]["piiPolicy"], "no-pii")
         self.assertNotIn("bucket", publish["body"].lower())
+
+    def test_public_preview_uses_latest_revision_when_revision_id_is_omitted(self):
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Preview latest"},
+        )
+        article_id = body(create)["data"]["article"]["articleId"]
+        publish = self.request(
+            "/features/content-hub/action",
+            {"action": "publish", "articleId": article_id},
+            {"path": "/blog/preview-latest"},
+        )
+        self.assertEqual(publish["statusCode"], 200)
+
+        preview = self.request(
+            "/features/content-hub/read",
+            {"read": "publicBundlePreview", "articleId": article_id},
+            csrf=False,
+        )
+        self.assertEqual(preview["statusCode"], 200)
+        self.assertEqual(body(preview)["data"]["bundle"]["articleId"], article_id)
+
+    def test_update_package_and_restore_do_not_expose_storage_keys(self):
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Restaurar"},
+        )
+        article_id = body(create)["data"]["article"]["articleId"]
+        update = self.request(
+            "/features/content-hub/action",
+            {"action": "updatePackage"},
+            {"articleId": article_id, "revisionId": "rev_restore", "components": []},
+        )
+        self.assertEqual(update["statusCode"], 200)
+        self.assertNotIn("packageKey", update["body"])
+
+        restore = self.request(
+            "/features/content-hub/action",
+            {"action": "restoreRevision"},
+            {"articleId": article_id, "revisionId": "rev_restore"},
+        )
+        self.assertEqual(restore["statusCode"], 200)
+        self.assertEqual(body(restore)["data"]["revisionId"], "rev_restore")
 
     def test_queue_comment_redacts_private_contact_values(self):
         response = self.request(
@@ -419,6 +487,24 @@ class ContentHubHandlerTests(unittest.TestCase):
         )
         self.assertEqual(response["statusCode"], 200)
         self.assertEqual(body(response)["data"]["asset"]["kind"], "image")
+
+    def test_media_upload_accepts_browser_upload_bridge_data_base64(self):
+        response = self.request(
+            "/features/content-hub/action",
+            {"action": "uploadAsset"},
+            {
+                "upload": {
+                    "name": "foto.png",
+                    "mimeType": "image/png",
+                    "dataBase64": base64.b64encode(b"asset").decode("ascii"),
+                },
+                "metadata": {"alt": "Foto del editor"},
+            },
+        )
+        self.assertEqual(response["statusCode"], 200)
+        asset = body(response)["data"]["asset"]
+        self.assertEqual(asset["kind"], "image")
+        self.assertEqual(asset["fileName"], "foto.png")
 
     def test_media_upload_rejects_signed_url(self):
         response = self.request(

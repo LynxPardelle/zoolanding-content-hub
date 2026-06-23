@@ -209,7 +209,13 @@ def _handle_read(
         return {"items": [_moderation_summary(item) for item in store.query_moderation(f"HUB#{hub_id}", "MODERATION#")]}
     if read_kind == "publicBundlePreview":
         article_id = _safe_id(binding.get("articleId") or _input_field(payload, "articleId"))
-        revision_id = _safe_id(binding.get("revisionId") or _input_field(payload, "revisionId"))
+        revision_value = binding.get("revisionId") or _input_field(payload, "revisionId")
+        if not _clean_string(revision_value):
+            article = store.get_metadata(f"HUB#{hub_id}", f"ARTICLE#{article_id}")
+            if not article:
+                raise ContentHubNotFound()
+            revision_value = article.get("latestRevisionId")
+        revision_id = _safe_id(revision_value)
         locale = _locale(binding.get("language") or _input_field(payload, "language") or hub.get("defaultLocale") or "es")
         render_domain = _domain(_input_field(payload, "renderDomain") or profile["domain"])
         key = _published_bundle_key(profile, hub_id, render_domain, locale, article_id, revision_id)
@@ -372,7 +378,7 @@ def _update_package(
         "updatedBy": session["subject"],
         **metadata_updates,
     })
-    return {"revision": _revision_summary(revision), "packageKey": revision["packageKey"]}
+    return {"revision": _revision_summary(revision)}
 
 
 def _validate_article(payload: dict[str, Any], binding: dict[str, Any], profile: dict[str, Any], hub: dict[str, Any]) -> dict[str, Any]:
@@ -471,7 +477,7 @@ def _publish_article(
         "publishedBundleKey": key,
         "updatedAt": now,
     })
-    return {"articleId": article_id, "revisionId": revision_id, "publishedBundleKey": key, "path": path, "publishedAt": now}
+    return {"articleId": article_id, "revisionId": revision_id, "path": path, "publishedAt": now}
 
 
 def _schedule_article(
@@ -643,9 +649,9 @@ def _restore_revision(
     profile: dict[str, Any],
     hub: dict[str, Any],
 ) -> dict[str, Any]:
-    del payload, profile
-    article_id = _safe_id(binding.get("articleId"))
-    revision_id = _safe_id(binding.get("revisionId"))
+    del profile
+    article_id = _safe_id(binding.get("articleId") or _input_field(payload, "articleId"))
+    revision_id = _safe_id(binding.get("revisionId") or _input_field(payload, "revisionId"))
     if not _store().get_metadata(f"ARTICLE#{article_id}", f"REVISION#{revision_id}"):
         raise ContentHubNotFound("Revision not found")
     _store().update_metadata(f"HUB#{hub['hubId']}", f"ARTICLE#{article_id}", {
@@ -942,17 +948,18 @@ def _input_field(payload: dict[str, Any], key: str) -> Any:
         "language": ["articleLanguage", "locale"],
         "summary": ["articleSummary"],
         "slug": ["articleSlug"],
+        "visibility": ["articleVisibility"],
         "seoTitle": ["articleSeoTitle"],
         "seoDescription": ["articleSeoDescription"],
         "robots": ["seoRobots", "articleRobots"],
         "category": ["categoryId", "articleCategory", "articleCategoryId", "primaryCategory", "primaryCategoryId"],
         "tags": ["tagIds", "articleTags"],
         "commentPolicy": ["comments.policy", "articleCommentPolicy"],
-        "contentSafety": ["safety", "articleContentSafety"],
-        "canonicalMode": ["canonical.mode", "articleCanonicalMode"],
+        "contentSafety": ["safety", "articleContentSafety", "articleContentSafetyPolicy"],
+        "canonicalMode": ["canonical.mode", "articleCanonicalMode", "articleCanonicalPolicy"],
         "canonicalUrl": ["canonical.url", "canonical.path", "canonicalPath", "articleCanonicalUrl"],
         "taxonomyKind": ["kind"],
-        "label": ["taxonomyLabel", "displayName"],
+        "label": ["taxonomyLabel", "displayName", "translation"],
         "description": ["taxonomyDescription"],
         "parentId": ["parentTaxonomyId"],
         "visible": ["isVisible"],
@@ -965,10 +972,10 @@ def _input_field(payload: dict[str, Any], key: str) -> Any:
         "metadata": ["event.metadata", "interaction.metadata"],
         "scheduledAt": ["publishAt"],
         "moderationStatus": ["decision"],
-        "fileName": ["upload.fileName", "metadata.fileName"],
+        "fileName": ["upload.fileName", "upload.name", "metadata.fileName"],
         "mimeType": ["upload.mimeType", "metadata.mimeType"],
         "publicUrl": ["upload.publicUrl", "metadata.publicUrl"],
-        "base64": ["upload.base64"],
+        "base64": ["upload.base64", "upload.dataBase64", "upload.file.base64", "upload.file.dataBase64", "dataBase64", "file.dataBase64"],
         "bytes": ["upload.bytes", "metadata.bytes"],
         "alt": ["metadata.alt"],
     }.get(key, [])
@@ -1330,7 +1337,14 @@ def _safe_text(value: Any, *, max_length: int) -> str:
 
 
 def _visibility(value: Any) -> str:
-    visibility = _safe_id(value)
+    aliases = {
+        "private-draft": "private",
+        "draft-private": "private",
+        "review-ready": "private",
+        "ready-for-review": "private",
+        "published": "public",
+    }
+    visibility = aliases.get(_clean_string(value), _safe_id(value))
     if visibility not in {"public", "unlisted", "protected", "private"}:
         raise ContentHubError("Invalid visibility")
     return visibility
@@ -1376,7 +1390,15 @@ def _safe_canonical_url(value: Any) -> str:
 
 
 def _canonical_mode(value: Any) -> str:
-    mode = _safe_id(value)
+    aliases = {
+        "creator-domain": "self",
+        "host-adaptive": "self",
+        "draft-domain": "self",
+        "canonical-url": "custom",
+        "custom-url": "custom",
+        "disabled": "none",
+    }
+    mode = aliases.get(_clean_string(value), _safe_id(value))
     if mode not in {"self", "custom", "none"}:
         raise ContentHubError("Invalid canonical mode")
     return mode
@@ -1401,7 +1423,14 @@ def _robots_policy(value: Any) -> str:
 
 
 def _comment_policy(value: Any) -> str:
-    policy = _safe_id(value)
+    aliases = {
+        "authenticated-moderated": "authenticated",
+        "auth-moderated": "authenticated",
+        "public-moderated": "moderated",
+        "moderation": "moderated",
+        "off": "disabled",
+    }
+    policy = aliases.get(_clean_string(value), _safe_id(value))
     if policy not in {"disabled", "moderated", "authenticated"}:
         raise ContentHubError("Invalid comment policy")
     return policy
@@ -1412,6 +1441,19 @@ def _content_safety(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _content_safety_from_value(value: Any) -> dict[str, Any]:
+    if isinstance(value, str):
+        aliases = {
+            "trusted-authors": "general",
+            "advanced-freeform": "sensitive",
+            "strict": "restricted",
+            "general": "general",
+            "sensitive": "sensitive",
+            "restricted": "restricted",
+        }
+        rating = aliases.get(_clean_string(value), "")
+        if not rating:
+            raise ContentHubError("Invalid content safety rating")
+        return {"rating": rating, "warnings": []}
     if not isinstance(value, dict):
         return {"rating": "general", "warnings": []}
     rating = _safe_id(value.get("rating") or value.get("audience") or "general")
@@ -1441,7 +1483,8 @@ def _taxonomy_ref(value: Any) -> dict[str, Any]:
 
 def _taxonomy_refs(value: Any) -> list[dict[str, Any]]:
     refs = []
-    for item in _list_value(value):
+    items = [part.strip() for part in value.split(",")] if isinstance(value, str) else _list_value(value)
+    for item in items:
         ref = _taxonomy_ref(item)
         if ref:
             refs.append(ref)
