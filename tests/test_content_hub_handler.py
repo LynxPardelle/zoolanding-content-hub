@@ -231,6 +231,27 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertEqual(len(body(read)["data"]["items"]), 1)
         self.assertNotIn("packageKey", read["body"])
 
+        detail = self.request(
+            "/features/content-hub/read",
+            {"read": "articleDetail"},
+            {"articleId": article_id},
+            csrf=False,
+        )
+        self.assertEqual(detail["statusCode"], 200)
+        self.assertEqual(body(detail)["data"]["item"]["articleId"], article_id)
+        self.assertEqual(body(detail)["data"]["item"]["title"], "Blog builder SEO")
+        self.assertEqual(body(detail)["data"]["item"]["summary"], "Guía de SEO")
+        self.assertNotIn("packageKey", detail["body"])
+
+    def test_article_detail_requires_existing_article(self):
+        read = self.request(
+            "/features/content-hub/read",
+            {"read": "articleDetail"},
+            {"articleId": "missing-article"},
+            csrf=False,
+        )
+        self.assertEqual(read["statusCode"], 404)
+
     def test_create_article_stores_blog_metadata_and_public_summary(self):
         self.store.roles = ["zoosite-blog-editor"]
         create = self.request(
