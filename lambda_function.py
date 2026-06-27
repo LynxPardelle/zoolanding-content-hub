@@ -50,6 +50,7 @@ UNSAFE_VALUE_RE = re.compile(
 
 READ_CAPABILITIES = {
     "articleList": "read",
+    "articleDetail": "read",
     "taxonomyList": "read",
     "assetList": "read",
     "revisionList": "read",
@@ -191,6 +192,14 @@ def _handle_read(
     hub_id = hub["hubId"]
     if read_kind == "articleList":
         return {"items": [_article_summary(item) for item in store.query_metadata(f"HUB#{hub_id}", "ARTICLE#")]}
+    if read_kind == "articleDetail":
+        article_id = _safe_id(binding.get("articleId") or _input_field(payload, "articleId"))
+        if not article_id:
+            raise ContentHubError("articleId is required")
+        article = store.get_metadata(f"HUB#{hub_id}", f"ARTICLE#{article_id}")
+        if not article:
+            raise ContentHubNotFound()
+        return {"item": _article_summary(article)}
     if read_kind == "taxonomyList":
         taxonomy_kind = _clean_string(binding.get("taxonomyKind") or _input_field(payload, "taxonomyKind"))
         sk_prefix = f"TAXONOMY#{taxonomy_kind}#" if taxonomy_kind in {"category", "tag"} else "TAXONOMY#"
