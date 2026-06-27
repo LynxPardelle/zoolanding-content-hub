@@ -22,6 +22,7 @@ The browser sends:
 ## Supported Reads
 
 - `articleList`
+- `articleDetail`
 - `taxonomyList`
 - `moderationQueue`
 - `assetList`
@@ -45,7 +46,7 @@ The browser sends:
 
 ## Blog MVP Safety Notes
 
-- `createArticle` and `articleList` carry public-safe SEO, category, tags, comment policy, content safety, canonical, and path metadata.
+- `createArticle`, `articleList`, and `articleDetail` carry public-safe SEO, category, tags, comment policy, content safety, canonical, and path metadata.
 - `upsertTaxonomy` stores category/tag administration metadata in DynamoDB and returns only safe taxonomy summaries.
 - `publish` writes public bundles with SEO, taxonomy, analytics context, comment policy, canonical mode, and safe article path fields.
 - `queueComment` and `recordInteraction` remain protected, authenticated, and CSRF-checked actions in this BFF. Public unauthenticated comments, likes, CTA clicks, or form submissions should use a separate public ingestion surface with its own abuse controls; this BFF depends on auth-admin sessions by design.
