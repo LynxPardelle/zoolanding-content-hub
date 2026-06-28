@@ -5,6 +5,7 @@ import json
 import os
 import re
 import time
+import unicodedata
 from decimal import Decimal
 from typing import Any, Optional
 
@@ -1314,6 +1315,13 @@ def _safe_id(value: Any) -> str:
     return safe_id
 
 
+def _safe_id_or_slug(value: Any) -> str:
+    text = _clean_string(value)
+    if SAFE_ID_RE.fullmatch(text):
+        return text
+    return _slug(text, fallback="")
+
+
 def _locale(value: Any) -> str:
     locale = _clean_string(value).lower()
     if not LOCALE_RE.fullmatch(locale):
@@ -1321,11 +1329,18 @@ def _locale(value: Any) -> str:
     return locale
 
 
-def _slug(value: Any) -> str:
+def _slug_source(value: Any) -> str:
     text = _clean_string(value).lower()
+    return unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+
+
+def _slug(value: Any, *, fallback: str = "article") -> str:
+    text = _slug_source(value)
     text = re.sub(r"[^a-z0-9]+", "-", text).strip("-")
     if not text:
-        text = "article"
+        if not fallback:
+            raise ContentHubError("Invalid slug")
+        text = fallback
     if not SLUG_RE.fullmatch(text):
         raise ContentHubError("Invalid slug")
     return text[:96]
@@ -1345,18 +1360,35 @@ def _safe_text(value: Any, *, max_length: int) -> str:
     return text[:max_length]
 
 
+def _choice(value: Any, *, aliases: dict[str, str], allowed: set[str], error_message: str) -> str:
+    text = _clean_string(value)
+    key = _slug(text)
+    choice = aliases.get(key)
+    if choice is None:
+        choice = text if SAFE_ID_RE.fullmatch(text) else key
+    if choice not in allowed:
+        raise ContentHubError(error_message)
+    return choice
+
+
 def _visibility(value: Any) -> str:
-    aliases = {
-        "private-draft": "private",
-        "draft-private": "private",
-        "review-ready": "private",
-        "ready-for-review": "private",
-        "published": "public",
-    }
-    visibility = aliases.get(_clean_string(value), _safe_id(value))
-    if visibility not in {"public", "unlisted", "protected", "private"}:
-        raise ContentHubError("Invalid visibility")
-    return visibility
+    return _choice(
+        value,
+        aliases={
+            "private-draft": "private",
+            "draft-private": "private",
+            "review-ready": "private",
+            "ready-for-review": "private",
+            "listo-para-revision": "private",
+            "borrador-privado": "private",
+            "published": "public",
+            "publicado": "public",
+            "no-listado": "unlisted",
+            "protegido": "protected",
+        },
+        allowed={"public", "unlisted", "protected", "private"},
+        error_message="Invalid visibility",
+    )
 
 
 def _asset_kind(mime_type: str) -> str:
@@ -1399,18 +1431,23 @@ def _safe_canonical_url(value: Any) -> str:
 
 
 def _canonical_mode(value: Any) -> str:
-    aliases = {
-        "creator-domain": "self",
-        "host-adaptive": "self",
-        "draft-domain": "self",
-        "canonical-url": "custom",
-        "custom-url": "custom",
-        "disabled": "none",
-    }
-    mode = aliases.get(_clean_string(value), _safe_id(value))
-    if mode not in {"self", "custom", "none"}:
-        raise ContentHubError("Invalid canonical mode")
-    return mode
+    return _choice(
+        value,
+        aliases={
+            "creator-domain": "self",
+            "host-adaptive": "self",
+            "draft-domain": "self",
+            "adaptable-al-sitio-actual": "self",
+            "sitio-actual": "self",
+            "canonical-url": "custom",
+            "custom-url": "custom",
+            "url-personalizada": "custom",
+            "disabled": "none",
+            "desactivado": "none",
+        },
+        allowed={"self", "custom", "none"},
+        error_message="Invalid canonical mode",
+    )
 
 
 def _canonical_for_publish(mode: str, canonical_url: str, path: str) -> str:
@@ -1432,17 +1469,22 @@ def _robots_policy(value: Any) -> str:
 
 
 def _comment_policy(value: Any) -> str:
-    aliases = {
-        "authenticated-moderated": "authenticated",
-        "auth-moderated": "authenticated",
-        "public-moderated": "moderated",
-        "moderation": "moderated",
-        "off": "disabled",
-    }
-    policy = aliases.get(_clean_string(value), _safe_id(value))
-    if policy not in {"disabled", "moderated", "authenticated"}:
-        raise ContentHubError("Invalid comment policy")
-    return policy
+    return _choice(
+        value,
+        aliases={
+            "authenticated-moderated": "authenticated",
+            "auth-moderated": "authenticated",
+            "autenticados-moderacion": "authenticated",
+            "public-moderated": "moderated",
+            "publicos-moderacion": "moderated",
+            "moderation": "moderated",
+            "moderacion": "moderated",
+            "off": "disabled",
+            "desactivados": "disabled",
+        },
+        allowed={"disabled", "moderated", "authenticated"},
+        error_message="Invalid comment policy",
+    )
 
 
 def _content_safety(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1453,13 +1495,16 @@ def _content_safety_from_value(value: Any) -> dict[str, Any]:
     if isinstance(value, str):
         aliases = {
             "trusted-authors": "general",
+            "autores-confiables": "general",
             "advanced-freeform": "sensitive",
+            "avanzado-libre": "sensitive",
             "strict": "restricted",
+            "estricto": "restricted",
             "general": "general",
             "sensitive": "sensitive",
             "restricted": "restricted",
         }
-        rating = aliases.get(_clean_string(value), "")
+        rating = aliases.get(_slug(value), "")
         if not rating:
             raise ContentHubError("Invalid content safety rating")
         return {"rating": rating, "warnings": []}
@@ -1481,7 +1526,7 @@ def _taxonomy_ref(value: Any) -> dict[str, Any]:
         text = _clean_string(value)
         if not text:
             return {}
-        return {"taxonomyId": _safe_id(text)}
+        return {"taxonomyId": _safe_id_or_slug(text), "slug": _slug(text, fallback=""), "label": _safe_text(text, max_length=120)}
     if not isinstance(value, dict):
         raise ContentHubError("Invalid taxonomy reference")
     taxonomy_id = _optional_safe_id(value.get("taxonomyId") or value.get("id"))
