@@ -427,9 +427,12 @@ def _publish_article(
     if not revision:
         raise ContentHubNotFound("Revision not found")
     package = store.get_json(revision["packageKey"])
-    path = _article_path(_input_field(payload, "path") or f"/blog/{_slug(article.get('title') or article_id)}")
-    canonical_mode = _canonical_mode(_input_field(payload, "canonicalMode") or article.get("canonicalMode") or "self")
-    canonical_url = _safe_canonical_url(_input_field(payload, "canonicalUrl") or article.get("canonicalUrl") or "")
+    metadata_updates = _article_metadata_updates(payload)
+    article_for_publish = {**article, **metadata_updates}
+    path = _article_path(_input_field(payload, "path") or _default_article_path(article_for_publish))
+    canonical_mode = _canonical_mode(_input_field(payload, "canonicalMode") or article_for_publish.get("canonicalMode") or "self")
+    canonical_url = _safe_canonical_url(_input_field(payload, "canonicalUrl") or article_for_publish.get("canonicalUrl") or "")
+    published_visibility = _visibility(_input_field(payload, "publishVisibility") or _input_field(payload, "visibility") or "public")
     now = _now_iso()
     bundle = {
         "version": 1,
@@ -442,20 +445,21 @@ def _publish_article(
         "path": path,
         "safeArticlePath": path,
         "status": "published",
+        "visibility": published_visibility,
         "publishedAt": now,
-        "title": article.get("title"),
-        "summary": article.get("summary"),
-        "slug": article.get("slug") or _slug(article.get("title") or article_id),
-        "category": _taxonomy_ref(article.get("category")),
-        "tags": _taxonomy_refs(article.get("tags")),
-        "commentPolicy": _comment_policy(article.get("commentPolicy") or "moderated"),
-        "contentSafety": _content_safety_from_value(article.get("contentSafety")),
+        "title": article_for_publish.get("title"),
+        "summary": article_for_publish.get("summary"),
+        "slug": article_for_publish.get("slug") or _slug(article_for_publish.get("title") or article_id),
+        "category": _taxonomy_ref(article_for_publish.get("category")),
+        "tags": _taxonomy_refs(article_for_publish.get("tags")),
+        "commentPolicy": _comment_policy(article_for_publish.get("commentPolicy") or "moderated"),
+        "contentSafety": _content_safety_from_value(article_for_publish.get("contentSafety")),
         "seo": {
-            "title": _safe_text(_input_field(payload, "seoTitle") or article.get("seoTitle") or article.get("title") or article_id, max_length=160),
-            "description": _safe_text(_input_field(payload, "seoDescription") or article.get("seoDescription") or article.get("summary") or "", max_length=320),
+            "title": _safe_text(_input_field(payload, "seoTitle") or article_for_publish.get("seoTitle") or article_for_publish.get("title") or article_id, max_length=160),
+            "description": _safe_text(_input_field(payload, "seoDescription") or article_for_publish.get("seoDescription") or article_for_publish.get("summary") or "", max_length=320),
             "canonical": _canonical_for_publish(canonical_mode, canonical_url, path),
             "canonicalMode": canonical_mode,
-            "robots": _robots_policy(_input_field(payload, "robots") or article.get("robots") or "index,follow"),
+            "robots": _robots_policy(_input_field(payload, "robots") or article_for_publish.get("robots") or "index,follow"),
         },
         "structuredData": [],
         "components": package.get("components") if isinstance(package, dict) else [],
@@ -468,12 +472,14 @@ def _publish_article(
     store.update_metadata(f"HUB#{hub['hubId']}", f"ARTICLE#{article_id}", {
         "status": "published",
         "publishedAt": now,
+        "visibility": published_visibility,
         "latestRevisionId": revision_id,
         "path": path,
         "canonicalMode": canonical_mode,
         "canonicalUrl": canonical_url,
         "updatedAt": now,
         "updatedBy": session["subject"],
+        **metadata_updates,
     })
     store.put_metadata({
         "pk": f"SLUG#{profile['environment']}#{render_domain}#{locale}",
@@ -483,6 +489,7 @@ def _publish_article(
         "articleId": article_id,
         "revisionId": revision_id,
         "path": path,
+        "visibility": published_visibility,
         "publishedBundleKey": key,
         "updatedAt": now,
     })
@@ -1329,6 +1336,23 @@ def _slug(value: Any) -> str:
     if not SLUG_RE.fullmatch(text):
         raise ContentHubError("Invalid slug")
     return text[:96]
+
+
+def _taxonomy_slug(value: Any) -> str:
+    ref = _taxonomy_ref(value)
+    if not ref:
+        return ""
+    for field in ("slug", "taxonomyId", "label"):
+        raw = ref.get(field)
+        if raw:
+            return _slug(raw)
+    return ""
+
+
+def _default_article_path(article: dict[str, Any]) -> str:
+    article_slug = _slug(article.get("slug") or article.get("title") or article.get("articleId") or "article")
+    category_slug = _taxonomy_slug(article.get("category")) or "sin-categoria"
+    return f"/blog/{category_slug}/{article_slug}"
 
 
 def _article_path(value: Any) -> str:

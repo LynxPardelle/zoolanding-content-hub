@@ -394,15 +394,16 @@ class ContentHubHandlerTests(unittest.TestCase):
         publish = self.request(
             "/features/content-hub/action",
             {"action": "publish", "articleId": article_id, "revisionId": "rev_001"},
-            {"path": "/blog/publicar", "seoDescription": "Descripción SEO"},
+            {"seoDescription": "Descripción SEO"},
         )
         self.assertEqual(publish["statusCode"], 200)
         data = body(publish)["data"]
-        self.assertEqual(data["path"], "/blog/publicar")
+        self.assertEqual(data["path"], "/blog/blog/publicar")
         self.assertNotIn("publishedBundleKey", data)
         self.assertNotIn("publishedBundleKey", publish["body"])
-        bundle = next(item for item in self.store.objects.values() if item.get("safeArticlePath") == "/blog/publicar")
-        self.assertEqual(bundle["safeArticlePath"], "/blog/publicar")
+        bundle = next(item for item in self.store.objects.values() if item.get("safeArticlePath") == "/blog/blog/publicar")
+        self.assertEqual(bundle["safeArticlePath"], "/blog/blog/publicar")
+        self.assertEqual(bundle["visibility"], "public")
         self.assertEqual(bundle["category"]["taxonomyId"], "cat-blog")
         self.assertEqual(bundle["tags"][0]["taxonomyId"], "tag-seo")
         self.assertEqual(bundle["commentPolicy"], "moderated")
@@ -410,6 +411,15 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertEqual(bundle["seo"]["canonical"], "https://zoositioweb.com.mx/blog/publicar")
         self.assertEqual(bundle["analytics"]["piiPolicy"], "no-pii")
         self.assertNotIn("bucket", publish["body"].lower())
+        article = self.store.get_metadata("HUB#zoosite-main", f"ARTICLE#{article_id}")
+        self.assertEqual(article["visibility"], "public")
+        self.assertEqual(article["path"], "/blog/blog/publicar")
+        self.assertEqual(article["seoDescription"], "Descripción SEO")
+        slug_index = self.store.get_metadata("SLUG#test#zoositioweb.com.mx#es", "PATH#/blog/blog/publicar")
+        self.assertEqual(slug_index["articleId"], article_id)
+        self.assertEqual(slug_index["revisionId"], "rev_001")
+        self.assertEqual(slug_index["visibility"], "public")
+        self.assertIn("publishedBundleKey", slug_index)
 
     def test_public_preview_uses_latest_revision_when_revision_id_is_omitted(self):
         create = self.request(
