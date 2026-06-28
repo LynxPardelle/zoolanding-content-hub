@@ -149,7 +149,10 @@ def _read_response(event: dict[str, Any]) -> dict[str, Any]:
 def _action_response(event: dict[str, Any]) -> dict[str, Any]:
     payload, session, profile, hub = _authorized_request(event, mutation=True)
     binding = _content_hub_binding(payload)
-    action_kind = _safe_id(binding.get("action"))
+    action_value = binding.get("action")
+    if not _clean_string(action_value):
+        raise ContentHubError("contentHub.action is required")
+    action_kind = _safe_id(action_value)
     if action_kind not in ACTION_CAPABILITIES:
         raise ContentHubError("Unsupported content hub action")
     _require_capability(session, profile, hub, ACTION_CAPABILITIES[action_kind])

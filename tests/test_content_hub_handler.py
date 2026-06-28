@@ -206,6 +206,15 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertEqual(response["statusCode"], 403)
         self.assertEqual(body(response)["error"], "CSRF validation failed")
 
+    def test_action_requires_content_hub_action(self):
+        response = self.request(
+            "/features/content-hub/action",
+            {},
+            {"title": "Blog builder SEO"},
+        )
+        self.assertEqual(response["statusCode"], 400)
+        self.assertEqual(body(response)["error"], "contentHub.action is required")
+
     def test_rejects_server_only_public_payload(self):
         response = self.request(
             "/features/content-hub/action",
@@ -242,6 +251,16 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertEqual(body(detail)["data"]["item"]["title"], "Blog builder SEO")
         self.assertEqual(body(detail)["data"]["item"]["summary"], "Guía de SEO")
         self.assertNotIn("packageKey", detail["body"])
+
+    def test_create_article_does_not_require_article_id(self):
+        self.store.roles = ["zoosite-blog-editor"]
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Sin id previo"},
+        )
+        self.assertEqual(create["statusCode"], 200)
+        self.assertTrue(body(create)["data"]["article"]["articleId"].startswith("art_"))
 
     def test_article_detail_requires_existing_article(self):
         read = self.request(
