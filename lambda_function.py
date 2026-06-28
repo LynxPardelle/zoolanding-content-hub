@@ -272,6 +272,10 @@ def _create_article(payload: dict[str, Any], session: dict[str, Any], profile: d
     title = _safe_text(_input_field(payload, "title") or _input_field(payload, "name") or "Nuevo artículo", max_length=160)
     locale = _locale(_input_field(payload, "language") or hub.get("defaultLocale") or "es")
     slug = _slug(_input_field(payload, "slug") or title)
+    category = _taxonomy_ref(_input_field(payload, "category") or "sin-categoria")
+    category_slug = _taxonomy_ref_slug(category) or "sin-categoria"
+    tags = _taxonomy_refs(_input_field(payload, "tags"))
+    path = _article_path(_input_field(payload, "path") or f"/blog/{category_slug}/{slug}")
     article_id = _safe_id(_input_field(payload, "articleId") or f"art_{int(time.time())}_{slug[:40]}")
     revision_id = _safe_id(_input_field(payload, "revisionId") or "rev_001")
     now = _now_iso()
@@ -293,12 +297,14 @@ def _create_article(payload: dict[str, Any], session: dict[str, Any], profile: d
         "seoTitle": _safe_text(_input_field(payload, "seoTitle") or title, max_length=160),
         "seoDescription": _safe_text(_input_field(payload, "seoDescription") or summary, max_length=320),
         "robots": _robots_policy(_input_field(payload, "robots") or "index,follow"),
-        "category": _taxonomy_ref(_input_field(payload, "category")),
-        "tags": _taxonomy_refs(_input_field(payload, "tags")),
+        "categorySlug": category_slug,
+        "category": category,
+        "tags": tags,
         "commentPolicy": _comment_policy(_input_field(payload, "commentPolicy") or "moderated"),
         "contentSafety": _content_safety(payload),
         "canonicalMode": _canonical_mode(_input_field(payload, "canonicalMode") or "self"),
         "canonicalUrl": _safe_canonical_url(_input_field(payload, "canonicalUrl") or ""),
+        "path": path,
         "primaryLocale": locale,
         "latestRevisionId": revision_id,
         "createdAt": now,
@@ -309,6 +315,7 @@ def _create_article(payload: dict[str, Any], session: dict[str, Any], profile: d
     package = _article_package(article, revision, payload, profile, hub)
     store = _store()
     store.put_metadata(article)
+    _store_article_taxonomy(store, hub["hubId"], locale, category, tags, now)
     store.put_metadata(revision)
     store.put_json(revision["packageKey"], package)
     return {"article": _article_summary(article), "revision": _revision_summary(revision)}
@@ -428,7 +435,7 @@ def _publish_article(
     if not revision:
         raise ContentHubNotFound("Revision not found")
     package = store.get_json(revision["packageKey"])
-    path = _article_path(_input_field(payload, "path") or f"/blog/{_slug(article.get('title') or article_id)}")
+    path = _article_path(_input_field(payload, "path") or article.get("path") or f"/blog/{_slug(article.get('title') or article_id)}")
     canonical_mode = _canonical_mode(_input_field(payload, "canonicalMode") or article.get("canonicalMode") or "self")
     canonical_url = _safe_canonical_url(_input_field(payload, "canonicalUrl") or article.get("canonicalUrl") or "")
     now = _now_iso()
@@ -959,6 +966,7 @@ def _input_field(payload: dict[str, Any], key: str) -> Any:
         "summary": ["articleSummary"],
         "slug": ["articleSlug"],
         "visibility": ["articleVisibility"],
+        "path": ["articlePath"],
         "seoTitle": ["articleSeoTitle"],
         "seoDescription": ["articleSeoDescription"],
         "robots": ["seoRobots", "articleRobots"],
@@ -1024,6 +1032,8 @@ def _article_package(
         "title": article.get("title"),
         "summary": article.get("summary"),
         "slug": article.get("slug"),
+        "categorySlug": article.get("categorySlug"),
+        "path": article.get("path"),
         "seo": {
             "title": article.get("seoTitle"),
             "description": article.get("seoDescription"),
@@ -1080,6 +1090,7 @@ def _article_summary(item: dict[str, Any]) -> dict[str, Any]:
         "seoTitle": item.get("seoTitle"),
         "seoDescription": item.get("seoDescription"),
         "robots": item.get("robots"),
+        "categorySlug": item.get("categorySlug"),
         "category": _taxonomy_ref(item.get("category")),
         "tags": _taxonomy_refs(item.get("tags")),
         "commentPolicy": item.get("commentPolicy"),
@@ -1108,6 +1119,50 @@ def _taxonomy_summary(item: dict[str, Any]) -> dict[str, Any]:
         "visible": item.get("visible", True),
         "updatedAt": item.get("updatedAt"),
     }
+
+
+def _store_article_taxonomy(
+    store: Any,
+    hub_id: str,
+    locale: str,
+    category: dict[str, Any],
+    tags: list[dict[str, Any]],
+    now: str,
+) -> None:
+    category_slug = _taxonomy_ref_slug(category)
+    if category_slug:
+        store.put_metadata(_taxonomy_item(hub_id, "category", category, locale, now))
+    for tag in tags:
+        if _taxonomy_ref_slug(tag):
+            store.put_metadata(_taxonomy_item(hub_id, "tag", tag, locale, now))
+
+
+def _taxonomy_item(hub_id: str, kind: str, ref: dict[str, Any], locale: str, now: str) -> dict[str, Any]:
+    slug = _taxonomy_ref_slug(ref)
+    taxonomy_id = _safe_id_or_slug(ref.get("taxonomyId") or slug)
+    return {
+        "pk": f"HUB#{hub_id}",
+        "sk": f"TAXONOMY#{kind}#{taxonomy_id}",
+        "itemFamily": "TAXONOMY",
+        "hubId": hub_id,
+        "taxonomyId": taxonomy_id,
+        "kind": kind,
+        "slug": slug,
+        "label": _safe_text(ref.get("label") or _label_from_slug(slug), max_length=120),
+        "locale": locale,
+        "visible": True,
+        "updatedAt": now,
+    }
+
+
+def _label_from_slug(slug: str) -> str:
+    return " ".join(part.capitalize() for part in slug.split("-") if part)
+
+
+def _taxonomy_ref_slug(ref: dict[str, Any]) -> str:
+    if not isinstance(ref, dict):
+        return ""
+    return _slug(ref.get("slug") or ref.get("taxonomyId") or ref.get("label"), fallback="")
 
 
 def _revision_summary(item: dict[str, Any]) -> dict[str, Any]:

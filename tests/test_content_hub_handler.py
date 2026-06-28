@@ -333,6 +333,23 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertEqual(article["visibility"], "private")
         self.assertEqual([item["taxonomyId"] for item in article["tags"]], ["test", "algo-mas", "manual"])
         self.assertEqual(article["tags"][1]["label"], "algo más")
+        self.assertEqual(article["categorySlug"], "test")
+        self.assertEqual(article["path"], "/blog/test/e2e-test-manual")
+
+        taxonomy = self.request("/features/content-hub/read", {"read": "taxonomyList"}, csrf=False)
+        self.assertEqual(taxonomy["statusCode"], 200)
+        taxonomy_items = body(taxonomy)["data"]["items"]
+        self.assertTrue(any(item["kind"] == "category" and item["slug"] == "test" for item in taxonomy_items))
+        self.assertTrue(any(item["kind"] == "tag" and item["slug"] == "algo-mas" for item in taxonomy_items))
+
+        self.store.roles = ["zoosite-blog-publisher"]
+        publish = self.request(
+            "/features/content-hub/action",
+            {"action": "publish", "articleId": article["articleId"], "revisionId": "rev_001"},
+            {"seoDescription": "Descripción SEO"},
+        )
+        self.assertEqual(publish["statusCode"], 200)
+        self.assertEqual(body(publish)["data"]["path"], "/blog/test/e2e-test-manual")
 
     def test_create_article_rejects_empty_human_tag_slugs(self):
         self.store.roles = ["zoosite-blog-editor"]
