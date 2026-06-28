@@ -305,6 +305,45 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertEqual(article["visibility"], "private")
         self.assertEqual([item["taxonomyId"] for item in article["tags"]], ["seo", "blog-builder"])
 
+    def test_create_article_accepts_localized_builder_labels_and_human_tags(self):
+        self.store.roles = ["zoosite-blog-editor"]
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {
+                "articleTitle": "E2E Test Article Manual",
+                "articleLanguage": "es",
+                "articleCategory": "test",
+                "articleTags": "test, algo más, manual",
+                "articleSummary": "Este es un artículo de test manual.",
+                "articleSeoTitle": "E2E Test Manual",
+                "articleSeoDescription": "Este es un artículo de test manual.",
+                "articleSlug": "e2e-test-manual",
+                "articleCanonicalPolicy": "Adaptable al sitio actual",
+                "articleCommentPolicy": "Públicos + moderación",
+                "articleContentSafetyPolicy": "Avanzado libre",
+                "articleVisibility": "Listo para revisión",
+            },
+        )
+        self.assertEqual(create["statusCode"], 200)
+        article = body(create)["data"]["article"]
+        self.assertEqual(article["canonicalMode"], "self")
+        self.assertEqual(article["commentPolicy"], "moderated")
+        self.assertEqual(article["contentSafety"]["rating"], "sensitive")
+        self.assertEqual(article["visibility"], "private")
+        self.assertEqual([item["taxonomyId"] for item in article["tags"]], ["test", "algo-mas", "manual"])
+        self.assertEqual(article["tags"][1]["label"], "algo más")
+
+    def test_create_article_rejects_empty_human_tag_slugs(self):
+        self.store.roles = ["zoosite-blog-editor"]
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"articleTitle": "Invalid tag", "articleTags": "!!!"},
+        )
+        self.assertEqual(create["statusCode"], 400)
+        self.assertEqual(body(create)["error"], "Invalid slug")
+
     def test_taxonomy_upsert_and_list_exposes_safe_fields(self):
         self.store.roles = ["zoosite-blog-editor"]
         upsert = self.request(
