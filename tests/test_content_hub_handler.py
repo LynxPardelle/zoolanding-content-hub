@@ -206,6 +206,15 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertEqual(response["statusCode"], 403)
         self.assertEqual(body(response)["error"], "CSRF validation failed")
 
+    def test_action_requires_content_hub_action(self):
+        response = self.request(
+            "/features/content-hub/action",
+            {},
+            {"title": "Blog builder SEO"},
+        )
+        self.assertEqual(response["statusCode"], 400)
+        self.assertEqual(body(response)["error"], "contentHub.action is required")
+
     def test_rejects_server_only_public_payload(self):
         response = self.request(
             "/features/content-hub/action",
@@ -242,6 +251,16 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertEqual(body(detail)["data"]["item"]["title"], "Blog builder SEO")
         self.assertEqual(body(detail)["data"]["item"]["summary"], "Guía de SEO")
         self.assertNotIn("packageKey", detail["body"])
+
+    def test_create_article_does_not_require_article_id(self):
+        self.store.roles = ["zoosite-blog-editor"]
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Sin id previo"},
+        )
+        self.assertEqual(create["statusCode"], 200)
+        self.assertTrue(body(create)["data"]["article"]["articleId"].startswith("art_"))
 
     def test_article_detail_requires_existing_article(self):
         read = self.request(
@@ -333,6 +352,23 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertEqual(article["visibility"], "private")
         self.assertEqual([item["taxonomyId"] for item in article["tags"]], ["test", "algo-mas", "manual"])
         self.assertEqual(article["tags"][1]["label"], "algo más")
+        self.assertEqual(article["categorySlug"], "test")
+        self.assertEqual(article["path"], "/blog/test/e2e-test-manual")
+
+        taxonomy = self.request("/features/content-hub/read", {"read": "taxonomyList"}, csrf=False)
+        self.assertEqual(taxonomy["statusCode"], 200)
+        taxonomy_items = body(taxonomy)["data"]["items"]
+        self.assertTrue(any(item["kind"] == "category" and item["slug"] == "test" for item in taxonomy_items))
+        self.assertTrue(any(item["kind"] == "tag" and item["slug"] == "algo-mas" for item in taxonomy_items))
+
+        self.store.roles = ["zoosite-blog-publisher"]
+        publish = self.request(
+            "/features/content-hub/action",
+            {"action": "publish", "articleId": article["articleId"], "revisionId": "rev_001"},
+            {"seoDescription": "Descripción SEO"},
+        )
+        self.assertEqual(publish["statusCode"], 200)
+        self.assertEqual(body(publish)["data"]["path"], "/blog/test/e2e-test-manual")
 
     def test_create_article_rejects_empty_human_tag_slugs(self):
         self.store.roles = ["zoosite-blog-editor"]
