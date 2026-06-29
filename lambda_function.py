@@ -76,8 +76,11 @@ ACTION_CAPABILITIES = {
     "updatePackage": "edit",
     "validate": "edit",
     "submitReview": "edit",
+    "approveArticle": "publish",
     "restoreRevision": "edit",
     "publish": "publish",
+    "unpublishArticle": "publish",
+    "archiveArticle": "publish",
     "schedule": "publish",
     "uploadAsset": "media",
     "queueComment": "moderate",
@@ -91,8 +94,11 @@ ACTION_PERMISSIONS = {
     "updatePackage": "blog:article:update",
     "validate": "blog:article:validate",
     "submitReview": "blog:article:submit-review",
+    "approveArticle": "blog:article:approve",
     "restoreRevision": "blog:revision:restore",
     "publish": "blog:article:publish",
+    "unpublishArticle": "blog:article:unpublish",
+    "archiveArticle": "blog:article:archive",
     "schedule": "blog:article:schedule",
     "uploadAsset": "blog:media:manage",
     "queueComment": "blog:moderation:moderate",
@@ -280,8 +286,14 @@ def _handle_action(
         return _validate_article(payload, binding, profile, hub)
     if action_kind == "submitReview":
         return _set_article_status(payload, binding, session, profile, hub, "review")
+    if action_kind == "approveArticle":
+        return _set_article_status(payload, binding, session, profile, hub, "approved")
     if action_kind == "publish":
         return _publish_article(payload, binding, session, profile, hub)
+    if action_kind == "unpublishArticle":
+        return _unpublish_article(payload, binding, session, profile, hub)
+    if action_kind == "archiveArticle":
+        return _archive_article(payload, binding, session, profile, hub)
     if action_kind == "schedule":
         return _schedule_article(payload, binding, session, profile, hub)
     if action_kind == "uploadAsset":
@@ -528,6 +540,60 @@ def _publish_article(
     return {"articleId": article_id, "revisionId": revision_id, "path": path, "publishedAt": now}
 
 
+def _unpublish_article(
+    payload: dict[str, Any],
+    binding: dict[str, Any],
+    session: dict[str, Any],
+    profile: dict[str, Any],
+    hub: dict[str, Any],
+) -> dict[str, Any]:
+    article_id = _safe_id(binding.get("articleId") or _input_field(payload, "articleId"))
+    store = _store()
+    article = store.get_metadata(f"HUB#{hub['hubId']}", f"ARTICLE#{article_id}")
+    if not article:
+        raise ContentHubNotFound()
+    now = _now_iso()
+    render_domain = _domain(_input_field(payload, "renderDomain") or profile["domain"])
+    locale = _locale(binding.get("language") or _input_field(payload, "language") or article.get("primaryLocale") or hub.get("defaultLocale") or "es")
+    path = _article_path(_input_field(payload, "path") or article.get("path") or f"/blog/{_slug(article.get('title') or article_id)}")
+    _remove_public_slug(store, profile, render_domain, locale, path)
+    store.update_metadata(f"HUB#{hub['hubId']}", f"ARTICLE#{article_id}", {
+        "status": "unpublished",
+        "visibility": "private",
+        "unpublishedAt": now,
+        "updatedAt": now,
+        "updatedBy": session["subject"],
+    })
+    return {"articleId": article_id, "status": "unpublished", "path": path, "unpublishedAt": now}
+
+
+def _archive_article(
+    payload: dict[str, Any],
+    binding: dict[str, Any],
+    session: dict[str, Any],
+    profile: dict[str, Any],
+    hub: dict[str, Any],
+) -> dict[str, Any]:
+    article_id = _safe_id(binding.get("articleId") or _input_field(payload, "articleId"))
+    store = _store()
+    article = store.get_metadata(f"HUB#{hub['hubId']}", f"ARTICLE#{article_id}")
+    if not article:
+        raise ContentHubNotFound()
+    now = _now_iso()
+    render_domain = _domain(_input_field(payload, "renderDomain") or profile["domain"])
+    locale = _locale(binding.get("language") or _input_field(payload, "language") or article.get("primaryLocale") or hub.get("defaultLocale") or "es")
+    path = _article_path(_input_field(payload, "path") or article.get("path") or f"/blog/{_slug(article.get('title') or article_id)}")
+    _remove_public_slug(store, profile, render_domain, locale, path)
+    store.update_metadata(f"HUB#{hub['hubId']}", f"ARTICLE#{article_id}", {
+        "status": "archived",
+        "visibility": "private",
+        "archivedAt": now,
+        "updatedAt": now,
+        "updatedBy": session["subject"],
+    })
+    return {"articleId": article_id, "status": "archived", "path": path, "archivedAt": now}
+
+
 def _schedule_article(
     payload: dict[str, Any],
     binding: dict[str, Any],
@@ -719,14 +785,27 @@ def _set_article_status(
     hub: dict[str, Any],
     status: str,
 ) -> dict[str, Any]:
-    del payload, profile
-    article_id = _safe_id(binding.get("articleId"))
-    _store().update_metadata(f"HUB#{hub['hubId']}", f"ARTICLE#{article_id}", {
+    del profile
+    article_id = _safe_id(binding.get("articleId") or _input_field(payload, "articleId"))
+    store = _store()
+    if not store.get_metadata(f"HUB#{hub['hubId']}", f"ARTICLE#{article_id}"):
+        raise ContentHubNotFound()
+    store.update_metadata(f"HUB#{hub['hubId']}", f"ARTICLE#{article_id}", {
         "status": status,
         "updatedBy": session["subject"],
         "updatedAt": _now_iso(),
     })
     return {"articleId": article_id, "status": status}
+
+
+def _remove_public_slug(
+    store: Any,
+    profile: dict[str, Any],
+    render_domain: str,
+    locale: str,
+    path: str,
+) -> None:
+    store.delete_metadata(f"SLUG#{profile['environment']}#{render_domain}#{locale}", f"PATH#{path}")
 
 
 _CONFIG_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
@@ -954,6 +1033,9 @@ class DynamoContentHubStore:
 
     def update_metadata(self, pk: str, sk: str, updates: dict[str, Any]) -> dict[str, Any]:
         return _update_item(self.table(self.metadata_table_name), {"pk": pk, "sk": sk}, updates)
+
+    def delete_metadata(self, pk: str, sk: str) -> None:
+        self.table(self.metadata_table_name).delete_item(Key={"pk": pk, "sk": sk})
 
     def query_metadata(self, pk: str, sk_prefix: str) -> list[dict[str, Any]]:
         return _query_items(self.table(self.metadata_table_name), pk, sk_prefix)

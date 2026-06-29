@@ -134,6 +134,9 @@ class FakeStore:
         item.update(updates)
         return dict(item)
 
+    def delete_metadata(self, pk, sk):
+        self.metadata.pop((pk, sk), None)
+
     def query_metadata(self, pk, sk_prefix):
         return [dict(item) for (item_pk, item_sk), item in self.metadata.items() if item_pk == pk and item_sk.startswith(sk_prefix)]
 
@@ -569,6 +572,78 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertEqual(bundle["seo"]["canonical"], "https://zoositioweb.com.mx/blog/publicar")
         self.assertEqual(bundle["analytics"]["piiPolicy"], "no-pii")
         self.assertNotIn("bucket", publish["body"].lower())
+
+    def test_publisher_can_approve_unpublish_and_archive_article(self):
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Ciclo editorial", "summary": "Flujo completo"},
+        )
+        article_id = body(create)["data"]["article"]["articleId"]
+
+        self.store.roles = ["zoosite-blog-publisher"]
+        approve = self.request(
+            "/features/content-hub/action",
+            {"action": "approveArticle", "articleId": article_id},
+        )
+        self.assertEqual(approve["statusCode"], 200)
+        self.assertEqual(body(approve)["data"]["status"], "approved")
+
+        publish = self.request(
+            "/features/content-hub/action",
+            {"action": "publish", "articleId": article_id, "revisionId": "rev_001"},
+            {"path": "/blog/ciclo-editorial"},
+        )
+        self.assertEqual(publish["statusCode"], 200)
+        self.assertIsNotNone(self.store.get_metadata("SLUG#test#zoositioweb.com.mx#es", "PATH#/blog/ciclo-editorial"))
+
+        unpublish = self.request(
+            "/features/content-hub/action",
+            {"action": "unpublishArticle", "articleId": article_id},
+        )
+        self.assertEqual(unpublish["statusCode"], 200)
+        self.assertEqual(body(unpublish)["data"]["status"], "unpublished")
+        article = self.store.get_metadata("HUB#zoosite-main", f"ARTICLE#{article_id}")
+        self.assertEqual(article["visibility"], "private")
+        self.assertIsNone(self.store.get_metadata("SLUG#test#zoositioweb.com.mx#es", "PATH#/blog/ciclo-editorial"))
+        self.assertNotIn("publishedBundleKey", unpublish["body"])
+
+        archive = self.request(
+            "/features/content-hub/action",
+            {"action": "archiveArticle", "articleId": article_id},
+        )
+        self.assertEqual(archive["statusCode"], 200)
+        self.assertEqual(body(archive)["data"]["status"], "archived")
+        article = self.store.get_metadata("HUB#zoosite-main", f"ARTICLE#{article_id}")
+        self.assertEqual(article["visibility"], "private")
+
+    def test_editor_cannot_approve_or_unpublish_article(self):
+        self.store.roles = ["zoosite-blog-editor"]
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Permisos ciclo editorial"},
+        )
+        article_id = body(create)["data"]["article"]["articleId"]
+
+        approve = self.request(
+            "/features/content-hub/action",
+            {"action": "approveArticle", "articleId": article_id},
+        )
+        self.assertEqual(approve["statusCode"], 403)
+
+        unpublish = self.request(
+            "/features/content-hub/action",
+            {"action": "unpublishArticle", "articleId": article_id},
+        )
+        self.assertEqual(unpublish["statusCode"], 403)
+
+    def test_status_transition_requires_existing_article(self):
+        response = self.request(
+            "/features/content-hub/action",
+            {"action": "submitReview", "articleId": "art_missing"},
+        )
+        self.assertEqual(response["statusCode"], 404)
 
     def test_public_preview_uses_latest_revision_when_revision_id_is_omitted(self):
         create = self.request(

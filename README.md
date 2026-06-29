@@ -37,7 +37,10 @@ The browser sends:
 - `uploadAsset`
 - `validate`
 - `submitReview`
+- `approveArticle`
 - `publish`
+- `unpublishArticle`
+- `archiveArticle`
 - `schedule`
 - `queueComment`
 - `moderateComment`
@@ -57,6 +60,7 @@ Wildcard permissions such as `blog:article:*` are rejected during config normali
 - `createArticle`, `articleList`, and `articleDetail` carry public-safe SEO, category, tags, comment policy, content safety, canonical, and path metadata.
 - `upsertTaxonomy` stores category/tag administration metadata in DynamoDB and returns only safe taxonomy summaries.
 - `publish` writes public bundles with SEO, taxonomy, analytics context, comment policy, canonical mode, and safe article path fields.
+- `unpublishArticle` and `archiveArticle` mark article metadata private and remove the public slug index without deleting immutable bundles or revision history.
 - `queueComment` and `recordInteraction` remain protected, authenticated, and CSRF-checked actions in this BFF. Public unauthenticated comments, likes, CTA clicks, or form submissions should use a separate public ingestion surface with its own abuse controls; this BFF depends on auth-admin sessions by design.
 - Interaction metadata rejects private fields and obvious email/phone values. Comment queue previews redact obvious email and phone values and do not return raw private contact data.
 
