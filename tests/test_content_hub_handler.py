@@ -53,7 +53,7 @@ def encoded_role_policy_config(role_policies):
     return base64.b64encode(json.dumps(raw, separators=(",", ":")).encode("utf-8")).decode("ascii")
 
 
-def event(path, body, *, csrf=True, cookies=None, headers=None):
+def event(path, body, *, csrf=True, cookies=None, headers=None, request_id=None):
     req_headers = {
         "x-zlp-domain": "zoositioweb.com.mx",
         "x-zlp-auth-profile-id": "staff",
@@ -66,12 +66,15 @@ def event(path, body, *, csrf=True, cookies=None, headers=None):
         f"__Host-zlp_session={SESSION_VALUE}",
         "zlp_csrf=csrf-value",
     ] if cookies is None else cookies
+    request_context = {"http": {"method": "POST", "path": path}, "stage": "test"}
+    if request_id:
+        request_context["requestId"] = request_id
     return {
         "version": "2.0",
         "rawPath": path,
         "headers": req_headers,
         "cookies": request_cookies,
-        "requestContext": {"http": {"method": "POST", "path": path}, "stage": "test"},
+        "requestContext": request_context,
         "body": json.dumps(body),
     }
 
@@ -230,6 +233,81 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertEqual(response["statusCode"], 400)
         self.assertEqual(body(response)["error"], "contentHub.action is required")
 
+    def test_validation_error_response_includes_code_and_request_id(self):
+        response = self.request(
+            "/features/content-hub/action",
+            {},
+            {"title": "Blog builder SEO"},
+            request_id="req-safe-123",
+        )
+
+        self.assertEqual(response["statusCode"], 400)
+        self.assertEqual(body(response), {
+            "ok": False,
+            "code": "validation_error",
+            "error": "contentHub.action is required",
+            "message": "contentHub.action is required",
+            "requestId": "req-safe-123",
+        })
+
+    def test_error_response_generates_fallback_request_id(self):
+        response = self.request(
+            "/features/content-hub/read",
+            {"read": "articleList"},
+            cookies=[],
+            csrf=False,
+        )
+
+        self.assertEqual(response["statusCode"], 401)
+        payload = body(response)
+        self.assertEqual(payload["code"], "auth_required")
+        self.assertRegex(payload["requestId"], r"^req-[0-9]+$")
+
+    def test_internal_error_response_is_sanitized(self):
+        def leaking_query_metadata(pk, sk_prefix):
+            del pk, sk_prefix
+            raise RuntimeError("token=secret auth-session-table private-bucket stack trace")
+
+        self.store.query_metadata = leaking_query_metadata
+
+        with patch.object(content_hub, "_log"):
+            response = self.request(
+                "/features/content-hub/read",
+                {"read": "articleList"},
+                csrf=False,
+                request_id="req-internal-456",
+            )
+
+        self.assertEqual(response["statusCode"], 500)
+        self.assertEqual(body(response), {
+            "ok": False,
+            "code": "internal_error",
+            "error": "Content hub request failed",
+            "message": "Content hub request failed",
+            "requestId": "req-internal-456",
+        })
+        for leaked in ["token=secret", "auth-session-table", "private-bucket", "RuntimeError", "stack trace"]:
+            self.assertNotIn(leaked, response["body"])
+
+    def test_config_error_response_is_generic_internal_error(self):
+        os.environ["CONTENT_HUB_CONFIG_JSON_BASE64"] = base64.b64encode(b"{not-json").decode("ascii")
+        content_hub._CONFIG_CACHE.clear()
+
+        with patch.object(content_hub, "_log"):
+            response = self.request(
+                "/features/content-hub/read",
+                {"read": "articleList"},
+                csrf=False,
+                request_id="req-config-789",
+            )
+
+        self.assertEqual(response["statusCode"], 500)
+        payload = body(response)
+        self.assertEqual(payload["code"], "internal_error")
+        self.assertEqual(payload["error"], "Content hub service is temporarily unavailable")
+        self.assertEqual(payload["requestId"], "req-config-789")
+        self.assertNotIn("valid JSON", response["body"])
+
     def test_role_policies_authorize_by_action_scoped_permission(self):
         os.environ["CONTENT_HUB_CONFIG_JSON_BASE64"] = encoded_role_policy_config([
             {
@@ -296,9 +374,10 @@ class ContentHubHandlerTests(unittest.TestCase):
         ])
         content_hub._CONFIG_CACHE.clear()
 
-        response = self.request("/features/content-hub/read", {"read": "articleList"}, csrf=False)
+        with patch.object(content_hub, "_log"):
+            response = self.request("/features/content-hub/read", {"read": "articleList"}, csrf=False)
         self.assertEqual(response["statusCode"], 500)
-        self.assertEqual(body(response)["error"], "Content hub config is invalid")
+        self.assertEqual(body(response)["error"], "Content hub service is temporarily unavailable")
 
     def test_rejects_server_only_public_payload(self):
         response = self.request(

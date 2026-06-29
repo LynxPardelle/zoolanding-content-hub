@@ -123,6 +123,7 @@ PHONE_VALUE_RE = re.compile(r"(?:\+?\d[\d\s().-]{7,}\d)")
 
 class ContentHubError(Exception):
     status_code = 400
+    error_code = "validation_error"
     public_message = "Invalid content hub request"
 
     def __init__(self, message: Optional[str] = None):
@@ -133,26 +134,34 @@ class ContentHubError(Exception):
 
 class ContentHubUnauthorized(ContentHubError):
     status_code = 401
+    error_code = "auth_required"
     public_message = "Authentication required"
 
 
 class ContentHubForbidden(ContentHubError):
     status_code = 403
+    error_code = "forbidden"
     public_message = "Content hub access denied"
 
 
 class ContentHubNotFound(ContentHubError):
     status_code = 404
+    error_code = "not_found"
     public_message = "Content hub item not found"
 
 
 class ContentHubConfigError(ContentHubError):
     status_code = 500
-    public_message = "Content hub config is invalid"
+    error_code = "internal_error"
+    public_message = "Content hub service is temporarily unavailable"
+
+    def __init__(self, message: Optional[str] = None):
+        Exception.__init__(self, message or self.public_message)
 
 
 def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     del context
+    request_id = _request_id(event)
     if _is_schedule_tick(event):
         try:
             return {"ok": True, "data": _run_due_schedules()}
@@ -173,11 +182,11 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             return _action_response(event)
         raise ContentHubNotFound("Content hub route not found")
     except ContentHubError as exc:
-        _log("WARNING" if exc.status_code < 500 else "ERROR", exc.public_message, statusCode=exc.status_code)
-        return _json_response(exc.status_code, {"ok": False, "error": exc.public_message})
+        _log("WARNING" if exc.status_code < 500 else "ERROR", exc.public_message, statusCode=exc.status_code, requestId=request_id)
+        return _error_response(exc.status_code, exc.error_code, exc.public_message, request_id)
     except Exception as exc:
-        _log("ERROR", "Unhandled content hub error", errorType=type(exc).__name__)
-        return _json_response(500, {"ok": False, "error": "Content hub request failed"})
+        _log("ERROR", "Unhandled content hub error", errorType=type(exc).__name__, requestId=request_id)
+        return _error_response(500, "internal_error", "Content hub request failed", request_id)
 
 
 def _read_response(event: dict[str, Any]) -> dict[str, Any]:
@@ -1779,6 +1788,16 @@ def _json_response(status_code: int, body: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _error_response(status_code: int, code: str, message: str, request_id: str) -> dict[str, Any]:
+    return _json_response(status_code, {
+        "ok": False,
+        "code": code,
+        "error": message,
+        "message": message,
+        "requestId": request_id,
+    })
+
+
 def _json_default(value: Any) -> Any:
     if isinstance(value, Decimal):
         return int(value) if value % 1 == 0 else float(value)
@@ -1795,6 +1814,14 @@ def _path(event: dict[str, Any]) -> str:
     if stage and path.startswith(f"/{stage}/"):
         return path[len(stage) + 1:]
     return path or "/"
+
+
+def _request_id(event: dict[str, Any]) -> str:
+    request_context = event.get("requestContext") if isinstance(event.get("requestContext"), dict) else {}
+    value = _clean_string(request_context.get("requestId"))
+    if re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", value):
+        return value
+    return f"req-{time.time_ns()}"
 
 
 def _header(event: dict[str, Any], name: str) -> str:
