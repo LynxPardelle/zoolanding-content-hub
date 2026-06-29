@@ -694,6 +694,114 @@ class ContentHubHandlerTests(unittest.TestCase):
         article = self.store.get_metadata("HUB#zoosite-main", f"ARTICLE#{article_id}")
         self.assertEqual(article["visibility"], "private")
 
+    def test_editorial_release_flow_creates_updates_reviews_publishes_previews_and_schedules_unpublish(self):
+        self.store.roles = ["zoosite-blog-editor"]
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {
+                "articleTitle": "Flujo editorial completo",
+                "articleSummary": "Resumen inicial",
+                "articleCategory": "web",
+                "articleTags": "seo, blog, seo",
+                "articleSlug": "flujo-editorial-completo",
+                "articleVisibility": "Listo para revisión",
+            },
+        )
+        self.assertEqual(create["statusCode"], 200)
+        article_id = body(create)["data"]["article"]["articleId"]
+        self.assertEqual(body(create)["data"]["article"]["path"], "/blog/web/flujo-editorial-completo")
+
+        update = self.request(
+            "/features/content-hub/action",
+            {"action": "updatePackage"},
+            {
+                "articleId": article_id,
+                "revisionId": "rev_release",
+                "articleTitle": "Flujo editorial completo actualizado",
+                "articleSummary": "Resumen listo para publicar",
+                "articleCategory": {"taxonomyId": "web", "slug": "web", "label": "Web"},
+                "articleTags": "seo, producto, blog",
+                "components": [
+                    {
+                        "type": "generic-text",
+                        "config": {
+                            "text": "Contenido editorial aprobado.",
+                        },
+                    },
+                ],
+            },
+        )
+        self.assertEqual(update["statusCode"], 200)
+        self.assertNotIn("packageKey", update["body"])
+
+        submit_review = self.request(
+            "/features/content-hub/action",
+            {"action": "submitReview", "articleId": article_id},
+        )
+        self.assertEqual(submit_review["statusCode"], 200)
+        self.assertEqual(body(submit_review)["data"]["status"], "review")
+
+        self.store.roles = ["zoosite-blog-publisher"]
+        approve = self.request(
+            "/features/content-hub/action",
+            {"action": "approveArticle", "articleId": article_id},
+        )
+        self.assertEqual(approve["statusCode"], 200)
+        self.assertEqual(body(approve)["data"]["status"], "approved")
+
+        publish = self.request(
+            "/features/content-hub/action",
+            {"action": "publish", "articleId": article_id, "revisionId": "rev_release"},
+            {
+                "seoTitle": "Flujo editorial completo SEO",
+                "seoDescription": "Prueba completa de publicación editorial.",
+            },
+        )
+        self.assertEqual(publish["statusCode"], 200)
+        self.assertEqual(body(publish)["data"]["path"], "/blog/web/flujo-editorial-completo")
+        self.assertNotIn("publishedBundleKey", publish["body"])
+
+        self.store.roles = ["zoosite-admin"]
+        detail = self.request(
+            "/features/content-hub/read",
+            {"read": "articleDetail", "articleId": article_id},
+            csrf=False,
+        )
+        self.assertEqual(detail["statusCode"], 200)
+        self.assertEqual(body(detail)["data"]["item"]["status"], "published")
+        self.assertEqual(body(detail)["data"]["item"]["latestRevisionId"], "rev_release")
+
+        preview = self.request(
+            "/features/content-hub/read",
+            {"read": "publicBundlePreview", "articleId": article_id},
+            csrf=False,
+        )
+        self.assertEqual(preview["statusCode"], 200)
+        preview_bundle = body(preview)["data"]["bundle"]
+        self.assertEqual(preview_bundle["articleId"], article_id)
+        self.assertEqual(preview_bundle["seo"]["title"], "Flujo editorial completo SEO")
+        self.assertEqual(preview_bundle["components"][0]["type"], "generic-text")
+
+        schedule = self.request(
+            "/features/content-hub/action",
+            {"action": "schedule", "articleId": article_id},
+            {
+                "scheduleAction": "unpublish",
+                "unpublishAt": "2000-01-01T00:00:00Z",
+                "timezone": "UTC",
+            },
+        )
+        self.assertEqual(schedule["statusCode"], 200)
+        self.assertEqual(body(schedule)["data"]["schedule"]["action"], "unpublish")
+
+        scheduled_run = content_hub.lambda_handler({"contentHubTask": "runDueSchedules"}, None)
+        self.assertEqual(scheduled_run["data"]["processed"], 1)
+        article = self.store.get_metadata("HUB#zoosite-main", f"ARTICLE#{article_id}")
+        self.assertEqual(article["status"], "unpublished")
+        self.assertEqual(article["visibility"], "private")
+        self.assertIsNone(self.store.get_metadata("SLUG#test#zoositioweb.com.mx#es", "PATH#/blog/web/flujo-editorial-completo"))
+
     def test_editor_cannot_approve_or_unpublish_article(self):
         self.store.roles = ["zoosite-blog-editor"]
         create = self.request(
