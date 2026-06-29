@@ -812,6 +812,103 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertEqual(invalid["statusCode"], 400)
         self.assertEqual(body(invalid)["error"], "unpublishAt is required")
 
+    def test_scheduler_event_publishes_due_schedule_and_removes_it(self):
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Publicacion vencida", "slug": "publicacion-vencida"},
+        )
+        article_id = body(create)["data"]["article"]["articleId"]
+        article = self.store.get_metadata("HUB#zoosite-main", f"ARTICLE#{article_id}")
+        schedule = self.request(
+            "/features/content-hub/action",
+            {"action": "schedule", "articleId": article_id},
+            {"publishAt": "2000-01-01T00:00:00Z", "timezone": "UTC"},
+        )
+        schedule_data = body(schedule)["data"]["schedule"]
+
+        result = content_hub.lambda_handler({"contentHubTask": "runDueSchedules"}, None)
+
+        self.assertEqual(result["data"]["processed"], 1)
+        self.assertEqual(result["data"]["failed"], 0)
+        published = self.store.get_metadata("HUB#zoosite-main", f"ARTICLE#{article_id}")
+        self.assertEqual(published["status"], "published")
+        slug = self.store.get_metadata("SLUG#test#zoositioweb.com.mx#es", f"PATH#{article['path']}")
+        self.assertEqual(slug["articleId"], article_id)
+        remaining = self.store.query_metadata("SCHEDULE#test", "DUE#")
+        self.assertEqual([item["scheduleId"] for item in remaining], [])
+        self.assertEqual(result["data"]["items"][0]["scheduleId"], schedule_data["scheduleId"])
+
+    def test_scheduler_event_leaves_future_schedule_pending(self):
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Futura", "slug": "futura"},
+        )
+        article_id = body(create)["data"]["article"]["articleId"]
+        schedule = self.request(
+            "/features/content-hub/action",
+            {"action": "schedule", "articleId": article_id},
+            {"publishAt": "2999-01-01T00:00:00Z", "timezone": "UTC"},
+        )
+        schedule_id = body(schedule)["data"]["schedule"]["scheduleId"]
+
+        result = content_hub.lambda_handler({"contentHubTask": "runDueSchedules"}, None)
+
+        self.assertEqual(result["data"]["processed"], 0)
+        remaining = self.store.query_metadata("SCHEDULE#test", "DUE#")
+        self.assertEqual([item["scheduleId"] for item in remaining], [schedule_id])
+
+    def test_scheduler_event_records_invalid_schedule_without_stopping_batch(self):
+        self.store.put_metadata({
+            "pk": "SCHEDULE#test",
+            "sk": "DUE#bad#ARTICLE#bad#ACTION#publish",
+            "itemFamily": "SCHEDULE",
+            "scheduleId": "sch_bad",
+            "hubId": "zoosite-main",
+            "domain": "zoositioweb.com.mx",
+            "authProfileId": "staff",
+            "articleId": "art_bad",
+            "revisionId": "rev_001",
+            "action": "publish",
+            "scheduledAt": "bad",
+        })
+
+        result = content_hub.lambda_handler({"contentHubTask": "runDueSchedules"}, None)
+
+        self.assertEqual(result["data"]["processed"], 0)
+        self.assertEqual(result["data"]["failed"], 1)
+        self.assertEqual(result["data"]["failures"][0]["scheduleId"], "sch_bad")
+        failed = self.store.get_metadata("SCHEDULE#test", "DUE#bad#ARTICLE#bad#ACTION#publish")
+        self.assertEqual(failed["lastError"], "Invalid schedule time")
+
+    def test_scheduler_event_unpublishes_due_schedule_and_removes_slug(self):
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Retiro vencido", "slug": "retiro-vencido"},
+        )
+        article_id = body(create)["data"]["article"]["articleId"]
+        article = self.store.get_metadata("HUB#zoosite-main", f"ARTICLE#{article_id}")
+        publish = self.request(
+            "/features/content-hub/action",
+            {"action": "publish", "articleId": article_id, "revisionId": "rev_001"},
+        )
+        self.assertEqual(publish["statusCode"], 200)
+        schedule = self.request(
+            "/features/content-hub/action",
+            {"action": "schedule", "articleId": article_id},
+            {"scheduleAction": "unpublish", "unpublishAt": "2000-01-01T00:00:00Z", "timezone": "UTC"},
+        )
+        self.assertEqual(schedule["statusCode"], 200)
+
+        result = content_hub.lambda_handler({"detail": {"contentHubTask": "runDueSchedules"}}, None)
+
+        self.assertEqual(result["data"]["processed"], 1)
+        unpublished = self.store.get_metadata("HUB#zoosite-main", f"ARTICLE#{article_id}")
+        self.assertEqual(unpublished["status"], "unpublished")
+        self.assertIsNone(self.store.get_metadata("SLUG#test#zoositioweb.com.mx#es", f"PATH#{article['path']}"))
+
     def test_revision_list_requires_existing_article_and_redacts_actor(self):
         create = self.request(
             "/features/content-hub/action",

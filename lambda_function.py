@@ -6,7 +6,7 @@ import os
 import re
 import time
 import unicodedata
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -149,6 +149,13 @@ class ContentHubConfigError(ContentHubError):
 
 def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     del context
+    if _is_schedule_tick(event):
+        try:
+            return {"ok": True, "data": _run_due_schedules()}
+        except Exception as exc:
+            _log("ERROR", "Scheduled content hub run failed", errorType=type(exc).__name__)
+            raise
+
     if _method(event) == "OPTIONS":
         return _json_response(200, {"ok": True})
 
@@ -644,6 +651,8 @@ def _schedule_article(
             field_name="unpublishAt",
             invalid_message="Invalid unpublish time",
         )
+    render_domain = _domain(_direct_input_field(payload, "renderDomain") or profile["domain"])
+    locale = _locale(binding.get("language") or _direct_input_field(payload, "language") or article.get("primaryLocale") or hub.get("defaultLocale") or "es")
     schedule_id = _safe_id(_direct_input_field(payload, "scheduleId") or f"sch_{hashlib.sha256(f'{article_id}:{revision_id}:{action}:{scheduled_at}:{timezone}'.encode()).hexdigest()[:16]}")
     schedule_sort = f"DUE#{scheduled_at}#ARTICLE#{article_id}#ACTION#{action}"
     if revision_id:
@@ -654,8 +663,12 @@ def _schedule_article(
         "itemFamily": "SCHEDULE",
         "scheduleId": schedule_id,
         "hubId": hub["hubId"],
+        "domain": profile["domain"],
+        "authProfileId": profile["authProfileId"],
         "articleId": article_id,
         "revisionId": revision_id,
+        "renderDomain": render_domain,
+        "locale": locale,
         "action": action,
         "scheduledAt": scheduled_at,
         f"{action}At": scheduled_at,
@@ -665,6 +678,87 @@ def _schedule_article(
     }
     store.put_metadata(item)
     return {"schedule": _schedule_summary(item)}
+
+
+def _run_due_schedules(now: str | None = None) -> dict[str, Any]:
+    store = _store()
+    environment = os.getenv(ENVIRONMENT_ENV, "dev")
+    now_dt = _parse_schedule_datetime(now or _now_iso(), "Invalid scheduler time")
+    processed: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+
+    # One environment scan is enough for current schedule volume; add a due-time GSI if this grows.
+    for item in store.query_metadata(f"SCHEDULE#{environment}", "DUE#"):
+        try:
+            if not _schedule_is_due(item, now_dt):
+                continue
+            profile = _profile_for_schedule(item)
+            hub = _hub_for(profile, _safe_id(item.get("hubId")))
+            _execute_schedule_item(item, profile, hub)
+            store.delete_metadata(item["pk"], item["sk"])
+            processed.append({"scheduleId": item.get("scheduleId"), "action": item.get("action")})
+        except ContentHubError as exc:
+            store.update_metadata(item["pk"], item["sk"], {
+                "lastAttemptAt": _now_iso(),
+                "lastError": exc.public_message,
+            })
+            failed.append({"scheduleId": item.get("scheduleId"), "error": exc.public_message})
+
+    return {"processed": len(processed), "failed": len(failed), "items": processed, "failures": failed[:10]}
+
+
+def _is_schedule_tick(event: dict[str, Any]) -> bool:
+    if not isinstance(event, dict):
+        return False
+    detail = event.get("detail") if isinstance(event.get("detail"), dict) else {}
+    return event.get("contentHubTask") == "runDueSchedules" or detail.get("contentHubTask") == "runDueSchedules"
+
+
+def _schedule_is_due(item: dict[str, Any], now_dt: datetime) -> bool:
+    scheduled_at = _clean_string(item.get("scheduledAt"))
+    if not scheduled_at:
+        return False
+    return _parse_schedule_datetime(scheduled_at, "Invalid schedule time") <= now_dt
+
+
+def _profile_for_schedule(item: dict[str, Any]) -> dict[str, Any]:
+    environment = os.getenv(ENVIRONMENT_ENV, "dev")
+    domain = _clean_string(item.get("domain"))
+    auth_profile_id = _clean_string(item.get("authProfileId"))
+    hub_id = _safe_id(item.get("hubId"))
+    for profile in load_config()["profiles"]:
+        if not profile["enabled"] or profile["environment"] != environment:
+            continue
+        if domain and auth_profile_id:
+            if profile["domain"] == _domain(domain) and profile["authProfileId"] == _safe_id(auth_profile_id):
+                return profile
+            continue
+        if any(hub["hubId"] == hub_id for hub in profile["contentHubs"]):
+            return profile
+    raise ContentHubNotFound("Scheduled profile not found")
+
+
+def _execute_schedule_item(item: dict[str, Any], profile: dict[str, Any], hub: dict[str, Any]) -> None:
+    action = _schedule_action(item.get("action") or "publish")
+    article_id = _safe_id(item.get("articleId"))
+    revision_id = _clean_string(item.get("revisionId"))
+    payload = {
+        "input": {
+            "articleId": article_id,
+            "revisionId": revision_id,
+            "renderDomain": _domain(item.get("renderDomain") or profile["domain"]),
+            "language": _locale(item.get("locale") or hub.get("defaultLocale") or "es"),
+        }
+    }
+    binding = {"articleId": article_id, "hubId": hub["hubId"]}
+    session = {"subject": "content-hub-scheduler"}
+    if action == "publish":
+        if not revision_id:
+            raise ContentHubError("Scheduled publish revision is required")
+        binding["revisionId"] = _safe_id(revision_id)
+        _publish_article(payload, binding, session, profile, hub)
+        return
+    _unpublish_article(payload, binding, session, profile, hub)
 
 
 def _upload_asset(payload: dict[str, Any], session: dict[str, Any], profile: dict[str, Any], hub: dict[str, Any]) -> dict[str, Any]:
@@ -1665,13 +1759,19 @@ def _schedule_time(value: Any, *, field_name: str, invalid_message: str) -> str:
         raise ContentHubError(f"{field_name} is required")
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2})", text):
         raise ContentHubError(invalid_message)
+    _parse_schedule_datetime(text, invalid_message)
+    return text
+
+
+def _parse_schedule_datetime(value: Any, invalid_message: str) -> datetime:
+    text = _safe_text(value, max_length=40)
     try:
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError as exc:
         raise ContentHubError(invalid_message) from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ContentHubError(invalid_message)
-    return text
+    return parsed.astimezone(timezone.utc)
 
 
 def _schedule_timezone(value: Any) -> str:
