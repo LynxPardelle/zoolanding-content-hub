@@ -170,6 +170,7 @@ Resources:
               - Effect: Allow
                 Action:
                   - dynamodb:GetItem
+                  - dynamodb:DeleteItem
                   - dynamodb:PutItem
                   - dynamodb:Query
                   - dynamodb:UpdateItem
@@ -256,6 +257,13 @@ Resources:
               Ref: ContentHubApi
             Method: OPTIONS
             Path: /features/content-hub/action
+        DueSchedules:
+          Type: Schedule
+          Properties:
+            Schedule: rate(5 minutes)
+            Name:
+              Fn::Sub: ${AWS::StackName}-DueSchedules
+            Input: '{"contentHubTask":"runDueSchedules"}'
 
 Outputs:
   ApiEndpoint:
