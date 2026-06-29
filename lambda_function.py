@@ -6,8 +6,10 @@ import os
 import re
 import time
 import unicodedata
+from datetime import datetime
 from decimal import Decimal
 from typing import Any, Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 SESSION_COOKIE_NAME = "__Host-zlp_session"
@@ -249,6 +251,9 @@ def _handle_read(
         return {"items": [_asset_summary(item) for item in store.query_media(f"HUB#{hub_id}", "ASSET#")]}
     if read_kind == "revisionList":
         article_id = _safe_id(binding.get("articleId") or _input_field(payload, "articleId"))
+        article = store.get_metadata(f"HUB#{hub_id}", f"ARTICLE#{article_id}")
+        if not article:
+            raise ContentHubNotFound()
         return {"items": [_revision_summary(item) for item in store.query_metadata(f"ARTICLE#{article_id}", "REVISION#")]}
     if read_kind == "moderationQueue":
         return {"items": [_moderation_summary(item) for item in store.query_moderation(f"HUB#{hub_id}", "MODERATION#")]}
@@ -317,7 +322,7 @@ def _create_article(payload: dict[str, Any], session: dict[str, Any], profile: d
     category_slug = _taxonomy_ref_slug(category) or "sin-categoria"
     tags = _taxonomy_refs(_input_field(payload, "tags"))
     path = _article_path(_input_field(payload, "path") or f"/blog/{category_slug}/{slug}")
-    article_id = _safe_id(_input_field(payload, "articleId") or f"art_{int(time.time())}_{slug[:40]}")
+    article_id = _safe_id(_input_field(payload, "articleId") or f"art_{time.time_ns()}_{slug[:40]}")
     revision_id = _safe_id(_input_field(payload, "revisionId") or "rev_001")
     now = _now_iso()
     summary = _safe_text(_input_field(payload, "summary") or "", max_length=320)
@@ -410,8 +415,11 @@ def _update_package(
 ) -> dict[str, Any]:
     article_id = _safe_id(binding.get("articleId") or _input_field(payload, "articleId"))
     locale = _locale(binding.get("language") or _input_field(payload, "language") or hub.get("defaultLocale") or "es")
-    revision_id = _safe_id(_input_field(payload, "revisionId") or f"rev_{int(time.time())}")
+    revision_id = _safe_id(_input_field(payload, "revisionId") or f"rev_{time.time_ns()}")
     now = _now_iso()
+    store = _store()
+    if not store.get_metadata(f"HUB#{hub['hubId']}", f"ARTICLE#{article_id}"):
+        raise ContentHubNotFound()
     revision = _revision_item(hub["hubId"], article_id, revision_id, locale, now, session["subject"])
     package = {
         "version": 1,
@@ -426,7 +434,16 @@ def _update_package(
         "updatedAt": now,
     }
     metadata_updates = _article_metadata_updates(payload)
-    store = _store()
+    if metadata_updates:
+        update_locale = _locale(metadata_updates.get("primaryLocale") or locale)
+        _store_article_taxonomy(
+            store,
+            hub["hubId"],
+            update_locale,
+            metadata_updates.get("category") if isinstance(metadata_updates.get("category"), dict) else {},
+            metadata_updates.get("tags") if isinstance(metadata_updates.get("tags"), list) else [],
+            now,
+        )
     store.put_metadata(revision)
     store.put_json(revision["packageKey"], package)
     store.update_metadata(f"HUB#{hub['hubId']}", f"ARTICLE#{article_id}", {
@@ -473,12 +490,13 @@ def _publish_article(
         raise ContentHubNotFound()
     revision_id = _safe_id(binding.get("revisionId") or _input_field(payload, "revisionId") or article.get("latestRevisionId"))
     revision = store.get_metadata(f"ARTICLE#{article_id}", f"REVISION#{revision_id}")
-    if not revision:
+    if not revision or revision.get("hubId") != hub["hubId"]:
         raise ContentHubNotFound("Revision not found")
     package = store.get_json(revision["packageKey"])
     path = _article_path(_input_field(payload, "path") or article.get("path") or f"/blog/{_slug(article.get('title') or article_id)}")
     canonical_mode = _canonical_mode(_input_field(payload, "canonicalMode") or article.get("canonicalMode") or "self")
     canonical_url = _safe_canonical_url(_input_field(payload, "canonicalUrl") or article.get("canonicalUrl") or "")
+    _assert_public_slug_available(store, profile, render_domain, locale, path, article_id)
     now = _now_iso()
     bundle = {
         "version": 1,
@@ -556,7 +574,7 @@ def _unpublish_article(
     render_domain = _domain(_input_field(payload, "renderDomain") or profile["domain"])
     locale = _locale(binding.get("language") or _input_field(payload, "language") or article.get("primaryLocale") or hub.get("defaultLocale") or "es")
     path = _article_path(_input_field(payload, "path") or article.get("path") or f"/blog/{_slug(article.get('title') or article_id)}")
-    _remove_public_slug(store, profile, render_domain, locale, path)
+    _remove_public_slug(store, profile, render_domain, locale, path, article_id)
     store.update_metadata(f"HUB#{hub['hubId']}", f"ARTICLE#{article_id}", {
         "status": "unpublished",
         "visibility": "private",
@@ -583,7 +601,7 @@ def _archive_article(
     render_domain = _domain(_input_field(payload, "renderDomain") or profile["domain"])
     locale = _locale(binding.get("language") or _input_field(payload, "language") or article.get("primaryLocale") or hub.get("defaultLocale") or "es")
     path = _article_path(_input_field(payload, "path") or article.get("path") or f"/blog/{_slug(article.get('title') or article_id)}")
-    _remove_public_slug(store, profile, render_domain, locale, path)
+    _remove_public_slug(store, profile, render_domain, locale, path, article_id)
     store.update_metadata(f"HUB#{hub['hubId']}", f"ARTICLE#{article_id}", {
         "status": "archived",
         "visibility": "private",
@@ -602,25 +620,50 @@ def _schedule_article(
     hub: dict[str, Any],
 ) -> dict[str, Any]:
     article_id = _safe_id(binding.get("articleId") or _input_field(payload, "articleId"))
-    revision_id = _safe_id(binding.get("revisionId") or _input_field(payload, "revisionId"))
-    scheduled_at = _safe_text(_input_field(payload, "scheduledAt") or _input_field(payload, "publishAt"), max_length=40)
-    if not scheduled_at or not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2})", scheduled_at):
-        raise ContentHubError("Invalid schedule time")
-    schedule_id = _safe_id(_input_field(payload, "scheduleId") or f"sch_{hashlib.sha256(f'{article_id}:{revision_id}:{scheduled_at}'.encode()).hexdigest()[:16]}")
+    store = _store()
+    article = store.get_metadata(f"HUB#{hub['hubId']}", f"ARTICLE#{article_id}")
+    if not article:
+        raise ContentHubNotFound()
+
+    action = _schedule_action(_direct_input_field(payload, "scheduleAction") or "publish")
+    timezone = _schedule_timezone(_direct_input_field(payload, "timezone") or "UTC")
+    revision_id = ""
+    if action == "publish":
+        scheduled_at = _schedule_time(
+            _direct_input_field(payload, "publishAt") or _direct_input_field(payload, "scheduledAt"),
+            field_name="publishAt",
+            invalid_message="Invalid publish time",
+        )
+        revision_id = _safe_id(binding.get("revisionId") or _direct_input_field(payload, "revisionId") or article.get("latestRevisionId"))
+        revision = store.get_metadata(f"ARTICLE#{article_id}", f"REVISION#{revision_id}")
+        if not revision or revision.get("hubId") != hub["hubId"]:
+            raise ContentHubNotFound("Revision not found")
+    else:
+        scheduled_at = _schedule_time(
+            _direct_input_field(payload, "unpublishAt") or _direct_input_field(payload, "scheduledAt"),
+            field_name="unpublishAt",
+            invalid_message="Invalid unpublish time",
+        )
+    schedule_id = _safe_id(_direct_input_field(payload, "scheduleId") or f"sch_{hashlib.sha256(f'{article_id}:{revision_id}:{action}:{scheduled_at}:{timezone}'.encode()).hexdigest()[:16]}")
+    schedule_sort = f"DUE#{scheduled_at}#ARTICLE#{article_id}#ACTION#{action}"
+    if revision_id:
+        schedule_sort = f"{schedule_sort}#REVISION#{revision_id}"
     item = {
         "pk": f"SCHEDULE#{profile['environment']}",
-        "sk": f"DUE#{scheduled_at}#ARTICLE#{article_id}#REVISION#{revision_id}",
+        "sk": schedule_sort,
         "itemFamily": "SCHEDULE",
         "scheduleId": schedule_id,
         "hubId": hub["hubId"],
         "articleId": article_id,
         "revisionId": revision_id,
-        "action": _safe_id(_input_field(payload, "scheduleAction") or "publish"),
+        "action": action,
         "scheduledAt": scheduled_at,
+        f"{action}At": scheduled_at,
+        "timezone": timezone,
         "createdBy": session["subject"],
         "createdAt": _now_iso(),
     }
-    _store().put_metadata(item)
+    store.put_metadata(item)
     return {"schedule": _schedule_summary(item)}
 
 
@@ -630,7 +673,7 @@ def _upload_asset(payload: dict[str, Any], session: dict[str, Any], profile: dic
     mime_type = _safe_text(_input_field(payload, "mimeType") or "application/octet-stream", max_length=120)
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.+-]{0,80}/[A-Za-z0-9][A-Za-z0-9.+-]{0,80}", mime_type):
         raise ContentHubError("Invalid asset MIME type")
-    asset_id = _safe_id(_input_field(payload, "assetId") or f"asset_{int(time.time())}_{hashlib.sha256(file_name.encode()).hexdigest()[:8]}")
+    asset_id = _safe_id(_input_field(payload, "assetId") or f"asset_{time.time_ns()}_{hashlib.sha256(file_name.encode()).hexdigest()[:8]}")
     public_url = _safe_public_url(_input_field(payload, "publicUrl") or "")
     body_b64 = _clean_string(_input_field(payload, "base64"))
     key = f"content-hubs/{os.getenv(ENVIRONMENT_ENV, 'dev')}/{hub['hubId']}/assets/{asset_id}/original/{file_name}"
@@ -766,9 +809,14 @@ def _restore_revision(
     del profile
     article_id = _safe_id(binding.get("articleId") or _input_field(payload, "articleId"))
     revision_id = _safe_id(binding.get("revisionId") or _input_field(payload, "revisionId"))
-    if not _store().get_metadata(f"ARTICLE#{article_id}", f"REVISION#{revision_id}"):
+    store = _store()
+    article = store.get_metadata(f"HUB#{hub['hubId']}", f"ARTICLE#{article_id}")
+    if not article:
+        raise ContentHubNotFound()
+    revision = store.get_metadata(f"ARTICLE#{article_id}", f"REVISION#{revision_id}")
+    if not revision or revision.get("hubId") != hub["hubId"]:
         raise ContentHubNotFound("Revision not found")
-    _store().update_metadata(f"HUB#{hub['hubId']}", f"ARTICLE#{article_id}", {
+    store.update_metadata(f"HUB#{hub['hubId']}", f"ARTICLE#{article_id}", {
         "latestRevisionId": revision_id,
         "status": "draft",
         "updatedBy": session["subject"],
@@ -804,8 +852,27 @@ def _remove_public_slug(
     render_domain: str,
     locale: str,
     path: str,
+    article_id: str,
 ) -> None:
-    store.delete_metadata(f"SLUG#{profile['environment']}#{render_domain}#{locale}", f"PATH#{path}")
+    pk = f"SLUG#{profile['environment']}#{render_domain}#{locale}"
+    sk = f"PATH#{path}"
+    existing = store.get_metadata(pk, sk)
+    if existing and existing.get("articleId") != article_id:
+        return
+    store.delete_metadata(pk, sk)
+
+
+def _assert_public_slug_available(
+    store: Any,
+    profile: dict[str, Any],
+    render_domain: str,
+    locale: str,
+    path: str,
+    article_id: str,
+) -> None:
+    existing = store.get_metadata(f"SLUG#{profile['environment']}#{render_domain}#{locale}", f"PATH#{path}")
+    if existing and existing.get("articleId") != article_id:
+        raise ContentHubError("Article path already exists")
 
 
 _CONFIG_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
@@ -1167,6 +1234,11 @@ def _input_field(payload: dict[str, Any], key: str) -> Any:
     return payload.get(key)
 
 
+def _direct_input_field(payload: dict[str, Any], key: str) -> Any:
+    input_value = payload.get("input") if isinstance(payload.get("input"), dict) else {}
+    return input_value.get(key)
+
+
 def _nested_input(input_value: dict[str, Any], path: str) -> Any:
     current: Any = input_value
     for part in path.split("."):
@@ -1335,7 +1407,6 @@ def _revision_summary(item: dict[str, Any]) -> dict[str, Any]:
         "locale": item.get("locale"),
         "kind": item.get("kind"),
         "createdAt": item.get("createdAt"),
-        "createdBy": item.get("createdBy"),
     }
 
 
@@ -1378,13 +1449,16 @@ def _interaction_summary(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def _schedule_summary(item: dict[str, Any]) -> dict[str, Any]:
-    return {
+    return _without_empty({
         "scheduleId": item.get("scheduleId"),
         "articleId": item.get("articleId"),
         "revisionId": item.get("revisionId"),
         "action": item.get("action"),
         "scheduledAt": item.get("scheduledAt"),
-    }
+        "publishAt": item.get("publishAt"),
+        "unpublishAt": item.get("unpublishAt"),
+        "timezone": item.get("timezone"),
+    })
 
 
 def _analytics_context(hub: dict[str, Any]) -> dict[str, Any]:
@@ -1571,6 +1645,51 @@ def _article_path(value: Any) -> str:
     return path
 
 
+def _schedule_action(value: Any) -> str:
+    return _choice(
+        value,
+        aliases={
+            "publish-article": "publish",
+            "publicar": "publish",
+            "unpublish-article": "unpublish",
+            "despublicar": "unpublish",
+        },
+        allowed={"publish", "unpublish"},
+        error_message="Invalid schedule action",
+    )
+
+
+def _schedule_time(value: Any, *, field_name: str, invalid_message: str) -> str:
+    text = _safe_text(value, max_length=40)
+    if not text:
+        raise ContentHubError(f"{field_name} is required")
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2})", text):
+        raise ContentHubError(invalid_message)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ContentHubError(invalid_message) from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ContentHubError(invalid_message)
+    return text
+
+
+def _schedule_timezone(value: Any) -> str:
+    timezone = _safe_text(value or "UTC", max_length=64)
+    if (
+        not timezone
+        or ".." in timezone
+        or "//" in timezone
+        or not re.fullmatch(r"(?:UTC|[A-Za-z][A-Za-z0-9._+-]{0,31}(?:/[A-Za-z0-9._+-]{1,40}){1,3})", timezone)
+    ):
+        raise ContentHubError("Invalid timezone")
+    try:
+        ZoneInfo(timezone)
+    except ZoneInfoNotFoundError as exc:
+        raise ContentHubError("Invalid timezone") from exc
+    return timezone
+
+
 def _safe_text(value: Any, *, max_length: int) -> str:
     text = _clean_string(value)
     if re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", text):
@@ -1755,10 +1874,13 @@ def _taxonomy_ref(value: Any) -> dict[str, Any]:
 
 def _taxonomy_refs(value: Any) -> list[dict[str, Any]]:
     refs = []
+    seen = set()
     items = [part.strip() for part in value.split(",")] if isinstance(value, str) else _list_value(value)
     for item in items:
         ref = _taxonomy_ref(item)
-        if ref:
+        taxonomy_id = ref.get("taxonomyId") if ref else ""
+        if ref and taxonomy_id not in seen:
+            seen.add(taxonomy_id)
             refs.append(ref)
     return refs[:20]
 
@@ -1766,6 +1888,12 @@ def _taxonomy_refs(value: Any) -> list[dict[str, Any]]:
 def _article_metadata_updates(payload: dict[str, Any]) -> dict[str, Any]:
     updates: dict[str, Any] = {}
     field_builders = {
+        "title": lambda: _safe_text(_input_field(payload, "title"), max_length=160),
+        "summary": lambda: _safe_text(_input_field(payload, "summary"), max_length=320),
+        "slug": lambda: _slug(_input_field(payload, "slug")),
+        "path": lambda: _article_path(_input_field(payload, "path")),
+        "visibility": lambda: _visibility(_input_field(payload, "visibility")),
+        "primaryLocale": lambda: _locale(_input_field(payload, "language")),
         "seoTitle": lambda: _safe_text(_input_field(payload, "seoTitle"), max_length=160),
         "seoDescription": lambda: _safe_text(_input_field(payload, "seoDescription"), max_length=320),
         "robots": lambda: _robots_policy(_input_field(payload, "robots")),
@@ -1777,8 +1905,11 @@ def _article_metadata_updates(payload: dict[str, Any]) -> dict[str, Any]:
         "canonicalUrl": lambda: _safe_canonical_url(_input_field(payload, "canonicalUrl")),
     }
     for field, builder in field_builders.items():
-        if _input_field(payload, field) is not None:
+        input_key = "language" if field == "primaryLocale" else field
+        if _input_field(payload, input_key) is not None:
             updates[field] = builder()
+    if isinstance(updates.get("category"), dict):
+        updates["categorySlug"] = _taxonomy_ref_slug(updates["category"])
     return updates
 
 

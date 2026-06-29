@@ -2,6 +2,7 @@ import base64
 import json
 import os
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import lambda_function as content_hub
@@ -573,6 +574,82 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertEqual(bundle["analytics"]["piiPolicy"], "no-pii")
         self.assertNotIn("bucket", publish["body"].lower())
 
+    def test_publish_rejects_path_collision_with_another_article(self):
+        first = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Primero", "slug": "primero"},
+        )
+        second = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Segundo", "slug": "segundo"},
+        )
+        first_id = body(first)["data"]["article"]["articleId"]
+        second_id = body(second)["data"]["article"]["articleId"]
+        first_publish = self.request(
+            "/features/content-hub/action",
+            {"action": "publish", "articleId": first_id, "revisionId": "rev_001"},
+            {"path": "/blog/colision"},
+        )
+        self.assertEqual(first_publish["statusCode"], 200)
+
+        collision = self.request(
+            "/features/content-hub/action",
+            {"action": "publish", "articleId": second_id, "revisionId": "rev_001"},
+            {"path": "/blog/colision"},
+        )
+
+        self.assertEqual(collision["statusCode"], 400)
+        self.assertEqual(body(collision)["error"], "Article path already exists")
+        slug = self.store.get_metadata("SLUG#test#zoositioweb.com.mx#es", "PATH#/blog/colision")
+        self.assertEqual(slug["articleId"], first_id)
+
+    def test_unpublish_does_not_remove_slug_owned_by_another_article(self):
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "No borrar ajeno"},
+        )
+        article_id = body(create)["data"]["article"]["articleId"]
+        self.store.put_metadata({
+            "pk": "SLUG#test#zoositioweb.com.mx#es",
+            "sk": "PATH#/blog/ajeno",
+            "itemFamily": "SLUG",
+            "hubId": "zoosite-main",
+            "articleId": "art_other",
+            "revisionId": "rev_001",
+            "path": "/blog/ajeno",
+        })
+
+        unpublish = self.request(
+            "/features/content-hub/action",
+            {"action": "unpublishArticle", "articleId": article_id},
+            {"path": "/blog/ajeno"},
+        )
+
+        self.assertEqual(unpublish["statusCode"], 200)
+        slug = self.store.get_metadata("SLUG#test#zoositioweb.com.mx#es", "PATH#/blog/ajeno")
+        self.assertEqual(slug["articleId"], "art_other")
+
+    def test_publish_rejects_revision_from_another_hub(self):
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Revision ajena"},
+        )
+        article_id = body(create)["data"]["article"]["articleId"]
+        revision = self.store.get_metadata(f"ARTICLE#{article_id}", "REVISION#rev_001")
+        revision["hubId"] = "other-hub"
+
+        publish = self.request(
+            "/features/content-hub/action",
+            {"action": "publish", "articleId": article_id, "revisionId": "rev_001"},
+            {"path": "/blog/revision-ajena"},
+        )
+
+        self.assertEqual(publish["statusCode"], 404)
+
     def test_publisher_can_approve_unpublish_and_archive_article(self):
         create = self.request(
             "/features/content-hub/action",
@@ -645,6 +722,156 @@ class ContentHubHandlerTests(unittest.TestCase):
         )
         self.assertEqual(response["statusCode"], 404)
 
+    def test_schedule_requires_existing_article_and_safe_publish_time(self):
+        missing = self.request(
+            "/features/content-hub/action",
+            {"action": "schedule", "articleId": "art_missing"},
+            {"publishAt": "2026-07-01T10:00:00Z", "timezone": "America/Mexico_City"},
+        )
+        self.assertEqual(missing["statusCode"], 404)
+
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Programar", "summary": "Programacion segura"},
+        )
+        article_id = body(create)["data"]["article"]["articleId"]
+
+        invalid_time = self.request(
+            "/features/content-hub/action",
+            {"action": "schedule", "articleId": article_id},
+            {"publishAt": "not-a-date", "timezone": "America/Mexico_City"},
+        )
+        self.assertEqual(invalid_time["statusCode"], 400)
+        self.assertEqual(body(invalid_time)["error"], "Invalid publish time")
+
+        invalid_timezone = self.request(
+            "/features/content-hub/action",
+            {"action": "schedule", "articleId": article_id},
+            {"publishAt": "2026-07-01T10:00:00Z", "timezone": "../UTC"},
+        )
+        self.assertEqual(invalid_timezone["statusCode"], 400)
+        self.assertEqual(body(invalid_timezone)["error"], "Invalid timezone")
+
+    def test_schedule_publish_uses_existing_immutable_revision(self):
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Revision programada", "summary": "Revision fija"},
+        )
+        article_id = body(create)["data"]["article"]["articleId"]
+
+        schedule = self.request(
+            "/features/content-hub/action",
+            {"action": "schedule", "articleId": article_id},
+            {"publishAt": "2026-07-01T10:00:00Z", "timezone": "America/Mexico_City"},
+        )
+        self.assertEqual(schedule["statusCode"], 200)
+        scheduled = body(schedule)["data"]["schedule"]
+        self.assertEqual(scheduled["revisionId"], "rev_001")
+        self.assertEqual(scheduled["publishAt"], "2026-07-01T10:00:00Z")
+        self.assertEqual(scheduled["timezone"], "America/Mexico_City")
+        self.assertNotIn("createdBy", schedule["body"])
+
+        rejected = self.request(
+            "/features/content-hub/action",
+            {"action": "schedule", "articleId": article_id},
+            {"publishAt": "2026-07-01T10:00:00Z", "revisionId": "rev_missing"},
+        )
+        self.assertEqual(rejected["statusCode"], 404)
+        self.assertEqual(body(rejected)["error"], "Revision not found")
+
+    def test_schedule_unpublish_validates_unpublish_time_without_revision(self):
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Desprogramar", "summary": "Salida programada"},
+        )
+        article_id = body(create)["data"]["article"]["articleId"]
+
+        schedule = self.request(
+            "/features/content-hub/action",
+            {"action": "schedule", "articleId": article_id},
+            {
+                "scheduleAction": "unpublish",
+                "unpublishAt": "2026-07-02T18:30:00-06:00",
+                "timezone": "America/Mexico_City",
+            },
+        )
+        self.assertEqual(schedule["statusCode"], 200)
+        scheduled = body(schedule)["data"]["schedule"]
+        self.assertEqual(scheduled["action"], "unpublish")
+        self.assertNotIn("revisionId", scheduled)
+        self.assertEqual(scheduled["unpublishAt"], "2026-07-02T18:30:00-06:00")
+
+        invalid = self.request(
+            "/features/content-hub/action",
+            {"action": "schedule", "articleId": article_id},
+            {"scheduleAction": "unpublish", "publishAt": "2026-07-02T18:30:00Z"},
+        )
+        self.assertEqual(invalid["statusCode"], 400)
+        self.assertEqual(body(invalid)["error"], "unpublishAt is required")
+
+    def test_revision_list_requires_existing_article_and_redacts_actor(self):
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Revisiones", "summary": "Historial seguro"},
+        )
+        article_id = body(create)["data"]["article"]["articleId"]
+
+        read = self.request(
+            "/features/content-hub/read",
+            {"read": "revisionList"},
+            {"articleId": article_id},
+            csrf=False,
+        )
+        self.assertEqual(read["statusCode"], 200)
+        revision = body(read)["data"]["items"][0]
+        self.assertEqual(revision["revisionId"], "rev_001")
+        self.assertNotIn("createdBy", revision)
+        self.assertNotIn("admin-sub", read["body"])
+
+        missing = self.request(
+            "/features/content-hub/read",
+            {"read": "revisionList"},
+            {"articleId": "art_missing"},
+            csrf=False,
+        )
+        self.assertEqual(missing["statusCode"], 404)
+
+    def test_restore_revision_requires_existing_article_and_safe_revision_id(self):
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Restauracion segura", "summary": "Sin fantasma"},
+        )
+        article_id = body(create)["data"]["article"]["articleId"]
+
+        unsafe = self.request(
+            "/features/content-hub/action",
+            {"action": "restoreRevision"},
+            {"articleId": article_id, "revisionId": "../rev_001"},
+        )
+        self.assertEqual(unsafe["statusCode"], 400)
+        self.assertEqual(body(unsafe)["error"], "Invalid id")
+
+        missing_article = self.request(
+            "/features/content-hub/action",
+            {"action": "restoreRevision"},
+            {"articleId": "art_missing", "revisionId": "rev_001"},
+        )
+        self.assertEqual(missing_article["statusCode"], 404)
+        self.assertIsNone(self.store.get_metadata("HUB#zoosite-main", "ARTICLE#art_missing"))
+
+        restore = self.request(
+            "/features/content-hub/action",
+            {"action": "restoreRevision"},
+            {"articleId": article_id, "revisionId": "rev_001"},
+        )
+        self.assertEqual(restore["statusCode"], 200)
+        self.assertEqual(body(restore)["data"]["revisionId"], "rev_001")
+
     def test_public_preview_uses_latest_revision_when_revision_id_is_omitted(self):
         create = self.request(
             "/features/content-hub/action",
@@ -689,6 +916,59 @@ class ContentHubHandlerTests(unittest.TestCase):
         )
         self.assertEqual(restore["statusCode"], 200)
         self.assertEqual(body(restore)["data"]["revisionId"], "rev_restore")
+
+    def test_update_package_requires_existing_article(self):
+        update = self.request(
+            "/features/content-hub/action",
+            {"action": "updatePackage"},
+            {"articleId": "art_missing", "revisionId": "rev_missing", "components": []},
+        )
+
+        self.assertEqual(update["statusCode"], 404)
+        self.assertIsNone(self.store.get_metadata("HUB#zoosite-main", "ARTICLE#art_missing"))
+
+    def test_update_package_updates_public_identity_fields_and_taxonomy(self):
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Antes", "summary": "Resumen anterior"},
+        )
+        article_id = body(create)["data"]["article"]["articleId"]
+
+        update = self.request(
+            "/features/content-hub/action",
+            {"action": "updatePackage"},
+            {
+                "articleId": article_id,
+                "revisionId": "rev_update",
+                "title": "Despues",
+                "summary": "Resumen actualizado",
+                "slug": "despues",
+                "path": "/blog/web/despues",
+                "language": "es",
+                "visibility": "public",
+                "category": {"taxonomyId": "cat-web", "slug": "web", "label": "Web"},
+                "tags": "seo, sitios web, seo",
+                "components": [],
+            },
+        )
+
+        self.assertEqual(update["statusCode"], 200)
+        article = self.store.get_metadata("HUB#zoosite-main", f"ARTICLE#{article_id}")
+        self.assertEqual(article["title"], "Despues")
+        self.assertEqual(article["summary"], "Resumen actualizado")
+        self.assertEqual(article["slug"], "despues")
+        self.assertEqual(article["path"], "/blog/web/despues")
+        self.assertEqual(article["visibility"], "public")
+        self.assertEqual(article["categorySlug"], "web")
+        self.assertEqual(article["category"]["taxonomyId"], "cat-web")
+        self.assertEqual([tag["slug"] for tag in article["tags"]], ["seo", "sitios-web"])
+        self.assertIsNotNone(self.store.get_metadata("HUB#zoosite-main", "TAXONOMY#category#cat-web"))
+        self.assertIsNotNone(self.store.get_metadata("HUB#zoosite-main", "TAXONOMY#tag#seo"))
+
+    def test_template_allows_delete_item_for_public_slug_cleanup(self):
+        template = Path("template.yaml").read_text(encoding="utf-8")
+        self.assertIn("dynamodb:DeleteItem", template)
 
     def test_queue_comment_redacts_private_contact_values(self):
         response = self.request(

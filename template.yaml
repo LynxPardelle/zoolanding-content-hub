@@ -170,6 +170,7 @@ Resources:
               - Effect: Allow
                 Action:
                   - dynamodb:GetItem
+                  - dynamodb:DeleteItem
                   - dynamodb:PutItem
                   - dynamodb:Query
                   - dynamodb:UpdateItem
