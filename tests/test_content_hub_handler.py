@@ -53,7 +53,7 @@ def encoded_role_policy_config(role_policies):
     return base64.b64encode(json.dumps(raw, separators=(",", ":")).encode("utf-8")).decode("ascii")
 
 
-def event(path, body, *, csrf=True, cookies=None, headers=None):
+def event(path, body, *, csrf=True, cookies=None, headers=None, request_id=None):
     req_headers = {
         "x-zlp-domain": "zoositioweb.com.mx",
         "x-zlp-auth-profile-id": "staff",
@@ -66,12 +66,15 @@ def event(path, body, *, csrf=True, cookies=None, headers=None):
         f"__Host-zlp_session={SESSION_VALUE}",
         "zlp_csrf=csrf-value",
     ] if cookies is None else cookies
+    request_context = {"http": {"method": "POST", "path": path}, "stage": "test"}
+    if request_id:
+        request_context["requestId"] = request_id
     return {
         "version": "2.0",
         "rawPath": path,
         "headers": req_headers,
         "cookies": request_cookies,
-        "requestContext": {"http": {"method": "POST", "path": path}, "stage": "test"},
+        "requestContext": request_context,
         "body": json.dumps(body),
     }
 
@@ -150,6 +153,9 @@ class FakeStore:
     def put_moderation(self, item):
         self.moderation[(item["pk"], item["sk"])] = dict(item)
 
+    def delete_moderation(self, pk, sk):
+        self.moderation.pop((pk, sk), None)
+
     def query_moderation(self, pk, sk_prefix):
         return [dict(item) for (item_pk, item_sk), item in self.moderation.items() if item_pk == pk and item_sk.startswith(sk_prefix)]
 
@@ -227,6 +233,81 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertEqual(response["statusCode"], 400)
         self.assertEqual(body(response)["error"], "contentHub.action is required")
 
+    def test_validation_error_response_includes_code_and_request_id(self):
+        response = self.request(
+            "/features/content-hub/action",
+            {},
+            {"title": "Blog builder SEO"},
+            request_id="req-safe-123",
+        )
+
+        self.assertEqual(response["statusCode"], 400)
+        self.assertEqual(body(response), {
+            "ok": False,
+            "code": "validation_error",
+            "error": "contentHub.action is required",
+            "message": "contentHub.action is required",
+            "requestId": "req-safe-123",
+        })
+
+    def test_error_response_generates_fallback_request_id(self):
+        response = self.request(
+            "/features/content-hub/read",
+            {"read": "articleList"},
+            cookies=[],
+            csrf=False,
+        )
+
+        self.assertEqual(response["statusCode"], 401)
+        payload = body(response)
+        self.assertEqual(payload["code"], "auth_required")
+        self.assertRegex(payload["requestId"], r"^req-[0-9]+$")
+
+    def test_internal_error_response_is_sanitized(self):
+        def leaking_query_metadata(pk, sk_prefix):
+            del pk, sk_prefix
+            raise RuntimeError("token=secret auth-session-table private-bucket stack trace")
+
+        self.store.query_metadata = leaking_query_metadata
+
+        with patch.object(content_hub, "_log"):
+            response = self.request(
+                "/features/content-hub/read",
+                {"read": "articleList"},
+                csrf=False,
+                request_id="req-internal-456",
+            )
+
+        self.assertEqual(response["statusCode"], 500)
+        self.assertEqual(body(response), {
+            "ok": False,
+            "code": "internal_error",
+            "error": "Content hub request failed",
+            "message": "Content hub request failed",
+            "requestId": "req-internal-456",
+        })
+        for leaked in ["token=secret", "auth-session-table", "private-bucket", "RuntimeError", "stack trace"]:
+            self.assertNotIn(leaked, response["body"])
+
+    def test_config_error_response_is_generic_internal_error(self):
+        os.environ["CONTENT_HUB_CONFIG_JSON_BASE64"] = base64.b64encode(b"{not-json").decode("ascii")
+        content_hub._CONFIG_CACHE.clear()
+
+        with patch.object(content_hub, "_log"):
+            response = self.request(
+                "/features/content-hub/read",
+                {"read": "articleList"},
+                csrf=False,
+                request_id="req-config-789",
+            )
+
+        self.assertEqual(response["statusCode"], 500)
+        payload = body(response)
+        self.assertEqual(payload["code"], "internal_error")
+        self.assertEqual(payload["error"], "Content hub service is temporarily unavailable")
+        self.assertEqual(payload["requestId"], "req-config-789")
+        self.assertNotIn("valid JSON", response["body"])
+
     def test_role_policies_authorize_by_action_scoped_permission(self):
         os.environ["CONTENT_HUB_CONFIG_JSON_BASE64"] = encoded_role_policy_config([
             {
@@ -293,9 +374,10 @@ class ContentHubHandlerTests(unittest.TestCase):
         ])
         content_hub._CONFIG_CACHE.clear()
 
-        response = self.request("/features/content-hub/read", {"read": "articleList"}, csrf=False)
+        with patch.object(content_hub, "_log"):
+            response = self.request("/features/content-hub/read", {"read": "articleList"}, csrf=False)
         self.assertEqual(response["statusCode"], 500)
-        self.assertEqual(body(response)["error"], "Content hub config is invalid")
+        self.assertEqual(body(response)["error"], "Content hub service is temporarily unavailable")
 
     def test_rejects_server_only_public_payload(self):
         response = self.request(
@@ -509,6 +591,7 @@ class ContentHubHandlerTests(unittest.TestCase):
             "CONTENT_HUB_PACKAGES_BUCKET_NAME": "packages",
         }
         fake_dynamodb = unittest.mock.Mock()
+        fake_dynamodb.Table.return_value.query.return_value = {"Items": []}
         with patch.dict(os.environ, env, clear=True), \
              patch("lambda_function._dynamodb_resource", return_value=fake_dynamodb), \
              patch("lambda_function._s3_client") as s3_client:
@@ -520,6 +603,40 @@ class ContentHubHandlerTests(unittest.TestCase):
 
             _ = store.s3
             s3_client.assert_called_once()
+
+    def test_dynamo_query_metadata_reads_every_page(self):
+        class PagedTable:
+            def __init__(self):
+                self.calls = []
+
+            def query(self, **kwargs):
+                self.calls.append(kwargs)
+                if len(self.calls) == 1:
+                    return {
+                        "Items": [{"pk": "HUB#zoosite-main", "sk": "ARTICLE#1"}],
+                        "LastEvaluatedKey": {"pk": "HUB#zoosite-main", "sk": "ARTICLE#1"},
+                    }
+                return {"Items": [{"pk": "HUB#zoosite-main", "sk": "ARTICLE#2"}]}
+
+        env = {
+            "AUTH_SESSION_TABLE_NAME": "auth-session",
+            "AUTH_USER_STATE_TABLE_NAME": "auth-user",
+            "CONTENT_HUB_METADATA_TABLE_NAME": "metadata",
+            "CONTENT_HUB_MEDIA_TABLE_NAME": "media",
+            "CONTENT_HUB_MODERATION_TABLE_NAME": "moderation",
+            "CONTENT_HUB_INTERACTIONS_TABLE_NAME": "interactions",
+            "CONTENT_HUB_PACKAGES_BUCKET_NAME": "packages",
+        }
+        table = PagedTable()
+        fake_dynamodb = unittest.mock.Mock()
+        fake_dynamodb.Table.return_value = table
+
+        with patch.dict(os.environ, env, clear=True), patch("lambda_function._dynamodb_resource", return_value=fake_dynamodb):
+            store = content_hub.DynamoContentHubStore()
+            items = store.query_metadata("HUB#zoosite-main", "ARTICLE#")
+
+        self.assertEqual([item["sk"] for item in items], ["ARTICLE#1", "ARTICLE#2"])
+        self.assertEqual(table.calls[1]["ExclusiveStartKey"], {"pk": "HUB#zoosite-main", "sk": "ARTICLE#1"})
 
     def test_editor_cannot_publish_without_publish_role(self):
         self.store.roles = ["zoosite-blog-editor"]
@@ -889,6 +1006,38 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertEqual(rejected["statusCode"], 404)
         self.assertEqual(body(rejected)["error"], "Revision not found")
 
+    def test_schedule_list_and_cancel_schedule_are_supported(self):
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Programable"},
+        )
+        article_id = body(create)["data"]["article"]["articleId"]
+        schedule = self.request(
+            "/features/content-hub/action",
+            {"action": "schedule", "articleId": article_id},
+            {"publishAt": "2026-07-01T10:00:00Z", "timezone": "America/Mexico_City"},
+        )
+        self.assertEqual(schedule["statusCode"], 200)
+        schedule_id = body(schedule)["data"]["schedule"]["scheduleId"]
+
+        read = self.request(
+            "/features/content-hub/read",
+            {"read": "scheduleList", "articleId": article_id},
+            csrf=False,
+        )
+        self.assertEqual(read["statusCode"], 200)
+        self.assertEqual([item["scheduleId"] for item in body(read)["data"]["items"]], [schedule_id])
+
+        cancel = self.request(
+            "/features/content-hub/action",
+            {"action": "cancelSchedule", "articleId": article_id, "scheduleId": schedule_id},
+            {},
+        )
+        self.assertEqual(cancel["statusCode"], 200)
+        self.assertEqual(body(cancel)["data"]["schedule"]["status"], "canceled")
+        self.assertEqual(self.store.query_metadata("SCHEDULE#test", "DUE#"), [])
+
     def test_schedule_unpublish_validates_unpublish_time_without_revision(self):
         create = self.request(
             "/features/content-hub/action",
@@ -1059,7 +1208,7 @@ class ContentHubHandlerTests(unittest.TestCase):
             {"articleId": article_id, "revisionId": "../rev_001"},
         )
         self.assertEqual(unsafe["statusCode"], 400)
-        self.assertEqual(body(unsafe)["error"], "Invalid id")
+        self.assertEqual(body(unsafe)["error"], "Invalid identifier")
 
         missing_article = self.request(
             "/features/content-hub/action",
@@ -1121,6 +1270,51 @@ class ContentHubHandlerTests(unittest.TestCase):
         )
         self.assertEqual(restore["statusCode"], 200)
         self.assertEqual(body(restore)["data"]["revisionId"], "rev_restore")
+
+    def test_update_package_persists_editable_article_content_in_article_detail(self):
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Contenido enriquecido", "summary": "Resumen editable"},
+        )
+        article_id = body(create)["data"]["article"]["articleId"]
+        article_content = {
+            "ops": [
+                {"insert": "Encabezado editable"},
+                {"insert": "\n", "attributes": {"header": 2}},
+                {"insert": "Cuerpo con "},
+                {"insert": "enfasis", "attributes": {"bold": True}},
+                {"insert": "\n"},
+            ],
+        }
+
+        update = self.request(
+            "/features/content-hub/action",
+            {"action": "updatePackage"},
+            {
+                "articleId": article_id,
+                "revisionId": "rev_rich_text",
+                "articleContent": article_content,
+                "variables": {"draftNote": "visible-safe"},
+                "components": [{"type": "generic-rich-text", "config": {"valueFrom": "articleContent"}}],
+            },
+        )
+        self.assertEqual(update["statusCode"], 200)
+
+        detail = self.request(
+            "/features/content-hub/read",
+            {"read": "articleDetail", "articleId": article_id},
+            csrf=False,
+        )
+        self.assertEqual(detail["statusCode"], 200)
+        item = body(detail)["data"]["item"]
+        self.assertEqual(item["revisionId"], "rev_rich_text")
+        self.assertEqual(item["articleContent"], article_content)
+        self.assertEqual(item["variables"]["articleContent"], article_content)
+        self.assertEqual(item["variables"]["draftNote"], "visible-safe")
+        self.assertEqual(item["components"][0]["type"], "generic-rich-text")
+        self.assertNotIn("packageKey", detail["body"])
+        self.assertNotIn("publishedBundleKey", detail["body"])
 
     def test_update_package_requires_existing_article(self):
         update = self.request(
@@ -1187,6 +1381,38 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertIn("[redacted-email]", queued["bodyPreview"])
         self.assertIn("[redacted-phone]", queued["bodyPreview"])
         self.assertNotIn("persona@example.com", response["body"])
+
+    def test_moderate_comment_updates_existing_queue_record(self):
+        queued = self.request(
+            "/features/content-hub/action",
+            {"action": "queueComment", "articleId": "art_123"},
+            {"commentText": "Comentario listo para revisar"},
+        )
+        self.assertEqual(queued["statusCode"], 200)
+        comment_id = body(queued)["data"]["comment"]["commentId"]
+
+        moderated = self.request(
+            "/features/content-hub/action",
+            {"action": "moderateComment", "commentId": comment_id},
+            {"moderationStatus": "approved"},
+        )
+
+        self.assertEqual(moderated["statusCode"], 200)
+        self.assertEqual(body(moderated)["data"]["moderation"]["status"], "approved")
+        moderation_rows = self.store.query_moderation("HUB#zoosite-main", "MODERATION#")
+        self.assertEqual(len(moderation_rows), 1)
+        self.assertEqual(moderation_rows[0]["commentId"], comment_id)
+        self.assertEqual(moderation_rows[0]["articleId"], "art_123")
+        self.assertEqual(moderation_rows[0]["bodyPreview"], "Comentario listo para revisar")
+
+    def test_moderate_comment_requires_existing_comment(self):
+        response = self.request(
+            "/features/content-hub/action",
+            {"action": "moderateComment", "commentId": "cmt_missing"},
+            {"moderationStatus": "approved"},
+        )
+
+        self.assertEqual(response["statusCode"], 404)
 
     def test_record_interaction_accepts_safe_metadata_and_rejects_pii(self):
         response = self.request(
@@ -1258,6 +1484,18 @@ class ContentHubHandlerTests(unittest.TestCase):
         )
         self.assertEqual(response["statusCode"], 400)
         self.assertNotIn("X-Amz-Signature", response["body"])
+
+
+class ContentHubTemplateTests(unittest.TestCase):
+    def test_due_schedule_is_explicit_eventbridge_rule(self):
+        template = Path(__file__).resolve().parents[1].joinpath("template.yaml").read_text(encoding="utf-8")
+
+        self.assertIn("DueSchedulesRule:", template)
+        self.assertIn("Type: AWS::Events::Rule", template)
+        self.assertIn("ScheduleExpression: rate(5 minutes)", template)
+        self.assertIn("DueSchedulesPermission:", template)
+        self.assertIn("Principal: events.amazonaws.com", template)
+        self.assertNotIn("Type: Schedule", template)
 
 
 if __name__ == "__main__":
