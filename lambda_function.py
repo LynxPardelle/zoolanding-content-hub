@@ -31,6 +31,7 @@ SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 DOMAIN_RE = re.compile(r"^(?!-)(?:[a-z0-9-]{1,63}\.)+[a-z]{2,63}$")
 LOCALE_RE = re.compile(r"^[a-z]{2}(?:-[a-z0-9]{2,8})?$")
 SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+PERMISSION_RE = re.compile(r"^[a-z][a-z0-9-]*:[a-z][a-z0-9-]*:[a-z][a-z0-9-]*$")
 SECRET_KEY_RE = re.compile(
     r"(?:access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|credential[_-]?ref|"
     r"secret[_-]?ref|private[_-]?key|server[_-]?policy|table[_-]?name|bucket[_-]?name|"
@@ -59,6 +60,16 @@ READ_CAPABILITIES = {
     "moderationQueue": "moderate",
 }
 
+READ_PERMISSIONS = {
+    "articleList": "blog:article:read",
+    "articleDetail": "blog:article:read",
+    "taxonomyList": "blog:taxonomy:read",
+    "assetList": "blog:media:read",
+    "revisionList": "blog:revision:read",
+    "publicBundlePreview": "blog:article:read",
+    "moderationQueue": "blog:moderation:read",
+}
+
 ACTION_CAPABILITIES = {
     "createArticle": "edit",
     "upsertTaxonomy": "edit",
@@ -72,6 +83,21 @@ ACTION_CAPABILITIES = {
     "queueComment": "moderate",
     "moderateComment": "moderate",
     "recordInteraction": "read",
+}
+
+ACTION_PERMISSIONS = {
+    "createArticle": "blog:article:create",
+    "upsertTaxonomy": "blog:taxonomy:manage",
+    "updatePackage": "blog:article:update",
+    "validate": "blog:article:validate",
+    "submitReview": "blog:article:submit-review",
+    "restoreRevision": "blog:revision:restore",
+    "publish": "blog:article:publish",
+    "schedule": "blog:article:schedule",
+    "uploadAsset": "blog:media:manage",
+    "queueComment": "blog:moderation:moderate",
+    "moderateComment": "blog:moderation:moderate",
+    "recordInteraction": "blog:interaction:record",
 }
 
 PII_KEY_RE = re.compile(
@@ -141,7 +167,7 @@ def _read_response(event: dict[str, Any]) -> dict[str, Any]:
     read_kind = _safe_id(binding.get("read"))
     if read_kind not in READ_CAPABILITIES:
         raise ContentHubError("Unsupported content hub read")
-    _require_capability(session, profile, hub, READ_CAPABILITIES[read_kind])
+    _require_content_hub_access(session, profile, hub, READ_CAPABILITIES[read_kind], READ_PERMISSIONS[read_kind])
     data = _handle_read(read_kind, payload, binding, profile, hub)
     return _json_response(200, {"ok": True, "data": _public_payload(data)})
 
@@ -155,7 +181,7 @@ def _action_response(event: dict[str, Any]) -> dict[str, Any]:
     action_kind = _safe_id(action_value)
     if action_kind not in ACTION_CAPABILITIES:
         raise ContentHubError("Unsupported content hub action")
-    _require_capability(session, profile, hub, ACTION_CAPABILITIES[action_kind])
+    _require_content_hub_access(session, profile, hub, ACTION_CAPABILITIES[action_kind], ACTION_PERMISSIONS[action_kind])
     data = _handle_action(action_kind, payload, binding, session, profile, hub)
     return _json_response(200, {"ok": True, "data": _public_payload(data)})
 
@@ -771,9 +797,42 @@ def _normalize_hub(hub: dict[str, Any], admin_groups: list[str], domain: str) ->
         "authorizedDraftDomains": [_domain(item) for item in _string_list(hub.get("authorizedDraftDomains") or [domain])],
         "defaultLocale": _locale(hub.get("defaultLocale") or "es"),
         "roles": normalized_roles,
+        "rolePolicies": _normalize_role_policies(hub.get("rolePolicies")),
         "maxUploadBytes": int(hub.get("maxUploadBytes") or 5_000_000),
         "analyticsContext": hub.get("analyticsContext") if isinstance(hub.get("analyticsContext"), dict) else {},
     }
+
+
+def _normalize_role_policies(raw_policies: Any) -> list[dict[str, Any]]:
+    if raw_policies is None:
+        return []
+    if not isinstance(raw_policies, list):
+        raise ContentHubConfigError()
+    policies: list[dict[str, Any]] = []
+    for raw_policy in raw_policies:
+        if not isinstance(raw_policy, dict):
+            raise ContentHubConfigError()
+        role_id = _clean_string(raw_policy.get("roleId"))
+        if not SAFE_ID_RE.fullmatch(role_id):
+            raise ContentHubConfigError()
+        groups = _string_list(raw_policy.get("groups"))
+        permissions = _string_list(raw_policy.get("permissions"))
+        if not groups:
+            raise ContentHubConfigError()
+        if not permissions:
+            raise ContentHubConfigError()
+        for group in groups:
+            if not SAFE_ID_RE.fullmatch(group):
+                raise ContentHubConfigError()
+        for permission in permissions:
+            if not PERMISSION_RE.fullmatch(permission) or "*" in permission:
+                raise ContentHubConfigError()
+        policies.append({
+            "roleId": role_id,
+            "groups": groups,
+            "permissions": permissions,
+        })
+    return policies
 
 
 def _profile_for(domain: str, auth_profile_id: str) -> dict[str, Any]:
@@ -836,6 +895,23 @@ def _require_capability(session: dict[str, Any], profile: dict[str, Any], hub: d
     roles = set(_string_list(session.get("roles")))
     if not roles.intersection(allowed):
         raise ContentHubForbidden("Content hub access denied")
+
+
+def _require_content_hub_access(
+    session: dict[str, Any],
+    profile: dict[str, Any],
+    hub: dict[str, Any],
+    capability: str,
+    permission: str,
+) -> None:
+    roles = set(_string_list(session.get("roles")))
+    role_policies = hub.get("rolePolicies") if isinstance(hub.get("rolePolicies"), list) else []
+    if role_policies:
+        for policy in role_policies:
+            if permission in set(policy.get("permissions") or []) and roles.intersection(set(policy.get("groups") or [])):
+                return
+        raise ContentHubForbidden("Content hub access denied")
+    _require_capability(session, profile, hub, capability)
 
 
 class DynamoContentHubStore:

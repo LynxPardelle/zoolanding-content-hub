@@ -44,6 +44,14 @@ def encoded_config(**overrides):
     return base64.b64encode(raw).decode("ascii")
 
 
+def encoded_role_policy_config(role_policies):
+    raw = json.loads(base64.b64decode(encoded_config()).decode("utf-8"))
+    hub = raw["profiles"][0]["contentHubs"][0]
+    hub.pop("roles", None)
+    hub["rolePolicies"] = role_policies
+    return base64.b64encode(json.dumps(raw, separators=(",", ":")).encode("utf-8")).decode("ascii")
+
+
 def event(path, body, *, csrf=True, cookies=None, headers=None):
     req_headers = {
         "x-zlp-domain": "zoositioweb.com.mx",
@@ -214,6 +222,76 @@ class ContentHubHandlerTests(unittest.TestCase):
         )
         self.assertEqual(response["statusCode"], 400)
         self.assertEqual(body(response)["error"], "contentHub.action is required")
+
+    def test_role_policies_authorize_by_action_scoped_permission(self):
+        os.environ["CONTENT_HUB_CONFIG_JSON_BASE64"] = encoded_role_policy_config([
+            {
+                "roleId": "blog-editor",
+                "groups": ["zoosite-blog-editor"],
+                "permissions": [
+                    "blog:article:read",
+                    "blog:article:create",
+                    "blog:article:update",
+                    "blog:article:validate",
+                ],
+            },
+            {
+                "roleId": "blog-publisher",
+                "groups": ["zoosite-blog-publisher"],
+                "permissions": [
+                    "blog:article:read",
+                    "blog:article:publish",
+                ],
+            },
+        ])
+        content_hub._CONFIG_CACHE.clear()
+        self.store.roles = ["zoosite-blog-editor"]
+
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Policy article", "summary": "Permisos accionables"},
+        )
+        self.assertEqual(create["statusCode"], 200)
+        article_id = body(create)["data"]["article"]["articleId"]
+
+        read = self.request("/features/content-hub/read", {"read": "articleDetail"}, {"articleId": article_id}, csrf=False)
+        self.assertEqual(read["statusCode"], 200)
+
+        self.store.roles = ["zoosite-blog-publisher"]
+        published = self.request(
+            "/features/content-hub/action",
+            {"action": "publish", "articleId": article_id, "revisionId": "rev_001"},
+        )
+        self.assertEqual(published["statusCode"], 200)
+
+        self.store.roles = ["zoosite-blog-editor"]
+        preview = self.request(
+            "/features/content-hub/read",
+            {"read": "publicBundlePreview", "articleId": article_id},
+            csrf=False,
+        )
+        self.assertEqual(preview["statusCode"], 200)
+
+        publish = self.request(
+            "/features/content-hub/action",
+            {"action": "publish", "articleId": article_id, "revisionId": "rev_001"},
+        )
+        self.assertEqual(publish["statusCode"], 403)
+
+    def test_role_policy_config_rejects_wildcard_permission(self):
+        os.environ["CONTENT_HUB_CONFIG_JSON_BASE64"] = encoded_role_policy_config([
+            {
+                "roleId": "bad-role",
+                "groups": ["zoosite-admin"],
+                "permissions": ["blog:article:*"],
+            },
+        ])
+        content_hub._CONFIG_CACHE.clear()
+
+        response = self.request("/features/content-hub/read", {"read": "articleList"}, csrf=False)
+        self.assertEqual(response["statusCode"], 500)
+        self.assertEqual(body(response)["error"], "Content hub config is invalid")
 
     def test_rejects_server_only_public_payload(self):
         response = self.request(
