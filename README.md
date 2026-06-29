@@ -57,6 +57,16 @@ When `rolePolicies` is present, it is the server-side source of truth for every 
 
 Wildcard permissions such as `blog:article:*` are rejected during config normalization. Config errors return only the generic browser-safe message `Content hub service is temporarily unavailable`.
 
+## Action Audit Trail
+
+Protected actions write compact JSON audit events to the existing private, encrypted, versioned packages bucket under `content-hubs/{environment}/{hubId}/audit/{yyyy-mm-dd}/...`.
+
+Audit entries include only operationally safe fields: request id, timestamp, environment, domain, auth profile id, hub id, action, decision/status, status code, hashed actor, and allowlisted target ids such as `articleId`, `revisionId`, `taxonomyId`, `assetId`, `commentId`, `interactionId`, or `scheduleId`.
+
+They must not include cookies, CSRF values, tokens, raw claims, raw roles/groups, request bodies, uploaded file contents, comment bodies, email/phone values, table names, bucket names, signed URLs, or server policy.
+
+This is an operational audit trail using the existing versioned S3 bucket. It is not compliance-grade immutable retention because the bucket does not currently use S3 Object Lock.
+
 ## Blog Safety Notes
 
 - `createArticle`, `articleList`, and `articleDetail` carry public-safe SEO, category, tags, comment policy, content safety, canonical, and path metadata.

@@ -205,6 +205,9 @@ class ContentHubHandlerTests(unittest.TestCase):
         }
         return content_hub.lambda_handler(event(path, payload, **kwargs), None)
 
+    def audit_events(self):
+        return [item for key, item in self.store.objects.items() if "/audit/" in key]
+
     def test_read_requires_session(self):
         response = self.request(
             "/features/content-hub/read",
@@ -307,6 +310,55 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertEqual(payload["error"], "Content hub service is temporarily unavailable")
         self.assertEqual(payload["requestId"], "req-config-789")
         self.assertNotIn("valid JSON", response["body"])
+
+    def test_successful_action_writes_sanitized_s3_audit_events(self):
+        response = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Audit Article"},
+            request_id="req-audit-success",
+        )
+
+        self.assertEqual(response["statusCode"], 200)
+        events = self.audit_events()
+        self.assertEqual([event["status"] for event in events], ["started", "succeeded"])
+        self.assertTrue(all(event["requestId"] == "req-audit-success" for event in events))
+        self.assertTrue(all(event["action"] == "createArticle" for event in events))
+        self.assertTrue(all(event["decision"] == "allowed" for event in events))
+        self.assertTrue(events[-1]["targetIds"]["articleId"].startswith("art_"))
+        serialized = json.dumps(events, sort_keys=True)
+        self.assertNotIn("admin-sub", serialized)
+        self.assertNotIn("csrf-value", serialized)
+        self.assertNotIn(SESSION_VALUE, serialized)
+        self.assertNotIn("cookie", serialized.lower())
+        self.assertNotIn("token", serialized.lower())
+
+    def test_denied_action_writes_sanitized_s3_audit_event(self):
+        self.store.roles = ["zoosite-blog-editor"]
+        response = self.request(
+            "/features/content-hub/action",
+            {"action": "publish", "articleId": "art_existing", "revisionId": "rev_001"},
+            {"path": "/blog/denied"},
+            request_id="req-audit-denied",
+        )
+
+        self.assertEqual(response["statusCode"], 403)
+        events = self.audit_events()
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["requestId"], "req-audit-denied")
+        self.assertEqual(events[0]["action"], "publish")
+        self.assertEqual(events[0]["decision"], "denied")
+        self.assertEqual(events[0]["status"], "forbidden")
+        self.assertEqual(events[0]["targetIds"], {"articleId": "art_existing", "revisionId": "rev_001"})
+
+    def test_template_keeps_audit_bucket_versioned_without_delete_object(self):
+        template = Path("template.yaml").read_text(encoding="utf-8")
+
+        self.assertIn("ContentHubPackagesBucket:", template)
+        self.assertIn("VersioningConfiguration:", template)
+        self.assertIn("Status: Enabled", template)
+        self.assertIn("- s3:PutObject", template)
+        self.assertNotIn("- s3:DeleteObject", template)
 
     def test_role_policies_authorize_by_action_scoped_permission(self):
         os.environ["CONTENT_HUB_CONFIG_JSON_BASE64"] = encoded_role_policy_config([
