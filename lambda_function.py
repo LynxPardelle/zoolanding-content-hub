@@ -59,6 +59,7 @@ READ_CAPABILITIES = {
     "assetList": "read",
     "revisionList": "read",
     "publicBundlePreview": "read",
+    "scheduleList": "publish",
     "moderationQueue": "moderate",
 }
 
@@ -69,6 +70,7 @@ READ_PERMISSIONS = {
     "assetList": "blog:media:read",
     "revisionList": "blog:revision:read",
     "publicBundlePreview": "blog:article:read",
+    "scheduleList": "blog:article:schedule",
     "moderationQueue": "blog:moderation:read",
 }
 
@@ -84,6 +86,7 @@ ACTION_CAPABILITIES = {
     "unpublishArticle": "publish",
     "archiveArticle": "publish",
     "schedule": "publish",
+    "cancelSchedule": "publish",
     "uploadAsset": "media",
     "queueComment": "moderate",
     "moderateComment": "moderate",
@@ -102,6 +105,7 @@ ACTION_PERMISSIONS = {
     "unpublishArticle": "blog:article:unpublish",
     "archiveArticle": "blog:article:archive",
     "schedule": "blog:article:schedule",
+    "cancelSchedule": "blog:article:schedule",
     "uploadAsset": "blog:media:manage",
     "queueComment": "blog:moderation:moderate",
     "moderateComment": "blog:moderation:moderate",
@@ -119,6 +123,7 @@ PHONE_VALUE_RE = re.compile(r"(?:\+?\d[\d\s().-]{7,}\d)")
 
 class ContentHubError(Exception):
     status_code = 400
+    error_code = "validation_error"
     public_message = "Invalid content hub request"
 
     def __init__(self, message: Optional[str] = None):
@@ -129,26 +134,34 @@ class ContentHubError(Exception):
 
 class ContentHubUnauthorized(ContentHubError):
     status_code = 401
+    error_code = "auth_required"
     public_message = "Authentication required"
 
 
 class ContentHubForbidden(ContentHubError):
     status_code = 403
+    error_code = "forbidden"
     public_message = "Content hub access denied"
 
 
 class ContentHubNotFound(ContentHubError):
     status_code = 404
+    error_code = "not_found"
     public_message = "Content hub item not found"
 
 
 class ContentHubConfigError(ContentHubError):
     status_code = 500
-    public_message = "Content hub config is invalid"
+    error_code = "internal_error"
+    public_message = "Content hub service is temporarily unavailable"
+
+    def __init__(self, message: Optional[str] = None):
+        Exception.__init__(self, message or self.public_message)
 
 
 def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     del context
+    request_id = _request_id(event)
     if _is_schedule_tick(event):
         try:
             return {"ok": True, "data": _run_due_schedules()}
@@ -169,11 +182,11 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             return _action_response(event)
         raise ContentHubNotFound("Content hub route not found")
     except ContentHubError as exc:
-        _log("WARNING" if exc.status_code < 500 else "ERROR", exc.public_message, statusCode=exc.status_code)
-        return _json_response(exc.status_code, {"ok": False, "error": exc.public_message})
+        _log("WARNING" if exc.status_code < 500 else "ERROR", exc.public_message, statusCode=exc.status_code, requestId=request_id)
+        return _error_response(exc.status_code, exc.error_code, exc.public_message, request_id)
     except Exception as exc:
-        _log("ERROR", "Unhandled content hub error", errorType=type(exc).__name__)
-        return _json_response(500, {"ok": False, "error": "Content hub request failed"})
+        _log("ERROR", "Unhandled content hub error", errorType=type(exc).__name__, requestId=request_id)
+        return _error_response(500, "internal_error", "Content hub request failed", request_id)
 
 
 def _read_response(event: dict[str, Any]) -> dict[str, Any]:
@@ -244,7 +257,8 @@ def _handle_read(
         article = store.get_metadata(f"HUB#{hub_id}", f"ARTICLE#{article_id}")
         if not article:
             raise ContentHubNotFound()
-        return {"item": _article_summary(article)}
+        package = _latest_article_package(store, article)
+        return {"item": _article_detail(article, package)}
     if read_kind == "taxonomyList":
         taxonomy_kind = _clean_string(binding.get("taxonomyKind") or _input_field(payload, "taxonomyKind"))
         sk_prefix = f"TAXONOMY#{taxonomy_kind}#" if taxonomy_kind in {"category", "tag"} else "TAXONOMY#"
@@ -262,6 +276,14 @@ def _handle_read(
         if not article:
             raise ContentHubNotFound()
         return {"items": [_revision_summary(item) for item in store.query_metadata(f"ARTICLE#{article_id}", "REVISION#")]}
+    if read_kind == "scheduleList":
+        article_id = _optional_safe_id(binding.get("articleId") or _input_field(payload, "articleId"))
+        items = [
+            _schedule_summary(item)
+            for item in store.query_metadata(f"SCHEDULE#{profile['environment']}", "DUE#")
+            if item.get("hubId") == hub_id and (not article_id or item.get("articleId") == article_id)
+        ]
+        return {"items": items}
     if read_kind == "moderationQueue":
         return {"items": [_moderation_summary(item) for item in store.query_moderation(f"HUB#{hub_id}", "MODERATION#")]}
     if read_kind == "publicBundlePreview":
@@ -308,6 +330,8 @@ def _handle_action(
         return _archive_article(payload, binding, session, profile, hub)
     if action_kind == "schedule":
         return _schedule_article(payload, binding, session, profile, hub)
+    if action_kind == "cancelSchedule":
+        return _cancel_schedule(payload, binding, profile, hub)
     if action_kind == "uploadAsset":
         return _upload_asset(payload, session, profile, hub)
     if action_kind == "queueComment":
@@ -425,21 +449,19 @@ def _update_package(
     revision_id = _safe_id(_input_field(payload, "revisionId") or f"rev_{time.time_ns()}")
     now = _now_iso()
     store = _store()
-    if not store.get_metadata(f"HUB#{hub['hubId']}", f"ARTICLE#{article_id}"):
+    article = store.get_metadata(f"HUB#{hub['hubId']}", f"ARTICLE#{article_id}")
+    if not article:
         raise ContentHubNotFound()
+    previous_package = _latest_article_package(store, article)
     revision = _revision_item(hub["hubId"], article_id, revision_id, locale, now, session["subject"])
-    package = {
-        "version": 1,
-        "kind": "content-hub-article-package",
-        "hubId": hub["hubId"],
-        "articleId": article_id,
-        "locale": locale,
-        "revisionId": revision_id,
-        "components": _safe_json_node(_input_field(payload, "components") or []),
-        "variables": _safe_json_node(_input_field(payload, "variables") or {}),
-        "i18n": _safe_json_node(_input_field(payload, "i18n") or {}),
-        "updatedAt": now,
-    }
+    package = _editable_article_package(
+        article=article,
+        revision=revision,
+        payload=payload,
+        profile=profile,
+        hub=hub,
+        fallback=previous_package,
+    )
     metadata_updates = _article_metadata_updates(payload)
     if metadata_updates:
         update_locale = _locale(metadata_updates.get("primaryLocale") or locale)
@@ -461,6 +483,48 @@ def _update_package(
         **metadata_updates,
     })
     return {"revision": _revision_summary(revision)}
+
+
+def _editable_article_package(
+    *,
+    article: dict[str, Any],
+    revision: dict[str, Any],
+    payload: dict[str, Any],
+    profile: dict[str, Any],
+    hub: dict[str, Any],
+    fallback: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    article_id = _safe_id(article.get("articleId"))
+    revision_id = _safe_id(revision.get("revisionId"))
+    locale = _locale(revision.get("locale") or article.get("primaryLocale") or hub.get("defaultLocale") or "es")
+    article_content_input = _input_field(payload, "articleContent")
+    fallback_variables = (fallback or {}).get("variables") if isinstance((fallback or {}).get("variables"), dict) else {}
+    fallback_article_content = (fallback or {}).get("articleContent")
+    if fallback_article_content is None:
+        fallback_article_content = fallback_variables.get("articleContent")
+    article_content = _safe_json_node(
+        article_content_input if article_content_input is not None else fallback_article_content
+    )
+    variables = _safe_object_node(_input_field(payload, "variables") or (fallback or {}).get("variables") or {})
+    if article_content is not None:
+        variables = {**variables, "articleContent": article_content}
+    components_input = _input_field(payload, "components")
+    i18n_input = _input_field(payload, "i18n")
+    return {
+        "version": 1,
+        "kind": "content-hub-article-package",
+        "hubId": hub["hubId"],
+        "articleId": article_id,
+        "ownerDraftDomain": hub["ownerDraftDomain"],
+        "originDraftDomain": profile["domain"],
+        "locale": locale,
+        "revisionId": revision_id,
+        "articleContent": article_content,
+        "components": _safe_json_node(components_input if components_input is not None else (fallback or {}).get("components") or []),
+        "variables": variables,
+        "i18n": _safe_object_node(i18n_input if i18n_input is not None else (fallback or {}).get("i18n") or {}),
+        "updatedAt": revision.get("createdAt") or _now_iso(),
+    }
 
 
 def _validate_article(payload: dict[str, Any], binding: dict[str, Any], profile: dict[str, Any], hub: dict[str, Any]) -> dict[str, Any]:
@@ -680,6 +744,27 @@ def _schedule_article(
     return {"schedule": _schedule_summary(item)}
 
 
+def _cancel_schedule(
+    payload: dict[str, Any],
+    binding: dict[str, Any],
+    profile: dict[str, Any],
+    hub: dict[str, Any],
+) -> dict[str, Any]:
+    schedule_id = _safe_id(binding.get("scheduleId") or _direct_input_field(payload, "scheduleId"))
+    article_id = _optional_safe_id(binding.get("articleId") or _direct_input_field(payload, "articleId"))
+    store = _store()
+    for item in store.query_metadata(f"SCHEDULE#{profile['environment']}", "DUE#"):
+        if item.get("hubId") != hub["hubId"] or item.get("scheduleId") != schedule_id:
+            continue
+        if article_id and item.get("articleId") != article_id:
+            continue
+        store.delete_metadata(item["pk"], item["sk"])
+        summary = _schedule_summary(item)
+        summary["status"] = "canceled"
+        return {"schedule": summary}
+    raise ContentHubNotFound("Schedule not found")
+
+
 def _run_due_schedules(now: str | None = None) -> dict[str, Any]:
     store = _store()
     environment = os.getenv(ENVIRONMENT_ENV, "dev")
@@ -844,17 +929,30 @@ def _moderate_comment(
     status = _safe_id(_input_field(payload, "moderationStatus") or "approved")
     if status not in {"approved", "rejected", "spam", "queued"}:
         raise ContentHubError("Invalid moderation status")
+    store = _store()
+    existing_items = [
+        item
+        for item in store.query_moderation(f"HUB#{hub['hubId']}", "MODERATION#")
+        if item.get("commentId") == comment_id
+    ]
+    if not existing_items:
+        raise ContentHubNotFound("Comment not found")
+    existing = sorted(existing_items, key=lambda item: item.get("sk", ""))[-1]
+    for item in existing_items:
+        store.delete_moderation(item["pk"], item["sk"])
+    now = _now_iso()
     item = {
+        **existing,
         "pk": f"HUB#{hub['hubId']}",
-        "sk": f"MODERATION#{status}#{_now_iso()}#{comment_id}",
+        "sk": f"MODERATION#{status}#{now}#{comment_id}",
         "itemFamily": "MODERATION",
         "hubId": hub["hubId"],
         "commentId": comment_id,
         "status": status,
         "moderatedBy": session["subject"],
-        "moderatedAt": _now_iso(),
+        "moderatedAt": now,
     }
-    _store().put_moderation(item)
+    store.put_moderation(item)
     return {"moderation": _moderation_summary(item)}
 
 
@@ -1210,6 +1308,9 @@ class DynamoContentHubStore:
     def put_moderation(self, item: dict[str, Any]) -> None:
         self.table(self.moderation_table_name).put_item(Item=_without_empty(item))
 
+    def delete_moderation(self, pk: str, sk: str) -> None:
+        self.table(self.moderation_table_name).delete_item(Key={"pk": pk, "sk": sk})
+
     def query_moderation(self, pk: str, sk_prefix: str) -> list[dict[str, Any]]:
         return _query_items(self.table(self.moderation_table_name), pk, sk_prefix)
 
@@ -1236,12 +1337,21 @@ class DynamoContentHubStore:
 
 
 def _query_items(table: Any, pk: str, sk_prefix: str) -> list[dict[str, Any]]:
-    response = table.query(
-        KeyConditionExpression="pk = :pk AND begins_with(sk, :sk)",
-        ExpressionAttributeValues={":pk": pk, ":sk": sk_prefix},
-        Limit=200,
-    )
-    return response.get("Items", [])
+    items: list[dict[str, Any]] = []
+    exclusive_start_key: Optional[dict[str, Any]] = None
+    while True:
+        request: dict[str, Any] = {
+            "KeyConditionExpression": "pk = :pk AND begins_with(sk, :sk)",
+            "ExpressionAttributeValues": {":pk": pk, ":sk": sk_prefix},
+            "Limit": 200,
+        }
+        if exclusive_start_key:
+            request["ExclusiveStartKey"] = exclusive_start_key
+        response = table.query(**request)
+        items.extend(response.get("Items", []))
+        exclusive_start_key = response.get("LastEvaluatedKey")
+        if not exclusive_start_key:
+            return items
 
 
 def _update_item(table: Any, key: dict[str, str], updates: dict[str, Any]) -> dict[str, Any]:
@@ -1349,13 +1459,16 @@ def _article_package(
     profile: dict[str, Any],
     hub: dict[str, Any],
 ) -> dict[str, Any]:
+    package = _editable_article_package(
+        article=article,
+        revision=revision,
+        payload=payload,
+        profile=profile,
+        hub=hub,
+        fallback={},
+    )
     return {
-        "version": 1,
-        "kind": "content-hub-article-package",
-        "hubId": hub["hubId"],
-        "articleId": article["articleId"],
-        "ownerDraftDomain": hub["ownerDraftDomain"],
-        "originDraftDomain": profile["domain"],
+        **package,
         "status": "draft",
         "visibility": article["visibility"],
         "title": article.get("title"),
@@ -1377,10 +1490,6 @@ def _article_package(
             "url": article.get("canonicalUrl"),
         },
         "primaryLocale": article["primaryLocale"],
-        "revisionId": revision["revisionId"],
-        "components": _safe_json_node(_input_field(payload, "components") or []),
-        "variables": _safe_json_node(_input_field(payload, "variables") or {}),
-        "i18n": _safe_json_node(_input_field(payload, "i18n") or {}),
         "analytics": _analytics_context(hub),
         "createdAt": article["createdAt"],
         "updatedAt": article["updatedAt"],
@@ -1406,6 +1515,39 @@ def _revision_item(hub_id: str, article_id: str, revision_id: str, locale: str, 
 
 def _published_bundle_key(profile: dict[str, Any], hub_id: str, render_domain: str, locale: str, article_id: str, revision_id: str) -> str:
     return f"content-hubs/{profile['environment']}/{hub_id}/published/{render_domain}/{locale}/{article_id}/{revision_id}/bundle.json"
+
+
+def _latest_article_package(store: Any, article: dict[str, Any]) -> dict[str, Any]:
+    article_id = _clean_string(article.get("articleId"))
+    revision_id = _clean_string(article.get("latestRevisionId"))
+    if not article_id or not revision_id:
+        return {}
+    revision = store.get_metadata(f"ARTICLE#{article_id}", f"REVISION#{revision_id}")
+    if not revision or not revision.get("packageKey"):
+        return {}
+    try:
+        package = store.get_json(revision["packageKey"])
+    except ContentHubNotFound:
+        return {}
+    return package if isinstance(package, dict) else {}
+
+
+def _article_detail(item: dict[str, Any], package: dict[str, Any]) -> dict[str, Any]:
+    detail = _article_summary(item)
+    if not package:
+        return detail
+    variables = _public_payload(package.get("variables") if isinstance(package.get("variables"), dict) else {})
+    components = _public_payload(package.get("components") if isinstance(package.get("components"), list) else [])
+    i18n = _public_payload(package.get("i18n") if isinstance(package.get("i18n"), dict) else {})
+    article_content = _public_payload(package.get("articleContent") if "articleContent" in package else variables.get("articleContent"))
+    return _without_empty({
+        **detail,
+        "revisionId": package.get("revisionId") or item.get("latestRevisionId"),
+        "articleContent": article_content,
+        "components": components,
+        "variables": variables,
+        "i18n": i18n,
+    })
 
 
 def _article_summary(item: dict[str, Any]) -> dict[str, Any]:
@@ -1588,6 +1730,15 @@ def _safe_json_node(value: Any) -> Any:
     return value if isinstance(value, (dict, list, str, int, float, bool)) or value is None else None
 
 
+def _safe_object_node(value: Any) -> dict[str, Any]:
+    node = _safe_json_node(value)
+    if node is None:
+        return {}
+    if not isinstance(node, dict):
+        raise ContentHubError("Invalid JSON object")
+    return node
+
+
 def _reject_unsafe_public_payload(value: Any, path: str = "$") -> None:
     if isinstance(value, dict):
         for key, child in value.items():
@@ -1637,6 +1788,16 @@ def _json_response(status_code: int, body: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _error_response(status_code: int, code: str, message: str, request_id: str) -> dict[str, Any]:
+    return _json_response(status_code, {
+        "ok": False,
+        "code": code,
+        "error": message,
+        "message": message,
+        "requestId": request_id,
+    })
+
+
 def _json_default(value: Any) -> Any:
     if isinstance(value, Decimal):
         return int(value) if value % 1 == 0 else float(value)
@@ -1653,6 +1814,14 @@ def _path(event: dict[str, Any]) -> str:
     if stage and path.startswith(f"/{stage}/"):
         return path[len(stage) + 1:]
     return path or "/"
+
+
+def _request_id(event: dict[str, Any]) -> str:
+    request_context = event.get("requestContext") if isinstance(event.get("requestContext"), dict) else {}
+    value = _clean_string(request_context.get("requestId"))
+    if re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", value):
+        return value
+    return f"req-{time.time_ns()}"
 
 
 def _header(event: dict[str, Any], name: str) -> str:
@@ -1697,7 +1866,7 @@ def _domain(value: Any) -> str:
 def _safe_id(value: Any) -> str:
     safe_id = _clean_string(value)
     if not SAFE_ID_RE.fullmatch(safe_id):
-        raise ContentHubError("Invalid id")
+        raise ContentHubError("Invalid identifier")
     return safe_id
 
 
