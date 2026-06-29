@@ -150,6 +150,9 @@ class FakeStore:
     def put_moderation(self, item):
         self.moderation[(item["pk"], item["sk"])] = dict(item)
 
+    def delete_moderation(self, pk, sk):
+        self.moderation.pop((pk, sk), None)
+
     def query_moderation(self, pk, sk_prefix):
         return [dict(item) for (item_pk, item_sk), item in self.moderation.items() if item_pk == pk and item_sk.startswith(sk_prefix)]
 
@@ -509,6 +512,7 @@ class ContentHubHandlerTests(unittest.TestCase):
             "CONTENT_HUB_PACKAGES_BUCKET_NAME": "packages",
         }
         fake_dynamodb = unittest.mock.Mock()
+        fake_dynamodb.Table.return_value.query.return_value = {"Items": []}
         with patch.dict(os.environ, env, clear=True), \
              patch("lambda_function._dynamodb_resource", return_value=fake_dynamodb), \
              patch("lambda_function._s3_client") as s3_client:
@@ -520,6 +524,40 @@ class ContentHubHandlerTests(unittest.TestCase):
 
             _ = store.s3
             s3_client.assert_called_once()
+
+    def test_dynamo_query_metadata_reads_every_page(self):
+        class PagedTable:
+            def __init__(self):
+                self.calls = []
+
+            def query(self, **kwargs):
+                self.calls.append(kwargs)
+                if len(self.calls) == 1:
+                    return {
+                        "Items": [{"pk": "HUB#zoosite-main", "sk": "ARTICLE#1"}],
+                        "LastEvaluatedKey": {"pk": "HUB#zoosite-main", "sk": "ARTICLE#1"},
+                    }
+                return {"Items": [{"pk": "HUB#zoosite-main", "sk": "ARTICLE#2"}]}
+
+        env = {
+            "AUTH_SESSION_TABLE_NAME": "auth-session",
+            "AUTH_USER_STATE_TABLE_NAME": "auth-user",
+            "CONTENT_HUB_METADATA_TABLE_NAME": "metadata",
+            "CONTENT_HUB_MEDIA_TABLE_NAME": "media",
+            "CONTENT_HUB_MODERATION_TABLE_NAME": "moderation",
+            "CONTENT_HUB_INTERACTIONS_TABLE_NAME": "interactions",
+            "CONTENT_HUB_PACKAGES_BUCKET_NAME": "packages",
+        }
+        table = PagedTable()
+        fake_dynamodb = unittest.mock.Mock()
+        fake_dynamodb.Table.return_value = table
+
+        with patch.dict(os.environ, env, clear=True), patch("lambda_function._dynamodb_resource", return_value=fake_dynamodb):
+            store = content_hub.DynamoContentHubStore()
+            items = store.query_metadata("HUB#zoosite-main", "ARTICLE#")
+
+        self.assertEqual([item["sk"] for item in items], ["ARTICLE#1", "ARTICLE#2"])
+        self.assertEqual(table.calls[1]["ExclusiveStartKey"], {"pk": "HUB#zoosite-main", "sk": "ARTICLE#1"})
 
     def test_editor_cannot_publish_without_publish_role(self):
         self.store.roles = ["zoosite-blog-editor"]
@@ -889,6 +927,38 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertEqual(rejected["statusCode"], 404)
         self.assertEqual(body(rejected)["error"], "Revision not found")
 
+    def test_schedule_list_and_cancel_schedule_are_supported(self):
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Programable"},
+        )
+        article_id = body(create)["data"]["article"]["articleId"]
+        schedule = self.request(
+            "/features/content-hub/action",
+            {"action": "schedule", "articleId": article_id},
+            {"publishAt": "2026-07-01T10:00:00Z", "timezone": "America/Mexico_City"},
+        )
+        self.assertEqual(schedule["statusCode"], 200)
+        schedule_id = body(schedule)["data"]["schedule"]["scheduleId"]
+
+        read = self.request(
+            "/features/content-hub/read",
+            {"read": "scheduleList", "articleId": article_id},
+            csrf=False,
+        )
+        self.assertEqual(read["statusCode"], 200)
+        self.assertEqual([item["scheduleId"] for item in body(read)["data"]["items"]], [schedule_id])
+
+        cancel = self.request(
+            "/features/content-hub/action",
+            {"action": "cancelSchedule", "articleId": article_id, "scheduleId": schedule_id},
+            {},
+        )
+        self.assertEqual(cancel["statusCode"], 200)
+        self.assertEqual(body(cancel)["data"]["schedule"]["status"], "canceled")
+        self.assertEqual(self.store.query_metadata("SCHEDULE#test", "DUE#"), [])
+
     def test_schedule_unpublish_validates_unpublish_time_without_revision(self):
         create = self.request(
             "/features/content-hub/action",
@@ -1187,6 +1257,38 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertIn("[redacted-email]", queued["bodyPreview"])
         self.assertIn("[redacted-phone]", queued["bodyPreview"])
         self.assertNotIn("persona@example.com", response["body"])
+
+    def test_moderate_comment_updates_existing_queue_record(self):
+        queued = self.request(
+            "/features/content-hub/action",
+            {"action": "queueComment", "articleId": "art_123"},
+            {"commentText": "Comentario listo para revisar"},
+        )
+        self.assertEqual(queued["statusCode"], 200)
+        comment_id = body(queued)["data"]["comment"]["commentId"]
+
+        moderated = self.request(
+            "/features/content-hub/action",
+            {"action": "moderateComment", "commentId": comment_id},
+            {"moderationStatus": "approved"},
+        )
+
+        self.assertEqual(moderated["statusCode"], 200)
+        self.assertEqual(body(moderated)["data"]["moderation"]["status"], "approved")
+        moderation_rows = self.store.query_moderation("HUB#zoosite-main", "MODERATION#")
+        self.assertEqual(len(moderation_rows), 1)
+        self.assertEqual(moderation_rows[0]["commentId"], comment_id)
+        self.assertEqual(moderation_rows[0]["articleId"], "art_123")
+        self.assertEqual(moderation_rows[0]["bodyPreview"], "Comentario listo para revisar")
+
+    def test_moderate_comment_requires_existing_comment(self):
+        response = self.request(
+            "/features/content-hub/action",
+            {"action": "moderateComment", "commentId": "cmt_missing"},
+            {"moderationStatus": "approved"},
+        )
+
+        self.assertEqual(response["statusCode"], 404)
 
     def test_record_interaction_accepts_safe_metadata_and_rejects_pii(self):
         response = self.request(

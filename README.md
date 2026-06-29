@@ -28,6 +28,7 @@ The browser sends:
 - `assetList`
 - `revisionList`
 - `publicBundlePreview`
+- `scheduleList`
 
 ## Supported Actions
 
@@ -42,6 +43,7 @@ The browser sends:
 - `unpublishArticle`
 - `archiveArticle`
 - `schedule`
+- `cancelSchedule`
 - `queueComment`
 - `moderateComment`
 - `recordInteraction`
@@ -62,9 +64,12 @@ Wildcard permissions such as `blog:article:*` are rejected during config normali
 - `publish` writes public bundles with SEO, taxonomy, analytics context, comment policy, canonical mode, and safe article path fields.
 - `unpublishArticle` and `archiveArticle` mark article metadata private and remove the public slug index without deleting immutable bundles or revision history.
 - `schedule` requires an existing article, validates `publishAt`/`unpublishAt` plus `timezone`, and stores the immutable existing revision only for scheduled publishes.
+- `scheduleList` returns schedule summaries for the authenticated hub, optionally filtered by article, and `cancelSchedule` removes a pending schedule without exposing storage details.
 - The SAM schedule event runs due publish/unpublish items every 5 minutes. A bad schedule row records `lastError` on that row without stopping the rest of the due batch.
+- DynamoDB-backed list reads page through all query pages internally instead of silently truncating at the first 200 metadata rows.
 - `revisionList` and `restoreRevision` require safe existing article/revision ids and never return actor identifiers or storage keys to the browser.
 - `queueComment` and `recordInteraction` remain protected, authenticated, and CSRF-checked actions in this BFF. Public unauthenticated comments, likes, CTA clicks, or form submissions should use a separate public ingestion surface with its own abuse controls; this BFF depends on auth-admin sessions by design.
+- `moderateComment` requires an existing queued moderation record and replaces the prior status row for that comment, preserving the safe preview without duplicating queue entries.
 - Interaction metadata rejects private fields and obvious email/phone values. Comment queue previews redact obvious email and phone values and do not return raw private contact data.
 
 ## Deploy

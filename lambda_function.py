@@ -59,6 +59,7 @@ READ_CAPABILITIES = {
     "assetList": "read",
     "revisionList": "read",
     "publicBundlePreview": "read",
+    "scheduleList": "publish",
     "moderationQueue": "moderate",
 }
 
@@ -69,6 +70,7 @@ READ_PERMISSIONS = {
     "assetList": "blog:media:read",
     "revisionList": "blog:revision:read",
     "publicBundlePreview": "blog:article:read",
+    "scheduleList": "blog:article:schedule",
     "moderationQueue": "blog:moderation:read",
 }
 
@@ -84,6 +86,7 @@ ACTION_CAPABILITIES = {
     "unpublishArticle": "publish",
     "archiveArticle": "publish",
     "schedule": "publish",
+    "cancelSchedule": "publish",
     "uploadAsset": "media",
     "queueComment": "moderate",
     "moderateComment": "moderate",
@@ -102,6 +105,7 @@ ACTION_PERMISSIONS = {
     "unpublishArticle": "blog:article:unpublish",
     "archiveArticle": "blog:article:archive",
     "schedule": "blog:article:schedule",
+    "cancelSchedule": "blog:article:schedule",
     "uploadAsset": "blog:media:manage",
     "queueComment": "blog:moderation:moderate",
     "moderateComment": "blog:moderation:moderate",
@@ -262,6 +266,14 @@ def _handle_read(
         if not article:
             raise ContentHubNotFound()
         return {"items": [_revision_summary(item) for item in store.query_metadata(f"ARTICLE#{article_id}", "REVISION#")]}
+    if read_kind == "scheduleList":
+        article_id = _optional_safe_id(binding.get("articleId") or _input_field(payload, "articleId"))
+        items = [
+            _schedule_summary(item)
+            for item in store.query_metadata(f"SCHEDULE#{profile['environment']}", "DUE#")
+            if item.get("hubId") == hub_id and (not article_id or item.get("articleId") == article_id)
+        ]
+        return {"items": items}
     if read_kind == "moderationQueue":
         return {"items": [_moderation_summary(item) for item in store.query_moderation(f"HUB#{hub_id}", "MODERATION#")]}
     if read_kind == "publicBundlePreview":
@@ -308,6 +320,8 @@ def _handle_action(
         return _archive_article(payload, binding, session, profile, hub)
     if action_kind == "schedule":
         return _schedule_article(payload, binding, session, profile, hub)
+    if action_kind == "cancelSchedule":
+        return _cancel_schedule(payload, binding, profile, hub)
     if action_kind == "uploadAsset":
         return _upload_asset(payload, session, profile, hub)
     if action_kind == "queueComment":
@@ -680,6 +694,27 @@ def _schedule_article(
     return {"schedule": _schedule_summary(item)}
 
 
+def _cancel_schedule(
+    payload: dict[str, Any],
+    binding: dict[str, Any],
+    profile: dict[str, Any],
+    hub: dict[str, Any],
+) -> dict[str, Any]:
+    schedule_id = _safe_id(binding.get("scheduleId") or _direct_input_field(payload, "scheduleId"))
+    article_id = _optional_safe_id(binding.get("articleId") or _direct_input_field(payload, "articleId"))
+    store = _store()
+    for item in store.query_metadata(f"SCHEDULE#{profile['environment']}", "DUE#"):
+        if item.get("hubId") != hub["hubId"] or item.get("scheduleId") != schedule_id:
+            continue
+        if article_id and item.get("articleId") != article_id:
+            continue
+        store.delete_metadata(item["pk"], item["sk"])
+        summary = _schedule_summary(item)
+        summary["status"] = "canceled"
+        return {"schedule": summary}
+    raise ContentHubNotFound("Schedule not found")
+
+
 def _run_due_schedules(now: str | None = None) -> dict[str, Any]:
     store = _store()
     environment = os.getenv(ENVIRONMENT_ENV, "dev")
@@ -844,17 +879,30 @@ def _moderate_comment(
     status = _safe_id(_input_field(payload, "moderationStatus") or "approved")
     if status not in {"approved", "rejected", "spam", "queued"}:
         raise ContentHubError("Invalid moderation status")
+    store = _store()
+    existing_items = [
+        item
+        for item in store.query_moderation(f"HUB#{hub['hubId']}", "MODERATION#")
+        if item.get("commentId") == comment_id
+    ]
+    if not existing_items:
+        raise ContentHubNotFound("Comment not found")
+    existing = sorted(existing_items, key=lambda item: item.get("sk", ""))[-1]
+    for item in existing_items:
+        store.delete_moderation(item["pk"], item["sk"])
+    now = _now_iso()
     item = {
+        **existing,
         "pk": f"HUB#{hub['hubId']}",
-        "sk": f"MODERATION#{status}#{_now_iso()}#{comment_id}",
+        "sk": f"MODERATION#{status}#{now}#{comment_id}",
         "itemFamily": "MODERATION",
         "hubId": hub["hubId"],
         "commentId": comment_id,
         "status": status,
         "moderatedBy": session["subject"],
-        "moderatedAt": _now_iso(),
+        "moderatedAt": now,
     }
-    _store().put_moderation(item)
+    store.put_moderation(item)
     return {"moderation": _moderation_summary(item)}
 
 
@@ -1210,6 +1258,9 @@ class DynamoContentHubStore:
     def put_moderation(self, item: dict[str, Any]) -> None:
         self.table(self.moderation_table_name).put_item(Item=_without_empty(item))
 
+    def delete_moderation(self, pk: str, sk: str) -> None:
+        self.table(self.moderation_table_name).delete_item(Key={"pk": pk, "sk": sk})
+
     def query_moderation(self, pk: str, sk_prefix: str) -> list[dict[str, Any]]:
         return _query_items(self.table(self.moderation_table_name), pk, sk_prefix)
 
@@ -1236,12 +1287,21 @@ class DynamoContentHubStore:
 
 
 def _query_items(table: Any, pk: str, sk_prefix: str) -> list[dict[str, Any]]:
-    response = table.query(
-        KeyConditionExpression="pk = :pk AND begins_with(sk, :sk)",
-        ExpressionAttributeValues={":pk": pk, ":sk": sk_prefix},
-        Limit=200,
-    )
-    return response.get("Items", [])
+    items: list[dict[str, Any]] = []
+    exclusive_start_key: Optional[dict[str, Any]] = None
+    while True:
+        request: dict[str, Any] = {
+            "KeyConditionExpression": "pk = :pk AND begins_with(sk, :sk)",
+            "ExpressionAttributeValues": {":pk": pk, ":sk": sk_prefix},
+            "Limit": 200,
+        }
+        if exclusive_start_key:
+            request["ExclusiveStartKey"] = exclusive_start_key
+        response = table.query(**request)
+        items.extend(response.get("Items", []))
+        exclusive_start_key = response.get("LastEvaluatedKey")
+        if not exclusive_start_key:
+            return items
 
 
 def _update_item(table: Any, key: dict[str, str], updates: dict[str, Any]) -> dict[str, Any]:
