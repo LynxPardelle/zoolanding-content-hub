@@ -37,18 +37,33 @@ The browser sends:
 - `uploadAsset`
 - `validate`
 - `submitReview`
+- `approveArticle`
 - `publish`
+- `unpublishArticle`
+- `archiveArticle`
 - `schedule`
 - `queueComment`
 - `moderateComment`
 - `recordInteraction`
 - `restoreRevision`
 
+## Authorization
+
+The content-hub config may define `contentHubs[].rolePolicies` with explicit `roleId`, `groups`, and three-part permissions such as `blog:article:update`.
+
+When `rolePolicies` is present, it is the server-side source of truth for every read and action. The older `roles.read/edit/publish/media/moderate` shape remains a compatibility fallback only for configs that do not yet define `rolePolicies`.
+
+Wildcard permissions such as `blog:article:*` are rejected during config normalization. Config errors return only the generic browser-safe message `Content hub config is invalid`.
+
 ## Blog MVP Safety Notes
 
 - `createArticle`, `articleList`, and `articleDetail` carry public-safe SEO, category, tags, comment policy, content safety, canonical, and path metadata.
 - `upsertTaxonomy` stores category/tag administration metadata in DynamoDB and returns only safe taxonomy summaries.
 - `publish` writes public bundles with SEO, taxonomy, analytics context, comment policy, canonical mode, and safe article path fields.
+- `unpublishArticle` and `archiveArticle` mark article metadata private and remove the public slug index without deleting immutable bundles or revision history.
+- `schedule` requires an existing article, validates `publishAt`/`unpublishAt` plus `timezone`, and stores the immutable existing revision only for scheduled publishes.
+- The SAM schedule event runs due publish/unpublish items every 5 minutes. A bad schedule row records `lastError` on that row without stopping the rest of the due batch.
+- `revisionList` and `restoreRevision` require safe existing article/revision ids and never return actor identifiers or storage keys to the browser.
 - `queueComment` and `recordInteraction` remain protected, authenticated, and CSRF-checked actions in this BFF. Public unauthenticated comments, likes, CTA clicks, or form submissions should use a separate public ingestion surface with its own abuse controls; this BFF depends on auth-admin sessions by design.
 - Interaction metadata rejects private fields and obvious email/phone values. Comment queue previews redact obvious email and phone values and do not return raw private contact data.
 
