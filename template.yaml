@@ -257,13 +257,33 @@ Resources:
               Ref: ContentHubApi
             Method: OPTIONS
             Path: /features/content-hub/action
-        DueSchedules:
-          Type: Schedule
-          Properties:
-            Schedule: rate(5 minutes)
-            Name:
-              Fn::Sub: ${AWS::StackName}-DueSchedules
-            Input: '{"contentHubTask":"runDueSchedules"}'
+
+  DueSchedulesRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name:
+        Fn::Sub: ${AWS::StackName}-DueScheduleRunner
+      ScheduleExpression: rate(5 minutes)
+      State: ENABLED
+      Targets:
+        - Arn:
+            Fn::GetAtt:
+              - ContentHubFunction
+              - Arn
+          Id: ContentHubFunctionDueSchedulesTarget
+          Input: '{"contentHubTask":"runDueSchedules"}'
+
+  DueSchedulesPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName:
+        Ref: ContentHubFunction
+      Principal: events.amazonaws.com
+      SourceArn:
+        Fn::GetAtt:
+          - DueSchedulesRule
+          - Arn
 
 Outputs:
   ApiEndpoint:

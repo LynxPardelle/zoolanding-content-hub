@@ -1362,5 +1362,17 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertNotIn("X-Amz-Signature", response["body"])
 
 
+class ContentHubTemplateTests(unittest.TestCase):
+    def test_due_schedule_is_explicit_eventbridge_rule(self):
+        template = Path(__file__).resolve().parents[1].joinpath("template.yaml").read_text(encoding="utf-8")
+
+        self.assertIn("DueSchedulesRule:", template)
+        self.assertIn("Type: AWS::Events::Rule", template)
+        self.assertIn("ScheduleExpression: rate(5 minutes)", template)
+        self.assertIn("DueSchedulesPermission:", template)
+        self.assertIn("Principal: events.amazonaws.com", template)
+        self.assertNotIn("Type: Schedule", template)
+
+
 if __name__ == "__main__":
     unittest.main()
