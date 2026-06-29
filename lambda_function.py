@@ -484,6 +484,7 @@ def _publish_article(
         "path": path,
         "canonicalMode": canonical_mode,
         "canonicalUrl": canonical_url,
+        "publishedBundleKey": key,
         "updatedAt": now,
         "updatedBy": session["subject"],
     })
