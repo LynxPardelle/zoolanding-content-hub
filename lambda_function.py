@@ -478,6 +478,7 @@ def _publish_article(
     store.put_json(key, bundle)
     store.update_metadata(f"HUB#{hub['hubId']}", f"ARTICLE#{article_id}", {
         "status": "published",
+        "visibility": "public",
         "publishedAt": now,
         "latestRevisionId": revision_id,
         "path": path,

@@ -369,6 +369,9 @@ class ContentHubHandlerTests(unittest.TestCase):
         )
         self.assertEqual(publish["statusCode"], 200)
         self.assertEqual(body(publish)["data"]["path"], "/blog/test/e2e-test-manual")
+        published_article = self.store.get_metadata(f"HUB#zoosite-main", f"ARTICLE#{article['articleId']}")
+        self.assertEqual(published_article["status"], "published")
+        self.assertEqual(published_article["visibility"], "public")
 
     def test_create_article_rejects_empty_human_tag_slugs(self):
         self.store.roles = ["zoosite-blog-editor"]
@@ -476,6 +479,8 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertEqual(data["path"], "/blog/publicar")
         self.assertNotIn("publishedBundleKey", data)
         self.assertNotIn("publishedBundleKey", publish["body"])
+        published_article = self.store.get_metadata(f"HUB#zoosite-main", f"ARTICLE#{article_id}")
+        self.assertEqual(published_article["visibility"], "public")
         bundle = next(item for item in self.store.objects.values() if item.get("safeArticlePath") == "/blog/publicar")
         self.assertEqual(bundle["safeArticlePath"], "/blog/publicar")
         self.assertEqual(bundle["category"]["taxonomyId"], "cat-blog")
