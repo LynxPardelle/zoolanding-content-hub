@@ -1129,7 +1129,7 @@ class ContentHubHandlerTests(unittest.TestCase):
             {"articleId": article_id, "revisionId": "../rev_001"},
         )
         self.assertEqual(unsafe["statusCode"], 400)
-        self.assertEqual(body(unsafe)["error"], "Invalid id")
+        self.assertEqual(body(unsafe)["error"], "Invalid identifier")
 
         missing_article = self.request(
             "/features/content-hub/action",
@@ -1191,6 +1191,51 @@ class ContentHubHandlerTests(unittest.TestCase):
         )
         self.assertEqual(restore["statusCode"], 200)
         self.assertEqual(body(restore)["data"]["revisionId"], "rev_restore")
+
+    def test_update_package_persists_editable_article_content_in_article_detail(self):
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Contenido enriquecido", "summary": "Resumen editable"},
+        )
+        article_id = body(create)["data"]["article"]["articleId"]
+        article_content = {
+            "ops": [
+                {"insert": "Encabezado editable"},
+                {"insert": "\n", "attributes": {"header": 2}},
+                {"insert": "Cuerpo con "},
+                {"insert": "enfasis", "attributes": {"bold": True}},
+                {"insert": "\n"},
+            ],
+        }
+
+        update = self.request(
+            "/features/content-hub/action",
+            {"action": "updatePackage"},
+            {
+                "articleId": article_id,
+                "revisionId": "rev_rich_text",
+                "articleContent": article_content,
+                "variables": {"draftNote": "visible-safe"},
+                "components": [{"type": "generic-rich-text", "config": {"valueFrom": "articleContent"}}],
+            },
+        )
+        self.assertEqual(update["statusCode"], 200)
+
+        detail = self.request(
+            "/features/content-hub/read",
+            {"read": "articleDetail", "articleId": article_id},
+            csrf=False,
+        )
+        self.assertEqual(detail["statusCode"], 200)
+        item = body(detail)["data"]["item"]
+        self.assertEqual(item["revisionId"], "rev_rich_text")
+        self.assertEqual(item["articleContent"], article_content)
+        self.assertEqual(item["variables"]["articleContent"], article_content)
+        self.assertEqual(item["variables"]["draftNote"], "visible-safe")
+        self.assertEqual(item["components"][0]["type"], "generic-rich-text")
+        self.assertNotIn("packageKey", detail["body"])
+        self.assertNotIn("publishedBundleKey", detail["body"])
 
     def test_update_package_requires_existing_article(self):
         update = self.request(

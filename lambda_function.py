@@ -248,7 +248,8 @@ def _handle_read(
         article = store.get_metadata(f"HUB#{hub_id}", f"ARTICLE#{article_id}")
         if not article:
             raise ContentHubNotFound()
-        return {"item": _article_summary(article)}
+        package = _latest_article_package(store, article)
+        return {"item": _article_detail(article, package)}
     if read_kind == "taxonomyList":
         taxonomy_kind = _clean_string(binding.get("taxonomyKind") or _input_field(payload, "taxonomyKind"))
         sk_prefix = f"TAXONOMY#{taxonomy_kind}#" if taxonomy_kind in {"category", "tag"} else "TAXONOMY#"
@@ -439,21 +440,19 @@ def _update_package(
     revision_id = _safe_id(_input_field(payload, "revisionId") or f"rev_{time.time_ns()}")
     now = _now_iso()
     store = _store()
-    if not store.get_metadata(f"HUB#{hub['hubId']}", f"ARTICLE#{article_id}"):
+    article = store.get_metadata(f"HUB#{hub['hubId']}", f"ARTICLE#{article_id}")
+    if not article:
         raise ContentHubNotFound()
+    previous_package = _latest_article_package(store, article)
     revision = _revision_item(hub["hubId"], article_id, revision_id, locale, now, session["subject"])
-    package = {
-        "version": 1,
-        "kind": "content-hub-article-package",
-        "hubId": hub["hubId"],
-        "articleId": article_id,
-        "locale": locale,
-        "revisionId": revision_id,
-        "components": _safe_json_node(_input_field(payload, "components") or []),
-        "variables": _safe_json_node(_input_field(payload, "variables") or {}),
-        "i18n": _safe_json_node(_input_field(payload, "i18n") or {}),
-        "updatedAt": now,
-    }
+    package = _editable_article_package(
+        article=article,
+        revision=revision,
+        payload=payload,
+        profile=profile,
+        hub=hub,
+        fallback=previous_package,
+    )
     metadata_updates = _article_metadata_updates(payload)
     if metadata_updates:
         update_locale = _locale(metadata_updates.get("primaryLocale") or locale)
@@ -475,6 +474,48 @@ def _update_package(
         **metadata_updates,
     })
     return {"revision": _revision_summary(revision)}
+
+
+def _editable_article_package(
+    *,
+    article: dict[str, Any],
+    revision: dict[str, Any],
+    payload: dict[str, Any],
+    profile: dict[str, Any],
+    hub: dict[str, Any],
+    fallback: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    article_id = _safe_id(article.get("articleId"))
+    revision_id = _safe_id(revision.get("revisionId"))
+    locale = _locale(revision.get("locale") or article.get("primaryLocale") or hub.get("defaultLocale") or "es")
+    article_content_input = _input_field(payload, "articleContent")
+    fallback_variables = (fallback or {}).get("variables") if isinstance((fallback or {}).get("variables"), dict) else {}
+    fallback_article_content = (fallback or {}).get("articleContent")
+    if fallback_article_content is None:
+        fallback_article_content = fallback_variables.get("articleContent")
+    article_content = _safe_json_node(
+        article_content_input if article_content_input is not None else fallback_article_content
+    )
+    variables = _safe_object_node(_input_field(payload, "variables") or (fallback or {}).get("variables") or {})
+    if article_content is not None:
+        variables = {**variables, "articleContent": article_content}
+    components_input = _input_field(payload, "components")
+    i18n_input = _input_field(payload, "i18n")
+    return {
+        "version": 1,
+        "kind": "content-hub-article-package",
+        "hubId": hub["hubId"],
+        "articleId": article_id,
+        "ownerDraftDomain": hub["ownerDraftDomain"],
+        "originDraftDomain": profile["domain"],
+        "locale": locale,
+        "revisionId": revision_id,
+        "articleContent": article_content,
+        "components": _safe_json_node(components_input if components_input is not None else (fallback or {}).get("components") or []),
+        "variables": variables,
+        "i18n": _safe_object_node(i18n_input if i18n_input is not None else (fallback or {}).get("i18n") or {}),
+        "updatedAt": revision.get("createdAt") or _now_iso(),
+    }
 
 
 def _validate_article(payload: dict[str, Any], binding: dict[str, Any], profile: dict[str, Any], hub: dict[str, Any]) -> dict[str, Any]:
@@ -1409,13 +1450,16 @@ def _article_package(
     profile: dict[str, Any],
     hub: dict[str, Any],
 ) -> dict[str, Any]:
+    package = _editable_article_package(
+        article=article,
+        revision=revision,
+        payload=payload,
+        profile=profile,
+        hub=hub,
+        fallback={},
+    )
     return {
-        "version": 1,
-        "kind": "content-hub-article-package",
-        "hubId": hub["hubId"],
-        "articleId": article["articleId"],
-        "ownerDraftDomain": hub["ownerDraftDomain"],
-        "originDraftDomain": profile["domain"],
+        **package,
         "status": "draft",
         "visibility": article["visibility"],
         "title": article.get("title"),
@@ -1437,10 +1481,6 @@ def _article_package(
             "url": article.get("canonicalUrl"),
         },
         "primaryLocale": article["primaryLocale"],
-        "revisionId": revision["revisionId"],
-        "components": _safe_json_node(_input_field(payload, "components") or []),
-        "variables": _safe_json_node(_input_field(payload, "variables") or {}),
-        "i18n": _safe_json_node(_input_field(payload, "i18n") or {}),
         "analytics": _analytics_context(hub),
         "createdAt": article["createdAt"],
         "updatedAt": article["updatedAt"],
@@ -1466,6 +1506,39 @@ def _revision_item(hub_id: str, article_id: str, revision_id: str, locale: str, 
 
 def _published_bundle_key(profile: dict[str, Any], hub_id: str, render_domain: str, locale: str, article_id: str, revision_id: str) -> str:
     return f"content-hubs/{profile['environment']}/{hub_id}/published/{render_domain}/{locale}/{article_id}/{revision_id}/bundle.json"
+
+
+def _latest_article_package(store: Any, article: dict[str, Any]) -> dict[str, Any]:
+    article_id = _clean_string(article.get("articleId"))
+    revision_id = _clean_string(article.get("latestRevisionId"))
+    if not article_id or not revision_id:
+        return {}
+    revision = store.get_metadata(f"ARTICLE#{article_id}", f"REVISION#{revision_id}")
+    if not revision or not revision.get("packageKey"):
+        return {}
+    try:
+        package = store.get_json(revision["packageKey"])
+    except ContentHubNotFound:
+        return {}
+    return package if isinstance(package, dict) else {}
+
+
+def _article_detail(item: dict[str, Any], package: dict[str, Any]) -> dict[str, Any]:
+    detail = _article_summary(item)
+    if not package:
+        return detail
+    variables = _public_payload(package.get("variables") if isinstance(package.get("variables"), dict) else {})
+    components = _public_payload(package.get("components") if isinstance(package.get("components"), list) else [])
+    i18n = _public_payload(package.get("i18n") if isinstance(package.get("i18n"), dict) else {})
+    article_content = _public_payload(package.get("articleContent") if "articleContent" in package else variables.get("articleContent"))
+    return _without_empty({
+        **detail,
+        "revisionId": package.get("revisionId") or item.get("latestRevisionId"),
+        "articleContent": article_content,
+        "components": components,
+        "variables": variables,
+        "i18n": i18n,
+    })
 
 
 def _article_summary(item: dict[str, Any]) -> dict[str, Any]:
@@ -1648,6 +1721,15 @@ def _safe_json_node(value: Any) -> Any:
     return value if isinstance(value, (dict, list, str, int, float, bool)) or value is None else None
 
 
+def _safe_object_node(value: Any) -> dict[str, Any]:
+    node = _safe_json_node(value)
+    if node is None:
+        return {}
+    if not isinstance(node, dict):
+        raise ContentHubError("Invalid JSON object")
+    return node
+
+
 def _reject_unsafe_public_payload(value: Any, path: str = "$") -> None:
     if isinstance(value, dict):
         for key, child in value.items():
@@ -1757,7 +1839,7 @@ def _domain(value: Any) -> str:
 def _safe_id(value: Any) -> str:
     safe_id = _clean_string(value)
     if not SAFE_ID_RE.fullmatch(safe_id):
-        raise ContentHubError("Invalid id")
+        raise ContentHubError("Invalid identifier")
     return safe_id
 
 

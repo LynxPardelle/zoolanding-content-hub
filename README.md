@@ -57,9 +57,10 @@ When `rolePolicies` is present, it is the server-side source of truth for every 
 
 Wildcard permissions such as `blog:article:*` are rejected during config normalization. Config errors return only the generic browser-safe message `Content hub config is invalid`.
 
-## Blog MVP Safety Notes
+## Blog Safety Notes
 
 - `createArticle`, `articleList`, and `articleDetail` carry public-safe SEO, category, tags, comment policy, content safety, canonical, and path metadata.
+- `articleDetail` also returns the latest sanitized editable package fields `articleContent`, `components`, `variables`, and `i18n` so draft builders can hydrate article editors without exposing S3 object keys or server-only policy.
 - `upsertTaxonomy` stores category/tag administration metadata in DynamoDB and returns only safe taxonomy summaries.
 - `publish` writes public bundles with SEO, taxonomy, analytics context, comment policy, canonical mode, and safe article path fields.
 - `unpublishArticle` and `archiveArticle` mark article metadata private and remove the public slug index without deleting immutable bundles or revision history.
