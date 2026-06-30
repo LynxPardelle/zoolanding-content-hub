@@ -72,9 +72,9 @@ This is an operational audit trail using the existing versioned S3 bucket. It is
 - `createArticle`, `articleList`, and `articleDetail` carry public-safe SEO, category, tags, comment policy, content safety, canonical, and path metadata.
 - `articleDetail` also returns the latest sanitized editable package fields `articleContent`, `components`, `variables`, and `i18n` so draft builders can hydrate article editors without exposing S3 object keys or server-only policy.
 - `upsertTaxonomy` stores category/tag administration metadata in DynamoDB and returns only safe taxonomy summaries.
-- `publish` writes public bundles with SEO, taxonomy, analytics context, comment policy, canonical mode, and safe article path fields.
+- `publish` requires the article to be approved first, then writes public bundles with SEO, taxonomy, analytics context, comment policy, canonical mode, and safe article path fields.
 - `unpublishArticle` and `archiveArticle` mark article metadata private and remove the public slug index without deleting immutable bundles or revision history.
-- `schedule` requires an existing article, validates `publishAt`/`unpublishAt` plus `timezone`, and stores the immutable existing revision only for scheduled publishes.
+- `schedule` requires an existing article, validates `publishAt`/`unpublishAt` plus `timezone`, and stores the immutable existing revision only for scheduled publishes. Scheduled publish actions require the article to be approved before the schedule can be stored.
 - `scheduleList` returns schedule summaries for the authenticated hub, optionally filtered by article, and `cancelSchedule` removes a pending schedule without exposing storage details.
 - The SAM schedule event runs due publish/unpublish items every 5 minutes. A bad schedule row records `lastError` on that row without stopping the rest of the due batch.
 - DynamoDB-backed list reads page through all query pages internally instead of silently truncating at the first 200 metadata rows.
