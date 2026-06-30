@@ -253,6 +253,27 @@ class ContentHubHandlerTests(unittest.TestCase):
             "requestId": "req-safe-123",
         })
 
+    def test_malformed_json_returns_validation_error(self):
+        malformed = event(
+            "/features/content-hub/read",
+            {},
+            csrf=False,
+            cookies=[],
+            request_id="req-bad-json-123",
+        )
+        malformed["body"] = "{not-json"
+
+        response = content_hub.lambda_handler(malformed, None)
+
+        self.assertEqual(response["statusCode"], 400)
+        self.assertEqual(body(response), {
+            "ok": False,
+            "code": "validation_error",
+            "error": "Request body must be valid JSON",
+            "message": "Request body must be valid JSON",
+            "requestId": "req-bad-json-123",
+        })
+
     def test_error_response_generates_fallback_request_id(self):
         response = self.request(
             "/features/content-hub/read",
