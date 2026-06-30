@@ -61,6 +61,7 @@ READ_CAPABILITIES = {
     "publicBundlePreview": "read",
     "scheduleList": "publish",
     "moderationQueue": "moderate",
+    "analyticsSummary": "analytics",
 }
 
 READ_PERMISSIONS = {
@@ -72,6 +73,7 @@ READ_PERMISSIONS = {
     "publicBundlePreview": "blog:article:read",
     "scheduleList": "blog:article:schedule",
     "moderationQueue": "blog:moderation:read",
+    "analyticsSummary": "blog:analytics:read",
 }
 
 ACTION_CAPABILITIES = {
@@ -418,6 +420,8 @@ def _handle_read(
         return {"items": items}
     if read_kind == "moderationQueue":
         return {"items": [_moderation_summary(item) for item in store.query_moderation(f"HUB#{hub_id}", "MODERATION#")]}
+    if read_kind == "analyticsSummary":
+        return _analytics_summary(store, hub_id)
     if read_kind == "publicBundlePreview":
         article_id = _safe_id(binding.get("articleId") or _input_field(payload, "articleId"))
         revision_value = binding.get("revisionId") or _input_field(payload, "revisionId")
@@ -1104,7 +1108,7 @@ def _record_interaction(
 ) -> dict[str, Any]:
     del profile
     event_type = _safe_id(_input_field(payload, "eventType") or _input_field(payload, "interactionType") or "reaction")
-    if event_type not in {"reaction", "like", "cta", "form"}:
+    if event_type not in {"view", "readProgress", "reaction", "like", "cta", "form", "share", "assetDownload"}:
         raise ContentHubError("Invalid interaction type")
     article_id_value = binding.get("articleId") or _input_field(payload, "articleId")
     article_id = _optional_safe_id(article_id_value)
@@ -1266,7 +1270,7 @@ def _normalize_hub(hub: dict[str, Any], admin_groups: list[str], domain: str) ->
     roles = hub.get("roles") if isinstance(hub.get("roles"), dict) else {}
     normalized_roles = {
         capability: _string_list(roles.get(capability)) or admin_groups
-        for capability in ["read", "edit", "publish", "media", "moderate"]
+        for capability in ["read", "edit", "publish", "media", "moderate", "analytics"]
     }
     return {
         "hubId": _safe_id(hub.get("hubId")),
@@ -1455,6 +1459,9 @@ class DynamoContentHubStore:
 
     def put_interaction(self, item: dict[str, Any]) -> None:
         self.table(self.interactions_table_name).put_item(Item=_without_empty(item))
+
+    def query_interactions(self, pk: str, sk_prefix: str) -> list[dict[str, Any]]:
+        return _query_items(self.table(self.interactions_table_name), pk, sk_prefix)
 
     def put_json(self, key: str, payload: dict[str, Any]) -> None:
         self.s3.put_object(
@@ -1820,6 +1827,63 @@ def _interaction_summary(item: dict[str, Any]) -> dict[str, Any]:
         "path": item.get("path"),
         "metadata": item.get("metadata"),
         "createdAt": item.get("createdAt"),
+    }
+
+
+def _analytics_summary(store: Any, hub_id: str) -> dict[str, Any]:
+    articles = [_article_summary(item) for item in store.query_metadata(f"HUB#{hub_id}", "ARTICLE#")]
+    metrics_by_article = {
+        _clean_string(article.get("articleId")): _empty_article_metrics(article)
+        for article in articles
+        if _clean_string(article.get("articleId"))
+    }
+    for item in store.query_interactions(f"HUB#{hub_id}", "INTERACTION#"):
+        article_id = _clean_string(item.get("articleId"))
+        if not article_id:
+            continue
+        metrics = metrics_by_article.setdefault(article_id, _empty_article_metrics({"articleId": article_id}))
+        event_type = _clean_string(item.get("eventType"))
+        if event_type == "view":
+            metrics["views"] += 1
+        elif event_type == "readProgress":
+            metrics["readProgress"] += 1
+        elif event_type in {"reaction", "like"}:
+            metrics["reactions"] += 1
+        elif event_type == "cta":
+            metrics["ctaClicks"] += 1
+        elif event_type == "share":
+            metrics["shares"] += 1
+        elif event_type == "assetDownload":
+            metrics["assetDownloads"] += 1
+        elif event_type == "form":
+            metrics["forms"] += 1
+
+    for item in store.query_moderation(f"HUB#{hub_id}", "MODERATION#"):
+        article_id = _clean_string(item.get("articleId"))
+        if not article_id:
+            continue
+        metrics = metrics_by_article.setdefault(article_id, _empty_article_metrics({"articleId": article_id}))
+        metrics["comments"] += 1
+
+    return {"items": list(metrics_by_article.values())}
+
+
+def _empty_article_metrics(article: dict[str, Any]) -> dict[str, Any]:
+    summary = _article_summary(article)
+    return {
+        **summary,
+        "id": summary.get("articleId"),
+        "articleId": summary.get("articleId"),
+        "language": summary.get("primaryLocale") or "es",
+        "category": summary.get("categorySlug") or "sin-categoria",
+        "views": 0,
+        "readProgress": 0,
+        "ctaClicks": 0,
+        "reactions": 0,
+        "comments": 0,
+        "shares": 0,
+        "assetDownloads": 0,
+        "forms": 0,
     }
 
 

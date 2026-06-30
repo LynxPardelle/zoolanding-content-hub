@@ -32,6 +32,7 @@ def encoded_config(**overrides):
                     "publish": ["zoosite-admin", "zoosite-blog-publisher"],
                     "media": ["zoosite-admin", "zoosite-blog-media"],
                     "moderate": ["zoosite-admin", "zoosite-blog-moderator"],
+                    "analytics": ["zoosite-admin", "zoosite-blog-analyst"],
                 },
                 "analyticsContext": {
                     "contentGroup": "zoosite_blog",
@@ -161,6 +162,9 @@ class FakeStore:
 
     def put_interaction(self, item):
         self.interactions[(item["pk"], item["sk"])] = dict(item)
+
+    def query_interactions(self, pk, sk_prefix):
+        return [dict(item) for (item_pk, item_sk), item in self.interactions.items() if item_pk == pk and item_sk.startswith(sk_prefix)]
 
     def put_json(self, key, payload):
         self.objects[key] = dict(payload)
@@ -1554,6 +1558,51 @@ class ContentHubHandlerTests(unittest.TestCase):
         )
         self.assertEqual(rejected["statusCode"], 400)
         self.assertNotIn("persona@example.com", rejected["body"])
+
+    def test_blog_analyst_can_read_aggregated_analytics_without_raw_events(self):
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Analíticas del blog", "category": "web"},
+        )
+        self.assertEqual(create["statusCode"], 200)
+        article_id = body(create)["data"]["article"]["articleId"]
+
+        for event_type in ["view", "readProgress", "cta", "like", "share", "assetDownload", "form"]:
+            response = self.request(
+                "/features/content-hub/action",
+                {"action": "recordInteraction", "articleId": article_id},
+                {
+                    "eventType": event_type,
+                    "targetId": "hero",
+                    "metadata": {"placement": "hero"},
+                },
+            )
+            self.assertEqual(response["statusCode"], 200)
+
+        comment = self.request(
+            "/features/content-hub/action",
+            {"action": "queueComment", "articleId": article_id},
+            {"commentText": "Comentario para moderar"},
+        )
+        self.assertEqual(comment["statusCode"], 200)
+
+        self.store.roles = ["zoosite-blog-analyst"]
+        read = self.request("/features/content-hub/read", {"read": "analyticsSummary"}, csrf=False)
+        self.assertEqual(read["statusCode"], 200)
+        item = body(read)["data"]["items"][0]
+        self.assertEqual(item["articleId"], article_id)
+        self.assertEqual(item["views"], 1)
+        self.assertEqual(item["readProgress"], 1)
+        self.assertEqual(item["ctaClicks"], 1)
+        self.assertEqual(item["reactions"], 1)
+        self.assertEqual(item["shares"], 1)
+        self.assertEqual(item["assetDownloads"], 1)
+        self.assertEqual(item["forms"], 1)
+        self.assertEqual(item["comments"], 1)
+        self.assertNotIn("metadata", read["body"])
+        self.assertNotIn("actorHash", read["body"])
+        self.assertNotIn("admin-sub", read["body"])
 
 
     def test_media_upload_accepts_public_metadata_without_signed_url(self):
