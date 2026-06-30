@@ -1691,6 +1691,14 @@ def _article_bundle(
     article_id = _safe_id(article.get("articleId"))
     revision_id = _safe_id(revision.get("revisionId"))
     package_payload = package if isinstance(package, dict) else {}
+    variables = package_payload.get("variables") if isinstance(package_payload.get("variables"), dict) else {}
+    article_content = package_payload.get("articleContent")
+    if article_content is None:
+        article_content = variables.get("articleContent")
+    if article_content is not None and "articleContent" not in variables:
+        safe_article_content = _public_payload(article_content)
+        if safe_article_content is not None:
+            variables = {**variables, "articleContent": safe_article_content}
     return {
         "version": 1,
         "bundleId": f"{article_id}:{revision_id}:{render_domain}:{locale}",
@@ -1721,7 +1729,7 @@ def _article_bundle(
         },
         "structuredData": [],
         "components": package_payload.get("components") if isinstance(package_payload.get("components"), list) else [],
-        "variables": package_payload.get("variables") if isinstance(package_payload.get("variables"), dict) else {},
+        "variables": variables,
         "i18n": package_payload.get("i18n") if isinstance(package_payload.get("i18n"), dict) else {},
         "analytics": _analytics_context(hub),
     }
