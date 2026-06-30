@@ -695,6 +695,7 @@ def _publish_article(
     revision = store.get_metadata(f"ARTICLE#{article_id}", f"REVISION#{revision_id}")
     if not revision or revision.get("hubId") != hub["hubId"]:
         raise ContentHubNotFound("Revision not found")
+    _require_article_approved_for_publish(article)
     package = store.get_json(revision["packageKey"])
     path = _article_path(_input_field(payload, "path") or article.get("path") or f"/blog/{_slug(article.get('title') or article_id)}")
     canonical_mode = _canonical_mode(_input_field(payload, "canonicalMode") or article.get("canonicalMode") or "self")
@@ -841,6 +842,7 @@ def _schedule_article(
         revision = store.get_metadata(f"ARTICLE#{article_id}", f"REVISION#{revision_id}")
         if not revision or revision.get("hubId") != hub["hubId"]:
             raise ContentHubNotFound("Revision not found")
+        _require_article_approved_for_publish(article)
     else:
         scheduled_at = _schedule_time(
             _direct_input_field(payload, "unpublishAt") or _direct_input_field(payload, "scheduledAt"),
@@ -874,6 +876,11 @@ def _schedule_article(
     }
     store.put_metadata(item)
     return {"schedule": _schedule_summary(item)}
+
+
+def _require_article_approved_for_publish(article: dict[str, Any]) -> None:
+    if article.get("status") != "approved":
+        raise ContentHubError("Article must be approved before publishing")
 
 
 def _cancel_schedule(
