@@ -776,6 +776,47 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertEqual(bundle["analytics"]["piiPolicy"], "no-pii")
         self.assertNotIn("bucket", publish["body"].lower())
 
+    def test_publish_preserves_top_level_article_content_in_public_variables(self):
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Contenido público", "summary": "Debe verse publicado"},
+        )
+        article_id = body(create)["data"]["article"]["articleId"]
+        article_content = {
+            "ops": [
+                {"insert": "Cuerpo publicado desde texto enriquecido."},
+                {"insert": "\n"},
+            ],
+        }
+        update = self.request(
+            "/features/content-hub/action",
+            {"action": "updatePackage"},
+            {
+                "articleId": article_id,
+                "revisionId": "rev_public_body",
+                "articleContent": article_content,
+                "components": [{"type": "generic-rich-text", "config": {"valueFrom": "articleContent"}}],
+            },
+        )
+        self.assertEqual(update["statusCode"], 200)
+        revision_id = body(update)["data"]["revision"]["revisionId"]
+        revision = self.store.get_metadata(f"ARTICLE#{article_id}", f"REVISION#{revision_id}")
+        package = self.store.get_json(revision["packageKey"])
+        package["variables"].pop("articleContent", None)
+        self.store.put_json(revision["packageKey"], package)
+
+        self.request("/features/content-hub/action", {"action": "approveArticle", "articleId": article_id})
+        publish = self.request(
+            "/features/content-hub/action",
+            {"action": "publish", "articleId": article_id, "revisionId": revision_id},
+            {"path": "/blog/contenido-publico"},
+        )
+
+        self.assertEqual(publish["statusCode"], 200)
+        _, bundle = next((key, item) for key, item in self.store.objects.items() if item.get("safeArticlePath") == "/blog/contenido-publico")
+        self.assertEqual(bundle["variables"]["articleContent"], article_content)
+
     def test_publish_requires_approved_article(self):
         create = self.request(
             "/features/content-hub/action",
