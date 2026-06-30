@@ -398,6 +398,7 @@ class ContentHubHandlerTests(unittest.TestCase):
                 "groups": ["zoosite-blog-publisher"],
                 "permissions": [
                     "blog:article:read",
+                    "blog:article:approve",
                     "blog:article:publish",
                 ],
             },
@@ -416,6 +417,8 @@ class ContentHubHandlerTests(unittest.TestCase):
         read = self.request("/features/content-hub/read", {"read": "articleDetail"}, {"articleId": article_id}, csrf=False)
         self.assertEqual(read["statusCode"], 200)
 
+        self.store.roles = ["zoosite-blog-publisher"]
+        self.request("/features/content-hub/action", {"action": "approveArticle", "articleId": article_id})
         self.store.roles = ["zoosite-blog-publisher"]
         published = self.request(
             "/features/content-hub/action",
@@ -599,6 +602,7 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertTrue(any(item["kind"] == "tag" and item["slug"] == "algo-mas" for item in taxonomy_items))
 
         self.store.roles = ["zoosite-blog-publisher"]
+        self.request("/features/content-hub/action", {"action": "approveArticle", "articleId": article["articleId"]})
         publish = self.request(
             "/features/content-hub/action",
             {"action": "publish", "articleId": article["articleId"], "revisionId": "rev_001"},
@@ -719,6 +723,7 @@ class ContentHubHandlerTests(unittest.TestCase):
             {"title": "No publicar"},
         )
         article_id = body(create)["data"]["article"]["articleId"]
+        self.request("/features/content-hub/action", {"action": "approveArticle", "articleId": article_id})
         publish = self.request(
             "/features/content-hub/action",
             {"action": "publish", "articleId": article_id, "revisionId": "rev_001"},
@@ -741,6 +746,7 @@ class ContentHubHandlerTests(unittest.TestCase):
             },
         )
         article_id = body(create)["data"]["article"]["articleId"]
+        self.request("/features/content-hub/action", {"action": "approveArticle", "articleId": article_id})
         publish = self.request(
             "/features/content-hub/action",
             {"action": "publish", "articleId": article_id, "revisionId": "rev_001"},
@@ -764,6 +770,26 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertEqual(bundle["analytics"]["piiPolicy"], "no-pii")
         self.assertNotIn("bucket", publish["body"].lower())
 
+    def test_publish_requires_approved_article(self):
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Sin aprobar", "summary": "No debe publicarse"},
+        )
+        article_id = body(create)["data"]["article"]["articleId"]
+
+        self.store.roles = ["zoosite-blog-publisher"]
+        publish = self.request(
+            "/features/content-hub/action",
+            {"action": "publish", "articleId": article_id, "revisionId": "rev_001"},
+        )
+
+        self.assertEqual(publish["statusCode"], 400)
+        self.assertEqual(body(publish)["error"], "Article must be approved before publishing")
+        article = self.store.get_metadata("HUB#zoosite-main", f"ARTICLE#{article_id}")
+        self.assertEqual(article["status"], "draft")
+        self.assertNotIn("publishedBundleKey", article)
+
     def test_publish_rejects_path_collision_with_another_article(self):
         first = self.request(
             "/features/content-hub/action",
@@ -777,6 +803,7 @@ class ContentHubHandlerTests(unittest.TestCase):
         )
         first_id = body(first)["data"]["article"]["articleId"]
         second_id = body(second)["data"]["article"]["articleId"]
+        self.request("/features/content-hub/action", {"action": "approveArticle", "articleId": first_id})
         first_publish = self.request(
             "/features/content-hub/action",
             {"action": "publish", "articleId": first_id, "revisionId": "rev_001"},
@@ -784,6 +811,7 @@ class ContentHubHandlerTests(unittest.TestCase):
         )
         self.assertEqual(first_publish["statusCode"], 200)
 
+        self.request("/features/content-hub/action", {"action": "approveArticle", "articleId": second_id})
         collision = self.request(
             "/features/content-hub/action",
             {"action": "publish", "articleId": second_id, "revisionId": "rev_001"},
@@ -829,6 +857,7 @@ class ContentHubHandlerTests(unittest.TestCase):
             {"title": "Revision ajena"},
         )
         article_id = body(create)["data"]["article"]["articleId"]
+        self.request("/features/content-hub/action", {"action": "approveArticle", "articleId": article_id})
         revision = self.store.get_metadata(f"ARTICLE#{article_id}", "REVISION#rev_001")
         revision["hubId"] = "other-hub"
 
@@ -1051,6 +1080,14 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertEqual(invalid_timezone["statusCode"], 400)
         self.assertEqual(body(invalid_timezone)["error"], "Invalid timezone")
 
+        not_approved = self.request(
+            "/features/content-hub/action",
+            {"action": "schedule", "articleId": article_id},
+            {"publishAt": "2026-07-01T10:00:00Z", "timezone": "America/Mexico_City"},
+        )
+        self.assertEqual(not_approved["statusCode"], 400)
+        self.assertEqual(body(not_approved)["error"], "Article must be approved before publishing")
+
     def test_schedule_publish_uses_existing_immutable_revision(self):
         create = self.request(
             "/features/content-hub/action",
@@ -1058,6 +1095,7 @@ class ContentHubHandlerTests(unittest.TestCase):
             {"title": "Revision programada", "summary": "Revision fija"},
         )
         article_id = body(create)["data"]["article"]["articleId"]
+        self.request("/features/content-hub/action", {"action": "approveArticle", "articleId": article_id})
 
         schedule = self.request(
             "/features/content-hub/action",
@@ -1086,6 +1124,7 @@ class ContentHubHandlerTests(unittest.TestCase):
             {"title": "Programable"},
         )
         article_id = body(create)["data"]["article"]["articleId"]
+        self.request("/features/content-hub/action", {"action": "approveArticle", "articleId": article_id})
         schedule = self.request(
             "/features/content-hub/action",
             {"action": "schedule", "articleId": article_id},
@@ -1150,6 +1189,7 @@ class ContentHubHandlerTests(unittest.TestCase):
         )
         article_id = body(create)["data"]["article"]["articleId"]
         article = self.store.get_metadata("HUB#zoosite-main", f"ARTICLE#{article_id}")
+        self.request("/features/content-hub/action", {"action": "approveArticle", "articleId": article_id})
         schedule = self.request(
             "/features/content-hub/action",
             {"action": "schedule", "articleId": article_id},
@@ -1176,6 +1216,7 @@ class ContentHubHandlerTests(unittest.TestCase):
             {"title": "Futura", "slug": "futura"},
         )
         article_id = body(create)["data"]["article"]["articleId"]
+        self.request("/features/content-hub/action", {"action": "approveArticle", "articleId": article_id})
         schedule = self.request(
             "/features/content-hub/action",
             {"action": "schedule", "articleId": article_id},
@@ -1220,6 +1261,7 @@ class ContentHubHandlerTests(unittest.TestCase):
         )
         article_id = body(create)["data"]["article"]["articleId"]
         article = self.store.get_metadata("HUB#zoosite-main", f"ARTICLE#{article_id}")
+        self.request("/features/content-hub/action", {"action": "approveArticle", "articleId": article_id})
         publish = self.request(
             "/features/content-hub/action",
             {"action": "publish", "articleId": article_id, "revisionId": "rev_001"},
@@ -1306,6 +1348,7 @@ class ContentHubHandlerTests(unittest.TestCase):
             {"title": "Preview latest"},
         )
         article_id = body(create)["data"]["article"]["articleId"]
+        self.request("/features/content-hub/action", {"action": "approveArticle", "articleId": article_id})
         publish = self.request(
             "/features/content-hub/action",
             {"action": "publish", "articleId": article_id},
