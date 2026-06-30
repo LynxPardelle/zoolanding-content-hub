@@ -433,8 +433,28 @@ def _handle_read(
         revision_id = _safe_id(revision_value)
         locale = _locale(binding.get("language") or _input_field(payload, "language") or hub.get("defaultLocale") or "es")
         render_domain = _domain(_input_field(payload, "renderDomain") or profile["domain"])
-        key = _published_bundle_key(profile, hub_id, render_domain, locale, article_id, revision_id)
-        return {"bundle": store.get_json(key)}
+        article = store.get_metadata(f"HUB#{hub_id}", f"ARTICLE#{article_id}")
+        revision = store.get_metadata(f"ARTICLE#{article_id}", f"REVISION#{revision_id}")
+        if not article or not revision:
+            raise ContentHubNotFound()
+        package = store.get_json(revision["packageKey"])
+        path = _article_path(_input_field(payload, "path") or article.get("path") or f"/blog/{_slug(article.get('title') or article_id)}")
+        return {
+            "bundle": _article_bundle(
+                article,
+                revision,
+                package,
+                profile,
+                hub,
+                render_domain,
+                locale,
+                path,
+                "preview",
+                _now_iso(),
+                _safe_text(_input_field(payload, "seoTitle") or article.get("seoTitle") or article.get("title") or article_id, max_length=160),
+                _safe_text(_input_field(payload, "seoDescription") or article.get("seoDescription") or article.get("summary") or "", max_length=320),
+            )
+        }
     raise ContentHubError("Unsupported content hub read")
 
 
@@ -706,38 +726,26 @@ def _publish_article(
     canonical_url = _safe_canonical_url(_input_field(payload, "canonicalUrl") or article.get("canonicalUrl") or "")
     _assert_public_slug_available(store, profile, render_domain, locale, path, article_id)
     now = _now_iso()
-    bundle = {
-        "version": 1,
-        "bundleId": f"{article_id}:{revision_id}:{render_domain}:{locale}",
-        "hubId": hub["hubId"],
-        "articleId": article_id,
-        "ownerDraftDomain": hub["ownerDraftDomain"],
-        "renderDomain": render_domain,
-        "locale": locale,
-        "path": path,
-        "safeArticlePath": path,
-        "status": "published",
-        "publishedAt": now,
-        "title": article.get("title"),
-        "summary": article.get("summary"),
-        "slug": article.get("slug") or _slug(article.get("title") or article_id),
-        "category": _taxonomy_ref(article.get("category")),
-        "tags": _taxonomy_refs(article.get("tags")),
-        "commentPolicy": _comment_policy(article.get("commentPolicy") or "moderated"),
-        "contentSafety": _content_safety_from_value(article.get("contentSafety")),
-        "seo": {
-            "title": _safe_text(_input_field(payload, "seoTitle") or article.get("seoTitle") or article.get("title") or article_id, max_length=160),
-            "description": _safe_text(_input_field(payload, "seoDescription") or article.get("seoDescription") or article.get("summary") or "", max_length=320),
-            "canonical": _canonical_for_publish(canonical_mode, canonical_url, path),
-            "canonicalMode": canonical_mode,
-            "robots": _robots_policy(_input_field(payload, "robots") or article.get("robots") or "index,follow"),
-        },
-        "structuredData": [],
-        "components": package.get("components") if isinstance(package, dict) else [],
-        "variables": package.get("variables") if isinstance(package, dict) else {},
-        "i18n": package.get("i18n") if isinstance(package, dict) else {},
-        "analytics": _analytics_context(hub),
-    }
+    seo_title = _safe_text(_input_field(payload, "seoTitle") or article.get("seoTitle") or article.get("title") or article_id, max_length=160)
+    seo_description = _safe_text(_input_field(payload, "seoDescription") or article.get("seoDescription") or article.get("summary") or "", max_length=320)
+    robots_policy = _robots_policy(_input_field(payload, "robots") or article.get("robots") or "index,follow")
+    bundle = _article_bundle(
+        article,
+        revision,
+        package,
+        profile,
+        hub,
+        render_domain,
+        locale,
+        path,
+        "published",
+        now,
+        seo_title,
+        seo_description,
+        canonical_mode,
+        canonical_url,
+        robots_policy,
+    )
     key = _published_bundle_key(profile, hub["hubId"], render_domain, locale, article_id, revision_id)
     store.put_json(key, bundle)
     store.update_metadata(f"HUB#{hub['hubId']}", f"ARTICLE#{article_id}", {
@@ -748,6 +756,9 @@ def _publish_article(
         "path": path,
         "canonicalMode": canonical_mode,
         "canonicalUrl": canonical_url,
+        "seoTitle": seo_title,
+        "seoDescription": seo_description,
+        "robots": robots_policy,
         "publishedBundleKey": key,
         "updatedAt": now,
         "updatedBy": session["subject"],
@@ -1656,6 +1667,63 @@ def _revision_item(hub_id: str, article_id: str, revision_id: str, locale: str, 
         "packageKey": package_key,
         "createdAt": now,
         "createdBy": subject,
+    }
+
+
+def _article_bundle(
+    article: dict[str, Any],
+    revision: dict[str, Any],
+    package: dict[str, Any],
+    profile: dict[str, Any],
+    hub: dict[str, Any],
+    render_domain: str,
+    locale: str,
+    path: str,
+    status: str,
+    timestamp: str,
+    seo_title: str,
+    seo_description: str,
+    canonical_mode: str = "self",
+    canonical_url: str = "",
+    robots_policy: str = "index,follow",
+) -> dict[str, Any]:
+    del profile
+    article_id = _safe_id(article.get("articleId"))
+    revision_id = _safe_id(revision.get("revisionId"))
+    package_payload = package if isinstance(package, dict) else {}
+    return {
+        "version": 1,
+        "bundleId": f"{article_id}:{revision_id}:{render_domain}:{locale}",
+        "hubId": hub["hubId"],
+        "articleId": article_id,
+        "revisionId": revision_id,
+        "ownerDraftDomain": hub["ownerDraftDomain"],
+        "renderDomain": render_domain,
+        "locale": locale,
+        "path": path,
+        "safeArticlePath": path,
+        "status": status,
+        "publishedAt": timestamp if status == "published" else "",
+        "previewedAt": timestamp if status == "preview" else "",
+        "title": article.get("title"),
+        "summary": article.get("summary"),
+        "slug": article.get("slug") or _slug(article.get("title") or article_id),
+        "category": _taxonomy_ref(article.get("category")),
+        "tags": _taxonomy_refs(article.get("tags")),
+        "commentPolicy": _comment_policy(article.get("commentPolicy") or "moderated"),
+        "contentSafety": _content_safety_from_value(article.get("contentSafety")),
+        "seo": {
+            "title": seo_title,
+            "description": seo_description,
+            "canonical": _canonical_for_publish(canonical_mode, canonical_url, path) if status == "published" else path,
+            "canonicalMode": canonical_mode,
+            "robots": _robots_policy(robots_policy) if status == "published" else "noindex,nofollow",
+        },
+        "structuredData": [],
+        "components": package_payload.get("components") if isinstance(package_payload.get("components"), list) else [],
+        "variables": package_payload.get("variables") if isinstance(package_payload.get("variables"), dict) else {},
+        "i18n": package_payload.get("i18n") if isinstance(package_payload.get("i18n"), dict) else {},
+        "analytics": _analytics_context(hub),
     }
 
 
