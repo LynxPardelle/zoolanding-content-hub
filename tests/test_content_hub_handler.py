@@ -754,7 +754,7 @@ class ContentHubHandlerTests(unittest.TestCase):
         publish = self.request(
             "/features/content-hub/action",
             {"action": "publish", "articleId": article_id, "revisionId": "rev_001"},
-            {"path": "/blog/publicar", "seoDescription": "Descripción SEO"},
+            {"path": "/blog/publicar", "seoDescription": "Descripción SEO", "robots": "noindex,nofollow"},
         )
         self.assertEqual(publish["statusCode"], 200)
         data = body(publish)["data"]
@@ -763,6 +763,7 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertNotIn("publishedBundleKey", publish["body"])
         published_article = self.store.get_metadata(f"HUB#zoosite-main", f"ARTICLE#{article_id}")
         self.assertEqual(published_article["visibility"], "public")
+        self.assertEqual(published_article["robots"], "noindex,nofollow")
         bundle_key, bundle = next((key, item) for key, item in self.store.objects.items() if item.get("safeArticlePath") == "/blog/publicar")
         self.assertEqual(published_article.get("publishedBundleKey"), bundle_key)
         self.assertEqual(bundle["safeArticlePath"], "/blog/publicar")
@@ -771,6 +772,7 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertEqual(bundle["commentPolicy"], "moderated")
         self.assertEqual(bundle["seo"]["canonicalMode"], "custom")
         self.assertEqual(bundle["seo"]["canonical"], "https://zoositioweb.com.mx/blog/publicar")
+        self.assertEqual(bundle["seo"]["robots"], "noindex,nofollow")
         self.assertEqual(bundle["analytics"]["piiPolicy"], "no-pii")
         self.assertNotIn("bucket", publish["body"].lower())
 
@@ -1024,6 +1026,36 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertEqual(article["status"], "unpublished")
         self.assertEqual(article["visibility"], "private")
         self.assertIsNone(self.store.get_metadata("SLUG#test#zoositioweb.com.mx#es", "PATH#/blog/web/flujo-editorial-completo"))
+
+    def test_public_bundle_preview_reads_unpublished_revision_package(self):
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {
+                "title": "Preview sin publicar",
+                "summary": "Resumen preview",
+                "components": [{"id": "articleText", "type": "text"}],
+                "variables": {"headline": "Preview"},
+            },
+        )
+        self.assertEqual(create["statusCode"], 200)
+        article_id = body(create)["data"]["article"]["articleId"]
+
+        preview = self.request(
+            "/features/content-hub/read",
+            {"read": "publicBundlePreview", "articleId": article_id, "revisionId": "rev_001"},
+            {"renderDomain": "zoositioweb.com.mx"},
+            csrf=False,
+        )
+
+        self.assertEqual(preview["statusCode"], 200)
+        bundle = body(preview)["data"]["bundle"]
+        self.assertEqual(bundle["articleId"], article_id)
+        self.assertEqual(bundle["revisionId"], "rev_001")
+        self.assertEqual(bundle["status"], "preview")
+        self.assertEqual(bundle["seo"]["robots"], "noindex,nofollow")
+        self.assertEqual(bundle["components"][0]["id"], "articleText")
+        self.assertFalse(any("/published/" in key for key in self.store.objects))
 
     def test_editor_cannot_approve_or_unpublish_article(self):
         self.store.roles = ["zoosite-blog-editor"]
@@ -1603,7 +1635,6 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertNotIn("metadata", read["body"])
         self.assertNotIn("actorHash", read["body"])
         self.assertNotIn("admin-sub", read["body"])
-
 
     def test_media_upload_accepts_public_metadata_without_signed_url(self):
         response = self.request(
