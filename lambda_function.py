@@ -179,7 +179,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         if path == "/features/content-hub/read":
             return _read_response(event)
         if path == "/features/content-hub/action":
-            return _action_response(event)
+            return _action_response(event, request_id)
         raise ContentHubNotFound("Content hub route not found")
     except ContentHubError as exc:
         _log("WARNING" if exc.status_code < 500 else "ERROR", exc.public_message, statusCode=exc.status_code, requestId=request_id)
@@ -200,7 +200,7 @@ def _read_response(event: dict[str, Any]) -> dict[str, Any]:
     return _json_response(200, {"ok": True, "data": _public_payload(data)})
 
 
-def _action_response(event: dict[str, Any]) -> dict[str, Any]:
+def _action_response(event: dict[str, Any], request_id: str) -> dict[str, Any]:
     payload, session, profile, hub = _authorized_request(event, mutation=True)
     binding = _content_hub_binding(payload)
     action_value = binding.get("action")
@@ -209,9 +209,141 @@ def _action_response(event: dict[str, Any]) -> dict[str, Any]:
     action_kind = _safe_id(action_value)
     if action_kind not in ACTION_CAPABILITIES:
         raise ContentHubError("Unsupported content hub action")
-    _require_content_hub_access(session, profile, hub, ACTION_CAPABILITIES[action_kind], ACTION_PERMISSIONS[action_kind])
-    data = _handle_action(action_kind, payload, binding, session, profile, hub)
+    try:
+        _require_content_hub_access(session, profile, hub, ACTION_CAPABILITIES[action_kind], ACTION_PERMISSIONS[action_kind])
+    except ContentHubError as exc:
+        _audit_action_event(
+            request_id,
+            session,
+            profile,
+            hub,
+            action_kind,
+            payload,
+            binding,
+            decision="denied",
+            status=exc.error_code,
+            status_code=exc.status_code,
+            error_code=exc.error_code,
+        )
+        raise
+    _audit_action_event(
+        request_id,
+        session,
+        profile,
+        hub,
+        action_kind,
+        payload,
+        binding,
+        decision="allowed",
+        status="started",
+        status_code=202,
+    )
+    try:
+        data = _handle_action(action_kind, payload, binding, session, profile, hub)
+    except ContentHubError as exc:
+        _audit_action_event(
+            request_id,
+            session,
+            profile,
+            hub,
+            action_kind,
+            payload,
+            binding,
+            decision="allowed",
+            status=exc.error_code,
+            status_code=exc.status_code,
+            error_code=exc.error_code,
+        )
+        raise
+    _audit_action_event(
+        request_id,
+        session,
+        profile,
+        hub,
+        action_kind,
+        payload,
+        binding,
+        decision="allowed",
+        status="succeeded",
+        status_code=200,
+        response=data,
+    )
     return _json_response(200, {"ok": True, "data": _public_payload(data)})
+
+
+def _audit_action_event(
+    request_id: str,
+    session: dict[str, Any],
+    profile: dict[str, Any],
+    hub: dict[str, Any],
+    action_kind: str,
+    payload: dict[str, Any],
+    binding: dict[str, Any],
+    *,
+    decision: str,
+    status: str,
+    status_code: int,
+    error_code: str = "",
+    response: Optional[dict[str, Any]] = None,
+) -> None:
+    now = _now_iso()
+    date_prefix = now[:10]
+    safe_status = _audit_key_segment(status or "unknown")
+    safe_request_id = _audit_key_segment(request_id)
+    key = (
+        f"content-hubs/{profile['environment']}/{hub['hubId']}/audit/{date_prefix}/"
+        f"{time.time_ns()}-{safe_request_id}-{action_kind}-{safe_status}.json"
+    )
+    actor_subject = _clean_string(session.get("subject"))
+    actor_hash = _sha256(f"{profile['environment']}:{profile['domain']}:{profile['authProfileId']}:{actor_subject}") if actor_subject else ""
+    event = {
+        "schemaVersion": 1,
+        "itemFamily": "CONTENT_HUB_ACTION_AUDIT",
+        "requestId": request_id,
+        "createdAt": now,
+        "environment": profile["environment"],
+        "domain": profile["domain"],
+        "authProfileId": profile["authProfileId"],
+        "hubId": hub["hubId"],
+        "action": action_kind,
+        "decision": decision,
+        "status": status,
+        "statusCode": status_code,
+        "code": error_code,
+        "actorHash": actor_hash,
+        "targetIds": _audit_target_ids(payload, binding, response),
+    }
+    _store().put_json(key, event)
+
+
+def _audit_target_ids(payload: dict[str, Any], binding: dict[str, Any], response: Optional[dict[str, Any]] = None) -> dict[str, str]:
+    input_value = payload.get("input") if isinstance(payload.get("input"), dict) else {}
+    response_value = response if isinstance(response, dict) else {}
+    article = response_value.get("article") if isinstance(response_value.get("article"), dict) else {}
+    revision = response_value.get("revision") if isinstance(response_value.get("revision"), dict) else {}
+    taxonomy = response_value.get("taxonomy") if isinstance(response_value.get("taxonomy"), dict) else {}
+    asset = response_value.get("asset") if isinstance(response_value.get("asset"), dict) else {}
+    schedule = response_value.get("schedule") if isinstance(response_value.get("schedule"), dict) else {}
+    output: dict[str, str] = {}
+    sources = [binding, input_value, response_value, article, revision, taxonomy, asset, schedule]
+    for key in ("articleId", "revisionId", "taxonomyId", "assetId", "commentId", "interactionId", "scheduleId"):
+        value = _audit_source_id(key, sources)
+        if value:
+            output[key] = value
+    return output
+
+
+def _audit_source_id(key: str, sources: list[dict[str, Any]]) -> str:
+    for source in sources:
+        value = source.get(key) if isinstance(source, dict) else None
+        if _clean_string(value) and SAFE_ID_RE.fullmatch(_clean_string(value)):
+            return _clean_string(value)
+    return ""
+
+
+def _audit_key_segment(value: str) -> str:
+    text = re.sub(r"[^A-Za-z0-9._:-]+", "-", _clean_string(value))
+    return text[:128] or "unknown"
 
 
 def _authorized_request(
