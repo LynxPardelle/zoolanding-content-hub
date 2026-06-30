@@ -1899,11 +1899,14 @@ def _reject_secret_like_config(value: Any, path: str = "$") -> None:
 
 def _request_payload(event: dict[str, Any]) -> dict[str, Any]:
     raw = event.get("body")
-    if event.get("isBase64Encoded") is True and isinstance(raw, str):
-        raw = base64.b64decode(raw).decode("utf-8")
     if not raw:
         return {}
-    parsed = json.loads(str(raw))
+    try:
+        if event.get("isBase64Encoded") is True and isinstance(raw, str):
+            raw = base64.b64decode(raw).decode("utf-8")
+        parsed = json.loads(str(raw))
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise ContentHubError("Request body must be valid JSON") from exc
     if not isinstance(parsed, dict):
         raise ContentHubError("Request body must be a JSON object")
     return parsed
