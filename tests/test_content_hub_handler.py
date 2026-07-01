@@ -515,6 +515,40 @@ class ContentHubHandlerTests(unittest.TestCase):
         )
         self.assertEqual(read["statusCode"], 404)
 
+    def test_validate_article_reports_editorial_issues_without_storage_keys(self):
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Validacion editorial"},
+        )
+        self.assertEqual(create["statusCode"], 200)
+        article_id = body(create)["data"]["article"]["articleId"]
+
+        response = self.request(
+            "/features/content-hub/action",
+            {"action": "validate", "articleId": article_id},
+        )
+
+        self.assertEqual(response["statusCode"], 200)
+        data = body(response)["data"]
+        self.assertTrue(data["valid"])
+        self.assertEqual(data["articleId"], article_id)
+        self.assertEqual(data["issues"], [{
+            "severity": "warning",
+            "code": "missing-summary",
+            "message": "Agrega una descripción para SEO.",
+        }])
+        self.assertNotIn("packageKey", response["body"])
+        self.assertNotIn("publishedBundleKey", response["body"])
+
+    def test_validate_article_requires_existing_article(self):
+        response = self.request(
+            "/features/content-hub/action",
+            {"action": "validate", "articleId": "art_missing"},
+        )
+
+        self.assertEqual(response["statusCode"], 404)
+
     def test_create_article_stores_blog_metadata_and_public_summary(self):
         self.store.roles = ["zoosite-blog-editor"]
         create = self.request(
@@ -1575,6 +1609,25 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertIn("[redacted-phone]", queued["bodyPreview"])
         self.assertNotIn("persona@example.com", response["body"])
 
+    def test_moderation_queue_read_returns_sanitized_queued_comments(self):
+        queued = self.request(
+            "/features/content-hub/action",
+            {"action": "queueComment", "articleId": "art_123"},
+            {"commentText": "Escríbeme a persona@example.com"},
+        )
+        self.assertEqual(queued["statusCode"], 200)
+
+        read = self.request("/features/content-hub/read", {"read": "moderationQueue"}, csrf=False)
+
+        self.assertEqual(read["statusCode"], 200)
+        items = body(read)["data"]["items"]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["articleId"], "art_123")
+        self.assertEqual(items[0]["status"], "queued")
+        self.assertIn("[redacted-email]", items[0]["bodyPreview"])
+        for forbidden in ["bodyHash", "createdByHash", "persona@example.com", "admin-sub"]:
+            self.assertNotIn(forbidden, read["body"])
+
     def test_moderate_comment_updates_existing_queue_record(self):
         queued = self.request(
             "/features/content-hub/action",
@@ -1690,6 +1743,32 @@ class ContentHubHandlerTests(unittest.TestCase):
         )
         self.assertEqual(response["statusCode"], 200)
         self.assertEqual(body(response)["data"]["asset"]["kind"], "image")
+
+    def test_asset_list_read_returns_sanitized_media_metadata(self):
+        upload = self.request(
+            "/features/content-hub/action",
+            {"action": "uploadAsset"},
+            {
+                "fileName": "foto.png",
+                "mimeType": "image/png",
+                "base64": base64.b64encode(b"asset").decode("ascii"),
+                "title": "Foto publica",
+                "alt": "Foto del articulo",
+            },
+        )
+        self.assertEqual(upload["statusCode"], 200)
+
+        read = self.request("/features/content-hub/read", {"read": "assetList"}, csrf=False)
+
+        self.assertEqual(read["statusCode"], 200)
+        items = body(read)["data"]["items"]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["kind"], "image")
+        self.assertEqual(items[0]["fileName"], "foto.png")
+        self.assertEqual(items[0]["title"], "Foto publica")
+        self.assertEqual(items[0]["alt"], "Foto del articulo")
+        for forbidden in ["objectKey", "createdBy", "admin-sub", "content-hubs/test"]:
+            self.assertNotIn(forbidden, read["body"])
 
     def test_media_upload_accepts_browser_upload_bridge_data_base64(self):
         response = self.request(
