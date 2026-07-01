@@ -29,6 +29,7 @@ The browser sends:
 - `revisionList`
 - `publicBundlePreview`
 - `scheduleList`
+- `analyticsSummary`
 
 ## Supported Actions
 

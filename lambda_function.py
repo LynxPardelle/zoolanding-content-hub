@@ -2165,7 +2165,7 @@ def _domain(value: Any) -> str:
 def _safe_id(value: Any) -> str:
     safe_id = _clean_string(value)
     if not SAFE_ID_RE.fullmatch(safe_id):
-        raise ContentHubError("Invalid identifier")
+        raise ContentHubError("The content request could not be identified.")
     return safe_id
 
 

@@ -1490,7 +1490,8 @@ class ContentHubHandlerTests(unittest.TestCase):
             {"articleId": article_id, "revisionId": "../rev_001"},
         )
         self.assertEqual(unsafe["statusCode"], 400)
-        self.assertEqual(body(unsafe)["error"], "Invalid identifier")
+        self.assertEqual(body(unsafe)["error"], "The content request could not be identified.")
+        self.assertEqual(body(unsafe)["code"], "validation_error")
 
         missing_article = self.request(
             "/features/content-hub/action",
