@@ -789,6 +789,7 @@ def _unpublish_article(
     article = store.get_metadata(f"HUB#{hub['hubId']}", f"ARTICLE#{article_id}")
     if not article:
         raise ContentHubNotFound()
+    _require_article_published_for_unpublish(article)
     now = _now_iso()
     render_domain = _domain(_input_field(payload, "renderDomain") or profile["domain"])
     locale = _locale(binding.get("language") or _input_field(payload, "language") or article.get("primaryLocale") or hub.get("defaultLocale") or "es")
@@ -859,6 +860,7 @@ def _schedule_article(
             raise ContentHubNotFound("Revision not found")
         _require_article_approved_for_publish(article)
     else:
+        _require_article_published_for_unpublish(article)
         scheduled_at = _schedule_time(
             _direct_input_field(payload, "unpublishAt") or _direct_input_field(payload, "scheduledAt"),
             field_name="unpublishAt",
@@ -896,6 +898,11 @@ def _schedule_article(
 def _require_article_approved_for_publish(article: dict[str, Any]) -> None:
     if article.get("status") != "approved":
         raise ContentHubError("Article must be approved before publishing")
+
+
+def _require_article_published_for_unpublish(article: dict[str, Any]) -> None:
+    if article.get("status") != "published":
+        raise ContentHubError("Article must be published before unpublishing")
 
 
 def _cancel_schedule(
@@ -1182,14 +1189,24 @@ def _set_article_status(
     del profile
     article_id = _safe_id(binding.get("articleId") or _input_field(payload, "articleId"))
     store = _store()
-    if not store.get_metadata(f"HUB#{hub['hubId']}", f"ARTICLE#{article_id}"):
+    article = store.get_metadata(f"HUB#{hub['hubId']}", f"ARTICLE#{article_id}")
+    if not article:
         raise ContentHubNotFound()
+    _require_article_status_transition(article, status)
     store.update_metadata(f"HUB#{hub['hubId']}", f"ARTICLE#{article_id}", {
         "status": status,
         "updatedBy": session["subject"],
         "updatedAt": _now_iso(),
     })
     return {"articleId": article_id, "status": status}
+
+
+def _require_article_status_transition(article: dict[str, Any], target_status: str) -> None:
+    current_status = article.get("status") or "draft"
+    if target_status == "review" and current_status not in {"draft", "unpublished"}:
+        raise ContentHubError("Article must be draft or unpublished before review")
+    if target_status == "approved" and current_status != "review":
+        raise ContentHubError("Article must be in review before approval")
 
 
 def _remove_public_slug(

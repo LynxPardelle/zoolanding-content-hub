@@ -212,6 +212,9 @@ class ContentHubHandlerTests(unittest.TestCase):
     def audit_events(self):
         return [item for key, item in self.store.objects.items() if "/audit/" in key]
 
+    def set_article_status(self, article_id, status):
+        self.store.update_metadata("HUB#zoosite-main", f"ARTICLE#{article_id}", {"status": status})
+
     def test_read_requires_session(self):
         response = self.request(
             "/features/content-hub/read",
@@ -422,8 +425,13 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertEqual(read["statusCode"], 200)
 
         self.store.roles = ["zoosite-blog-publisher"]
-        self.request("/features/content-hub/action", {"action": "approveArticle", "articleId": article_id})
-        self.store.roles = ["zoosite-blog-publisher"]
+        self.set_article_status(article_id, "review")
+        approved = self.request(
+            "/features/content-hub/action",
+            {"action": "approveArticle", "articleId": article_id},
+        )
+        self.assertEqual(approved["statusCode"], 200)
+
         published = self.request(
             "/features/content-hub/action",
             {"action": "publish", "articleId": article_id, "revisionId": "rev_001"},
@@ -514,6 +522,40 @@ class ContentHubHandlerTests(unittest.TestCase):
             csrf=False,
         )
         self.assertEqual(read["statusCode"], 404)
+
+    def test_validate_article_reports_editorial_issues_without_storage_keys(self):
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Validacion editorial"},
+        )
+        self.assertEqual(create["statusCode"], 200)
+        article_id = body(create)["data"]["article"]["articleId"]
+
+        response = self.request(
+            "/features/content-hub/action",
+            {"action": "validate", "articleId": article_id},
+        )
+
+        self.assertEqual(response["statusCode"], 200)
+        data = body(response)["data"]
+        self.assertTrue(data["valid"])
+        self.assertEqual(data["articleId"], article_id)
+        self.assertEqual(data["issues"], [{
+            "severity": "warning",
+            "code": "missing-summary",
+            "message": "Agrega una descripción para SEO.",
+        }])
+        self.assertNotIn("packageKey", response["body"])
+        self.assertNotIn("publishedBundleKey", response["body"])
+
+    def test_validate_article_requires_existing_article(self):
+        response = self.request(
+            "/features/content-hub/action",
+            {"action": "validate", "articleId": "art_missing"},
+        )
+
+        self.assertEqual(response["statusCode"], 404)
 
     def test_create_article_stores_blog_metadata_and_public_summary(self):
         self.store.roles = ["zoosite-blog-editor"]
@@ -606,7 +648,7 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertTrue(any(item["kind"] == "tag" and item["slug"] == "algo-mas" for item in taxonomy_items))
 
         self.store.roles = ["zoosite-blog-publisher"]
-        self.request("/features/content-hub/action", {"action": "approveArticle", "articleId": article["articleId"]})
+        self.set_article_status(article["articleId"], "approved")
         publish = self.request(
             "/features/content-hub/action",
             {"action": "publish", "articleId": article["articleId"], "revisionId": "rev_001"},
@@ -727,7 +769,7 @@ class ContentHubHandlerTests(unittest.TestCase):
             {"title": "No publicar"},
         )
         article_id = body(create)["data"]["article"]["articleId"]
-        self.request("/features/content-hub/action", {"action": "approveArticle", "articleId": article_id})
+        self.set_article_status(article_id, "approved")
         publish = self.request(
             "/features/content-hub/action",
             {"action": "publish", "articleId": article_id, "revisionId": "rev_001"},
@@ -750,7 +792,7 @@ class ContentHubHandlerTests(unittest.TestCase):
             },
         )
         article_id = body(create)["data"]["article"]["articleId"]
-        self.request("/features/content-hub/action", {"action": "approveArticle", "articleId": article_id})
+        self.set_article_status(article_id, "approved")
         publish = self.request(
             "/features/content-hub/action",
             {"action": "publish", "articleId": article_id, "revisionId": "rev_001"},
@@ -806,7 +848,7 @@ class ContentHubHandlerTests(unittest.TestCase):
         package["variables"].pop("articleContent", None)
         self.store.put_json(revision["packageKey"], package)
 
-        self.request("/features/content-hub/action", {"action": "approveArticle", "articleId": article_id})
+        self.set_article_status(article_id, "approved")
         publish = self.request(
             "/features/content-hub/action",
             {"action": "publish", "articleId": article_id, "revisionId": revision_id},
@@ -850,7 +892,7 @@ class ContentHubHandlerTests(unittest.TestCase):
         )
         first_id = body(first)["data"]["article"]["articleId"]
         second_id = body(second)["data"]["article"]["articleId"]
-        self.request("/features/content-hub/action", {"action": "approveArticle", "articleId": first_id})
+        self.set_article_status(first_id, "approved")
         first_publish = self.request(
             "/features/content-hub/action",
             {"action": "publish", "articleId": first_id, "revisionId": "rev_001"},
@@ -858,7 +900,7 @@ class ContentHubHandlerTests(unittest.TestCase):
         )
         self.assertEqual(first_publish["statusCode"], 200)
 
-        self.request("/features/content-hub/action", {"action": "approveArticle", "articleId": second_id})
+        self.set_article_status(second_id, "approved")
         collision = self.request(
             "/features/content-hub/action",
             {"action": "publish", "articleId": second_id, "revisionId": "rev_001"},
@@ -877,6 +919,7 @@ class ContentHubHandlerTests(unittest.TestCase):
             {"title": "No borrar ajeno"},
         )
         article_id = body(create)["data"]["article"]["articleId"]
+        self.set_article_status(article_id, "published")
         self.store.put_metadata({
             "pk": "SLUG#test#zoositioweb.com.mx#es",
             "sk": "PATH#/blog/ajeno",
@@ -904,7 +947,7 @@ class ContentHubHandlerTests(unittest.TestCase):
             {"title": "Revision ajena"},
         )
         article_id = body(create)["data"]["article"]["articleId"]
-        self.request("/features/content-hub/action", {"action": "approveArticle", "articleId": article_id})
+        self.set_article_status(article_id, "approved")
         revision = self.store.get_metadata(f"ARTICLE#{article_id}", "REVISION#rev_001")
         revision["hubId"] = "other-hub"
 
@@ -924,6 +967,7 @@ class ContentHubHandlerTests(unittest.TestCase):
         )
         article_id = body(create)["data"]["article"]["articleId"]
 
+        self.set_article_status(article_id, "review")
         self.store.roles = ["zoosite-blog-publisher"]
         approve = self.request(
             "/features/content-hub/action",
@@ -1126,6 +1170,38 @@ class ContentHubHandlerTests(unittest.TestCase):
         )
         self.assertEqual(response["statusCode"], 404)
 
+    def test_status_transitions_reject_skipped_editorial_steps(self):
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Sin atajos editoriales"},
+        )
+        article_id = body(create)["data"]["article"]["articleId"]
+
+        approve = self.request(
+            "/features/content-hub/action",
+            {"action": "approveArticle", "articleId": article_id},
+        )
+        self.assertEqual(approve["statusCode"], 400)
+        self.assertEqual(body(approve)["error"], "Article must be in review before approval")
+
+        unpublish = self.request(
+            "/features/content-hub/action",
+            {"action": "unpublishArticle", "articleId": article_id},
+        )
+        self.assertEqual(unpublish["statusCode"], 400)
+        self.assertEqual(body(unpublish)["error"], "Article must be published before unpublishing")
+
+        for invalid_review_status in ["review", "approved", "published"]:
+            with self.subTest(status=invalid_review_status):
+                self.set_article_status(article_id, invalid_review_status)
+                review = self.request(
+                    "/features/content-hub/action",
+                    {"action": "submitReview", "articleId": article_id},
+                )
+                self.assertEqual(review["statusCode"], 400)
+                self.assertEqual(body(review)["error"], "Article must be draft or unpublished before review")
+
     def test_schedule_requires_existing_article_and_safe_publish_time(self):
         missing = self.request(
             "/features/content-hub/action",
@@ -1172,7 +1248,7 @@ class ContentHubHandlerTests(unittest.TestCase):
             {"title": "Revision programada", "summary": "Revision fija"},
         )
         article_id = body(create)["data"]["article"]["articleId"]
-        self.request("/features/content-hub/action", {"action": "approveArticle", "articleId": article_id})
+        self.set_article_status(article_id, "approved")
 
         schedule = self.request(
             "/features/content-hub/action",
@@ -1201,7 +1277,7 @@ class ContentHubHandlerTests(unittest.TestCase):
             {"title": "Programable"},
         )
         article_id = body(create)["data"]["article"]["articleId"]
-        self.request("/features/content-hub/action", {"action": "approveArticle", "articleId": article_id})
+        self.set_article_status(article_id, "approved")
         schedule = self.request(
             "/features/content-hub/action",
             {"action": "schedule", "articleId": article_id},
@@ -1235,6 +1311,20 @@ class ContentHubHandlerTests(unittest.TestCase):
         )
         article_id = body(create)["data"]["article"]["articleId"]
 
+        unpublished = self.request(
+            "/features/content-hub/action",
+            {"action": "schedule", "articleId": article_id},
+            {
+                "scheduleAction": "unpublish",
+                "unpublishAt": "2026-07-02T18:30:00-06:00",
+                "timezone": "America/Mexico_City",
+            },
+        )
+        self.assertEqual(unpublished["statusCode"], 400)
+        self.assertEqual(body(unpublished)["error"], "Article must be published before unpublishing")
+
+        self.set_article_status(article_id, "published")
+
         schedule = self.request(
             "/features/content-hub/action",
             {"action": "schedule", "articleId": article_id},
@@ -1266,7 +1356,7 @@ class ContentHubHandlerTests(unittest.TestCase):
         )
         article_id = body(create)["data"]["article"]["articleId"]
         article = self.store.get_metadata("HUB#zoosite-main", f"ARTICLE#{article_id}")
-        self.request("/features/content-hub/action", {"action": "approveArticle", "articleId": article_id})
+        self.set_article_status(article_id, "approved")
         schedule = self.request(
             "/features/content-hub/action",
             {"action": "schedule", "articleId": article_id},
@@ -1293,7 +1383,7 @@ class ContentHubHandlerTests(unittest.TestCase):
             {"title": "Futura", "slug": "futura"},
         )
         article_id = body(create)["data"]["article"]["articleId"]
-        self.request("/features/content-hub/action", {"action": "approveArticle", "articleId": article_id})
+        self.set_article_status(article_id, "approved")
         schedule = self.request(
             "/features/content-hub/action",
             {"action": "schedule", "articleId": article_id},
@@ -1338,7 +1428,7 @@ class ContentHubHandlerTests(unittest.TestCase):
         )
         article_id = body(create)["data"]["article"]["articleId"]
         article = self.store.get_metadata("HUB#zoosite-main", f"ARTICLE#{article_id}")
-        self.request("/features/content-hub/action", {"action": "approveArticle", "articleId": article_id})
+        self.set_article_status(article_id, "approved")
         publish = self.request(
             "/features/content-hub/action",
             {"action": "publish", "articleId": article_id, "revisionId": "rev_001"},
@@ -1425,7 +1515,7 @@ class ContentHubHandlerTests(unittest.TestCase):
             {"title": "Preview latest"},
         )
         article_id = body(create)["data"]["article"]["articleId"]
-        self.request("/features/content-hub/action", {"action": "approveArticle", "articleId": article_id})
+        self.set_article_status(article_id, "approved")
         publish = self.request(
             "/features/content-hub/action",
             {"action": "publish", "articleId": article_id},
@@ -1575,6 +1665,25 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertIn("[redacted-phone]", queued["bodyPreview"])
         self.assertNotIn("persona@example.com", response["body"])
 
+    def test_moderation_queue_read_returns_sanitized_queued_comments(self):
+        queued = self.request(
+            "/features/content-hub/action",
+            {"action": "queueComment", "articleId": "art_123"},
+            {"commentText": "Escríbeme a persona@example.com"},
+        )
+        self.assertEqual(queued["statusCode"], 200)
+
+        read = self.request("/features/content-hub/read", {"read": "moderationQueue"}, csrf=False)
+
+        self.assertEqual(read["statusCode"], 200)
+        items = body(read)["data"]["items"]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["articleId"], "art_123")
+        self.assertEqual(items[0]["status"], "queued")
+        self.assertIn("[redacted-email]", items[0]["bodyPreview"])
+        for forbidden in ["bodyHash", "createdByHash", "persona@example.com", "admin-sub"]:
+            self.assertNotIn(forbidden, read["body"])
+
     def test_moderate_comment_updates_existing_queue_record(self):
         queued = self.request(
             "/features/content-hub/action",
@@ -1690,6 +1799,32 @@ class ContentHubHandlerTests(unittest.TestCase):
         )
         self.assertEqual(response["statusCode"], 200)
         self.assertEqual(body(response)["data"]["asset"]["kind"], "image")
+
+    def test_asset_list_read_returns_sanitized_media_metadata(self):
+        upload = self.request(
+            "/features/content-hub/action",
+            {"action": "uploadAsset"},
+            {
+                "fileName": "foto.png",
+                "mimeType": "image/png",
+                "base64": base64.b64encode(b"asset").decode("ascii"),
+                "title": "Foto publica",
+                "alt": "Foto del articulo",
+            },
+        )
+        self.assertEqual(upload["statusCode"], 200)
+
+        read = self.request("/features/content-hub/read", {"read": "assetList"}, csrf=False)
+
+        self.assertEqual(read["statusCode"], 200)
+        items = body(read)["data"]["items"]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["kind"], "image")
+        self.assertEqual(items[0]["fileName"], "foto.png")
+        self.assertEqual(items[0]["title"], "Foto publica")
+        self.assertEqual(items[0]["alt"], "Foto del articulo")
+        for forbidden in ["objectKey", "createdBy", "admin-sub", "content-hubs/test"]:
+            self.assertNotIn(forbidden, read["body"])
 
     def test_media_upload_accepts_browser_upload_bridge_data_base64(self):
         response = self.request(
