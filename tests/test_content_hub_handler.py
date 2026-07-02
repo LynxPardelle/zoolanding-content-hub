@@ -1742,6 +1742,60 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertEqual(rejected["statusCode"], 400)
         self.assertNotIn("persona@example.com", rejected["body"])
 
+    def test_public_action_records_interactions_without_session_but_requires_allowed_origin(self):
+        payload = {
+            "domain": "zoositioweb.com.mx",
+            "input": {
+                "contentHub": {
+                    "hubId": "zoosite-main",
+                    "action": "recordInteraction",
+                    "articleId": "art_public",
+                },
+                "eventType": "cta_click",
+                "targetId": "primary_cta",
+                "path": "/blog/web/public",
+                "metadata": {"placement": "hero"},
+            },
+        }
+        response = content_hub.lambda_handler(event(
+            "/features/content-hub/public-action",
+            payload,
+            csrf=False,
+            cookies=[],
+            headers={"origin": "https://zoositioweb.com.mx", "user-agent": "unit-test"},
+        ), None)
+
+        self.assertEqual(response["statusCode"], 200)
+        interaction = body(response)["data"]["interaction"]
+        self.assertEqual(interaction["eventType"], "cta")
+        self.assertEqual(interaction["articleId"], "art_public")
+        self.assertNotIn("actorHash", response["body"])
+        self.assertEqual(len(self.store.interactions), 1)
+
+        forbidden_action = content_hub.lambda_handler(event(
+            "/features/content-hub/public-action",
+            {
+                "domain": "zoositioweb.com.mx",
+                "input": {
+                    "contentHub": {"hubId": "zoosite-main", "action": "queueComment", "articleId": "art_public"},
+                    "commentText": "Necesita sesión",
+                },
+            },
+            csrf=False,
+            cookies=[],
+            headers={"origin": "https://zoositioweb.com.mx"},
+        ), None)
+        self.assertEqual(forbidden_action["statusCode"], 403)
+
+        forbidden_origin = content_hub.lambda_handler(event(
+            "/features/content-hub/public-action",
+            payload,
+            csrf=False,
+            cookies=[],
+            headers={"origin": "https://evil.example"},
+        ), None)
+        self.assertEqual(forbidden_origin["statusCode"], 403)
+
     def test_blog_analyst_can_read_aggregated_analytics_without_raw_events(self):
         create = self.request(
             "/features/content-hub/action",
@@ -1751,7 +1805,7 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertEqual(create["statusCode"], 200)
         article_id = body(create)["data"]["article"]["articleId"]
 
-        for event_type in ["view", "readProgress", "cta", "like", "share", "assetDownload", "form"]:
+        for event_type in ["view", "readProgress", "cta_click", "like", "share", "assetDownload", "form"]:
             response = self.request(
                 "/features/content-hub/action",
                 {"action": "recordInteraction", "articleId": article_id},
@@ -1762,6 +1816,22 @@ class ContentHubHandlerTests(unittest.TestCase):
                 },
             )
             self.assertEqual(response["statusCode"], 200)
+            if event_type == "cta_click":
+                self.assertEqual(body(response)["data"]["interaction"]["eventType"], "cta")
+
+        other = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Otra categoria", "category": "operacion"},
+        )
+        self.assertEqual(other["statusCode"], 200)
+        other_article_id = body(other)["data"]["article"]["articleId"]
+        other_event = self.request(
+            "/features/content-hub/action",
+            {"action": "recordInteraction", "articleId": other_article_id},
+            {"eventType": "view"},
+        )
+        self.assertEqual(other_event["statusCode"], 200)
 
         comment = self.request(
             "/features/content-hub/action",
@@ -1773,7 +1843,7 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.store.roles = ["zoosite-blog-analyst"]
         read = self.request("/features/content-hub/read", {"read": "analyticsSummary"}, csrf=False)
         self.assertEqual(read["statusCode"], 200)
-        item = body(read)["data"]["items"][0]
+        item = next(entry for entry in body(read)["data"]["items"] if entry["articleId"] == article_id)
         self.assertEqual(item["articleId"], article_id)
         self.assertEqual(item["views"], 1)
         self.assertEqual(item["readProgress"], 1)
@@ -1786,6 +1856,26 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertNotIn("metadata", read["body"])
         self.assertNotIn("actorHash", read["body"])
         self.assertNotIn("admin-sub", read["body"])
+
+        filtered = self.request(
+            "/features/content-hub/read",
+            {"read": "analyticsSummary"},
+            {"articleId": article_id, "category": "web"},
+            csrf=False,
+        )
+        self.assertEqual(filtered["statusCode"], 200)
+        filtered_items = body(filtered)["data"]["items"]
+        self.assertEqual([entry["articleId"] for entry in filtered_items], [article_id])
+        self.assertEqual(filtered_items[0]["ctaClicks"], 1)
+
+        invalid_date = self.request(
+            "/features/content-hub/read",
+            {"read": "analyticsSummary"},
+            {"from": "not-a-date"},
+            csrf=False,
+        )
+        self.assertEqual(invalid_date["statusCode"], 400)
+        self.assertIn("Invalid analytics date filter", invalid_date["body"])
 
     def test_media_upload_accepts_public_metadata_without_signed_url(self):
         response = self.request(
