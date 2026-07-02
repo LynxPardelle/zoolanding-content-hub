@@ -243,6 +243,13 @@ Resources:
               Ref: ContentHubApi
             Method: POST
             Path: /features/content-hub/action
+        PublicAction:
+          Type: HttpApi
+          Properties:
+            ApiId:
+              Ref: ContentHubApi
+            Method: POST
+            Path: /features/content-hub/public-action
         OptionsRead:
           Type: HttpApi
           Properties:
@@ -257,6 +264,13 @@ Resources:
               Ref: ContentHubApi
             Method: OPTIONS
             Path: /features/content-hub/action
+        OptionsPublicAction:
+          Type: HttpApi
+          Properties:
+            ApiId:
+              Ref: ContentHubApi
+            Method: OPTIONS
+            Path: /features/content-hub/public-action
 
   DueSchedulesRule:
     Type: AWS::Events::Rule
