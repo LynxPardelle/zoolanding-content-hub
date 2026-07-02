@@ -9,6 +9,7 @@ import unicodedata
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Optional
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
@@ -182,6 +183,8 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             return _read_response(event)
         if path == "/features/content-hub/action":
             return _action_response(event, request_id)
+        if path == "/features/content-hub/public-action":
+            return _public_action_response(event, request_id)
         raise ContentHubNotFound("Content hub route not found")
     except ContentHubError as exc:
         _log("WARNING" if exc.status_code < 500 else "ERROR", exc.public_message, statusCode=exc.status_code, requestId=request_id)
@@ -269,6 +272,27 @@ def _action_response(event: dict[str, Any], request_id: str) -> dict[str, Any]:
         status="succeeded",
         status_code=200,
         response=data,
+    )
+    return _json_response(200, {"ok": True, "data": _public_payload(data)})
+
+
+def _public_action_response(event: dict[str, Any], request_id: str) -> dict[str, Any]:
+    payload, profile, hub = _public_request(event)
+    binding = _content_hub_binding(payload)
+    action_value = binding.get("action")
+    if not _clean_string(action_value):
+        raise ContentHubError("contentHub.action is required")
+    action_kind = _safe_id(action_value)
+    if action_kind != "recordInteraction":
+        raise ContentHubForbidden("This content action requires sign in")
+    data = _record_public_interaction(payload, binding, profile, hub, event)
+    _log(
+        "INFO",
+        "Public content interaction recorded",
+        requestId=request_id,
+        domain=profile["domain"],
+        hubId=hub["hubId"],
+        action=action_kind,
     )
     return _json_response(200, {"ok": True, "data": _public_payload(data)})
 
@@ -373,6 +397,41 @@ def _authorized_request(
     return payload, session, profile, hub
 
 
+def _public_request(event: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    payload = _request_payload(event)
+    _reject_unsafe_public_payload(payload)
+    domain = _domain(payload.get("domain") or _header(event, DOMAIN_HEADER))
+    auth_profile_id = _safe_id(_header(event, AUTH_PROFILE_HEADER))
+    if domain != _domain(_header(event, DOMAIN_HEADER)):
+        raise ContentHubUnauthorized()
+    profile = _profile_for(domain, auth_profile_id)
+    _require_public_origin(event, profile)
+    binding = _content_hub_binding(payload)
+    hub_id = _safe_id(binding.get("hubId") or _header(event, HUB_HEADER))
+    if _header(event, HUB_HEADER) and _safe_id(_header(event, HUB_HEADER)) != hub_id:
+        raise ContentHubForbidden("Content hub id does not match")
+    hub = _hub_for(profile, hub_id)
+    return payload, profile, hub
+
+
+def _require_public_origin(event: dict[str, Any], profile: dict[str, Any]) -> None:
+    origin = _clean_string(_header(event, "origin"))
+    referer = _clean_string(_header(event, "referer"))
+    source = origin or referer
+    if not source:
+        raise ContentHubForbidden("Origin is required")
+    host = _clean_string(urlparse(source).hostname).lower()
+    allowed_hosts = {
+        profile["domain"],
+        "test.zoolandingpage.com.mx",
+        "dev.zoolandingpage.com.mx",
+        "localhost",
+        "127.0.0.1",
+    }
+    if host not in allowed_hosts:
+        raise ContentHubForbidden("Origin is not allowed")
+
+
 def _handle_read(
     read_kind: str,
     payload: dict[str, Any],
@@ -421,7 +480,7 @@ def _handle_read(
     if read_kind == "moderationQueue":
         return {"items": [_moderation_summary(item) for item in store.query_moderation(f"HUB#{hub_id}", "MODERATION#")]}
     if read_kind == "analyticsSummary":
-        return _analytics_summary(store, hub_id)
+        return _analytics_summary(store, hub_id, _analytics_filters(payload, binding))
     if read_kind == "publicBundlePreview":
         article_id = _safe_id(binding.get("articleId") or _input_field(payload, "articleId"))
         revision_value = binding.get("revisionId") or _input_field(payload, "revisionId")
@@ -1125,13 +1184,12 @@ def _record_interaction(
     hub: dict[str, Any],
 ) -> dict[str, Any]:
     del profile
-    event_type = _safe_id(_input_field(payload, "eventType") or _input_field(payload, "interactionType") or "reaction")
-    if event_type not in {"view", "readProgress", "reaction", "like", "cta", "form", "share", "assetDownload"}:
-        raise ContentHubError("Invalid interaction type")
+    event_type = _interaction_event_type(payload)
     article_id_value = binding.get("articleId") or _input_field(payload, "articleId")
     article_id = _optional_safe_id(article_id_value)
+    target_id = _optional_safe_id(_input_field(payload, "targetId"))
     now = _now_iso()
-    interaction_seed = f"{event_type}:{now}:{session['subject']}"
+    interaction_seed = f"{event_type}:{now}:{time.time_ns()}:{article_id}:{target_id}:{session['subject']}"
     interaction_id = _safe_id(_input_field(payload, "interactionId") or f"evt_{hashlib.sha256(interaction_seed.encode()).hexdigest()[:16]}")
     item = {
         "pk": f"HUB#{hub['hubId']}",
@@ -1150,6 +1208,65 @@ def _record_interaction(
     }
     _store().put_interaction(item)
     return {"interaction": _interaction_summary(item)}
+
+
+def _record_public_interaction(
+    payload: dict[str, Any],
+    binding: dict[str, Any],
+    profile: dict[str, Any],
+    hub: dict[str, Any],
+    event: dict[str, Any],
+) -> dict[str, Any]:
+    if _clean_string(_input_field(payload, "website") or _input_field(payload, "honeypot")):
+        raise ContentHubError("Interaction could not be accepted")
+    event_type = _interaction_event_type(payload)
+    article_id = _optional_safe_id(binding.get("articleId") or _input_field(payload, "articleId"))
+    target_id = _optional_safe_id(_input_field(payload, "targetId"))
+    now = _now_iso()
+    actor_hash = _public_actor_hash(event, profile)
+    interaction_seed = f"{event_type}:{now}:{time.time_ns()}:{article_id}:{target_id}:{actor_hash}"
+    interaction_id = _safe_id(_input_field(payload, "interactionId") or f"evt_{hashlib.sha256(interaction_seed.encode()).hexdigest()[:16]}")
+    item = {
+        "pk": f"HUB#{hub['hubId']}",
+        "sk": f"INTERACTION#{event_type}#{now}#{interaction_id}",
+        "itemFamily": "INTERACTION",
+        "hubId": hub["hubId"],
+        "interactionId": interaction_id,
+        "eventType": event_type,
+        "articleId": article_id,
+        "targetId": target_id,
+        "value": _safe_text(_input_field(payload, "value") or "", max_length=120),
+        "path": _optional_article_path(_input_field(payload, "path")),
+        "metadata": _safe_event_metadata(_input_field(payload, "metadata") or {}),
+        "actorHash": actor_hash,
+        "createdAt": now,
+        "public": True,
+    }
+    _store().put_interaction(item)
+    return {"interaction": _interaction_summary(item)}
+
+
+def _interaction_event_type(payload: dict[str, Any]) -> str:
+    event_type = _safe_id(_input_field(payload, "eventType") or _input_field(payload, "interactionType") or "reaction")
+    event_aliases = {
+        "cta-click": "cta",
+        "cta_click": "cta",
+        "read-progress": "readProgress",
+        "asset-download": "assetDownload",
+    }
+    event_type = event_aliases.get(event_type, event_type)
+    if event_type not in {"view", "readProgress", "reaction", "like", "cta", "form", "share", "assetDownload"}:
+        raise ContentHubError("Invalid interaction type")
+    return event_type
+
+
+def _public_actor_hash(event: dict[str, Any], profile: dict[str, Any]) -> str:
+    headers_fingerprint = "|".join([
+        _header(event, "x-forwarded-for").split(",")[0].strip(),
+        _header(event, "user-agent")[:160],
+        _header(event, "origin"),
+    ])
+    return _sha256(f"{profile['environment']}:{profile['domain']}:{profile['authProfileId']}:public:{headers_fingerprint}")
 
 
 def _restore_revision(
@@ -1923,8 +2040,73 @@ def _interaction_summary(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _analytics_summary(store: Any, hub_id: str) -> dict[str, Any]:
+def _analytics_filters(payload: dict[str, Any], binding: dict[str, Any]) -> dict[str, str]:
+    return {
+        "articleId": _optional_safe_id(binding.get("articleId") or _input_field(payload, "articleId")),
+        "category": _optional_safe_id(_input_field(payload, "category")),
+        "tag": _optional_safe_id(_input_field(payload, "tag")),
+        "from": _optional_analytics_timestamp(_input_field(payload, "from")),
+        "to": _optional_analytics_timestamp(_input_field(payload, "to")),
+    }
+
+
+def _optional_analytics_timestamp(value: Any) -> str:
+    text = _clean_string(value)
+    if not text:
+        return ""
+    _analytics_datetime(text)
+    return text
+
+
+def _analytics_datetime(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ContentHubError("Invalid analytics date filter") from exc
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _analytics_item_in_period(item: dict[str, Any], filters: dict[str, str], timestamp_keys: tuple[str, ...]) -> bool:
+    start = filters.get("from")
+    end = filters.get("to")
+    if not start and not end:
+        return True
+    timestamp = ""
+    for key in timestamp_keys:
+        timestamp = _clean_string(item.get(key))
+        if timestamp:
+            break
+    if not timestamp:
+        return False
+    event_time = _analytics_datetime(timestamp)
+    if start and event_time < _analytics_datetime(start):
+        return False
+    if end and event_time > _analytics_datetime(end):
+        return False
+    return True
+
+
+def _analytics_summary_matches_filters(summary: dict[str, Any], filters: dict[str, str]) -> bool:
+    article_id = filters.get("articleId")
+    category = filters.get("category")
+    tag = filters.get("tag")
+    if article_id and _clean_string(summary.get("articleId")) != article_id:
+        return False
+    if category and _clean_string(summary.get("categorySlug") or summary.get("category")) != category:
+        return False
+    if tag:
+        tags = _taxonomy_refs(summary.get("tags"))
+        if tag not in {_taxonomy_ref_slug(entry) for entry in tags}:
+            return False
+    return True
+
+
+def _analytics_summary(store: Any, hub_id: str, filters: Optional[dict[str, str]] = None) -> dict[str, Any]:
+    active_filters = filters or {}
     articles = [_article_summary(item) for item in store.query_metadata(f"HUB#{hub_id}", "ARTICLE#")]
+    articles = [article for article in articles if _analytics_summary_matches_filters(article, active_filters)]
     metrics_by_article = {
         _clean_string(article.get("articleId")): _empty_article_metrics(article)
         for article in articles
@@ -1933,6 +2115,12 @@ def _analytics_summary(store: Any, hub_id: str) -> dict[str, Any]:
     for item in store.query_interactions(f"HUB#{hub_id}", "INTERACTION#"):
         article_id = _clean_string(item.get("articleId"))
         if not article_id:
+            continue
+        if active_filters.get("articleId") and article_id != active_filters["articleId"]:
+            continue
+        if article_id not in metrics_by_article and any(active_filters.get(key) for key in ("category", "tag")):
+            continue
+        if not _analytics_item_in_period(item, active_filters, ("createdAt",)):
             continue
         metrics = metrics_by_article.setdefault(article_id, _empty_article_metrics({"articleId": article_id}))
         event_type = _clean_string(item.get("eventType"))
@@ -1954,6 +2142,12 @@ def _analytics_summary(store: Any, hub_id: str) -> dict[str, Any]:
     for item in store.query_moderation(f"HUB#{hub_id}", "MODERATION#"):
         article_id = _clean_string(item.get("articleId"))
         if not article_id:
+            continue
+        if active_filters.get("articleId") and article_id != active_filters["articleId"]:
+            continue
+        if article_id not in metrics_by_article and any(active_filters.get(key) for key in ("category", "tag")):
+            continue
+        if not _analytics_item_in_period(item, active_filters, ("queuedAt", "moderatedAt")):
             continue
         metrics = metrics_by_article.setdefault(article_id, _empty_article_metrics({"articleId": article_id}))
         metrics["comments"] += 1
