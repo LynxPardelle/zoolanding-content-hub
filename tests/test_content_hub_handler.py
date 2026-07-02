@@ -1950,6 +1950,15 @@ class ContentHubHandlerTests(unittest.TestCase):
 
 
 class ContentHubTemplateTests(unittest.TestCase):
+    def test_public_action_route_is_declared_in_api_gateway(self):
+        template = Path(__file__).resolve().parents[1].joinpath("template.yaml").read_text(encoding="utf-8")
+
+        self.assertIn("PublicAction:", template)
+        self.assertIn("OptionsPublicAction:", template)
+        self.assertIn("Method: POST", template)
+        self.assertIn("Method: OPTIONS", template)
+        self.assertIn("Path: /features/content-hub/public-action", template)
+
     def test_due_schedule_is_explicit_eventbridge_rule(self):
         template = Path(__file__).resolve().parents[1].joinpath("template.yaml").read_text(encoding="utf-8")
 
