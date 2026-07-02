@@ -116,6 +116,9 @@ Resources:
         PointInTimeRecoveryEnabled: true
       SSESpecification:
         SSEEnabled: true
+      TimeToLiveSpecification:
+        AttributeName: expiresAtEpoch
+        Enabled: true
       AttributeDefinitions:
         - AttributeName: pk
           AttributeType: S

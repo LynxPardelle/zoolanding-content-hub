@@ -8,8 +8,10 @@ It supports draft-configurable blog/content workflows without putting storage, p
 
 - `POST /features/content-hub/read`
 - `POST /features/content-hub/action`
+- `POST /features/content-hub/public-action`
 - `OPTIONS /features/content-hub/read`
 - `OPTIONS /features/content-hub/action`
+- `OPTIONS /features/content-hub/public-action`
 
 The browser sends:
 
@@ -18,6 +20,11 @@ The browser sends:
 - `X-ZLP-Content-Hub-Id`
 - `X-ZLP-CSRF` for mutations
 - auth-admin cookies created by `zoolanding-auth-admin`
+
+`public-action` is only for public visitor interactions. It does not use auth-admin
+cookies, but it still requires an allowed origin, a real published public article,
+an enabled interaction policy for the requested event type, and rate-limit
+admission before writing an interaction row.
 
 ## Supported Reads
 
