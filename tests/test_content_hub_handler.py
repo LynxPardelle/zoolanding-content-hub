@@ -163,6 +163,12 @@ class FakeStore:
     def put_interaction(self, item):
         self.interactions[(item["pk"], item["sk"])] = dict(item)
 
+    def put_public_interaction_rate_limit(self, item):
+        key = (item["pk"], item["sk"])
+        if key in self.interactions:
+            raise content_hub.ContentHubRateLimited()
+        self.interactions[key] = dict(item)
+
     def query_interactions(self, pk, sk_prefix):
         return [dict(item) for (item_pk, item_sk), item in self.interactions.items() if item_pk == pk and item_sk.startswith(sk_prefix)]
 
@@ -1743,13 +1749,14 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertNotIn("persona@example.com", rejected["body"])
 
     def test_public_action_records_interactions_without_session_but_requires_allowed_origin(self):
+        article_id = self.published_public_article(interactions={"ctas": {"enabled": True}})
         payload = {
             "domain": "zoositioweb.com.mx",
             "input": {
                 "contentHub": {
                     "hubId": "zoosite-main",
                     "action": "recordInteraction",
-                    "articleId": "art_public",
+                    "articleId": article_id,
                 },
                 "eventType": "cta_click",
                 "targetId": "primary_cta",
@@ -1768,16 +1775,16 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertEqual(response["statusCode"], 200)
         interaction = body(response)["data"]["interaction"]
         self.assertEqual(interaction["eventType"], "cta")
-        self.assertEqual(interaction["articleId"], "art_public")
+        self.assertEqual(interaction["articleId"], article_id)
         self.assertNotIn("actorHash", response["body"])
-        self.assertEqual(len(self.store.interactions), 1)
+        self.assertEqual(len([key for key in self.store.interactions if key[1].startswith("INTERACTION#")]), 1)
 
         forbidden_action = content_hub.lambda_handler(event(
             "/features/content-hub/public-action",
             {
                 "domain": "zoositioweb.com.mx",
                 "input": {
-                    "contentHub": {"hubId": "zoosite-main", "action": "queueComment", "articleId": "art_public"},
+                    "contentHub": {"hubId": "zoosite-main", "action": "queueComment", "articleId": article_id},
                     "commentText": "Necesita sesión",
                 },
             },
@@ -1795,6 +1802,90 @@ class ContentHubHandlerTests(unittest.TestCase):
             headers={"origin": "https://evil.example"},
         ), None)
         self.assertEqual(forbidden_origin["statusCode"], 403)
+
+    def published_public_article(self, *, interactions=None):
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Interaccion publica", "summary": "Articulo publico"},
+        )
+        article_id = body(create)["data"]["article"]["articleId"]
+        self.set_article_status(article_id, "approved")
+        publish = self.request(
+            "/features/content-hub/action",
+            {"action": "publish", "articleId": article_id, "revisionId": "rev_001"},
+            {"path": f"/blog/web/{article_id}"},
+        )
+        self.assertEqual(publish["statusCode"], 200)
+        if interactions is not None:
+            self.store.update_metadata("HUB#zoosite-main", f"ARTICLE#{article_id}", {"interactions": interactions})
+        return article_id
+
+    def public_interaction(self, article_id, *, event_type="cta_click", target_id="primary_cta"):
+        payload = {
+            "domain": "zoositioweb.com.mx",
+            "input": {
+                "contentHub": {
+                    "hubId": "zoosite-main",
+                    "action": "recordInteraction",
+                    "articleId": article_id,
+                },
+                "eventType": event_type,
+                "targetId": target_id,
+                "path": "/blog/web/public",
+                "metadata": {"placement": "hero"},
+            },
+        }
+        return content_hub.lambda_handler(event(
+            "/features/content-hub/public-action",
+            payload,
+            csrf=False,
+            cookies=[],
+            headers={"origin": "https://zoositioweb.com.mx", "user-agent": "unit-test"},
+        ), None)
+
+    def test_public_action_rejects_missing_unpublished_private_and_policy_disabled_articles(self):
+        missing = self.public_interaction("art_missing")
+        self.assertEqual(missing["statusCode"], 404)
+        self.assertNotIn("actorHash", missing["body"])
+        self.assertNotIn("RATE#", json.dumps(self.store.interactions))
+
+        draft_article = self.published_public_article()
+        self.store.update_metadata("HUB#zoosite-main", f"ARTICLE#{draft_article}", {"status": "draft"})
+        unpublished = self.public_interaction(draft_article)
+        self.assertEqual(unpublished["statusCode"], 403)
+
+        private_article = self.published_public_article()
+        self.store.update_metadata("HUB#zoosite-main", f"ARTICLE#{private_article}", {"visibility": "private"})
+        private = self.public_interaction(private_article)
+        self.assertEqual(private["statusCode"], 403)
+
+        disabled_article = self.published_public_article(interactions={"ctas": {"enabled": False}})
+        disabled = self.public_interaction(disabled_article)
+        self.assertEqual(disabled["statusCode"], 403)
+
+    def test_public_action_accepts_enabled_interactions_and_rate_limits_duplicates(self):
+        article_id = self.published_public_article(interactions={"ctas": {"enabled": True}})
+
+        first = self.public_interaction(article_id)
+        second = self.public_interaction(article_id)
+
+        self.assertEqual(first["statusCode"], 200)
+        self.assertEqual(second["statusCode"], 429)
+        response_text = first["body"] + second["body"]
+        for forbidden in ["actorHash", "RATE#", "publishedBundleKey", "bucket", "table"]:
+            self.assertNotIn(forbidden, response_text)
+        self.assertEqual(len([key for key in self.store.interactions if key[1].startswith("INTERACTION#")]), 1)
+
+    def test_created_articles_publish_safe_public_interaction_defaults(self):
+        article_id = self.published_public_article()
+        article = self.store.get_metadata("HUB#zoosite-main", f"ARTICLE#{article_id}")
+
+        self.assertTrue(article["interactions"]["reactions"]["enabled"])
+        bundle = next(item for item in self.store.objects.values() if item.get("articleId") == article_id)
+        self.assertTrue(bundle["interactions"]["reactions"]["enabled"])
+        reaction = self.public_interaction(article_id, event_type="reaction", target_id="useful")
+        self.assertEqual(reaction["statusCode"], 200)
 
     def test_blog_analyst_can_read_aggregated_analytics_without_raw_events(self):
         create = self.request(
@@ -1950,6 +2041,15 @@ class ContentHubHandlerTests(unittest.TestCase):
 
 
 class ContentHubTemplateTests(unittest.TestCase):
+    def test_public_action_route_is_declared_in_api_gateway(self):
+        template = Path(__file__).resolve().parents[1].joinpath("template.yaml").read_text(encoding="utf-8")
+
+        self.assertIn("PublicAction:", template)
+        self.assertIn("OptionsPublicAction:", template)
+        self.assertIn("Method: POST", template)
+        self.assertIn("Method: OPTIONS", template)
+        self.assertIn("Path: /features/content-hub/public-action", template)
+
     def test_due_schedule_is_explicit_eventbridge_rule(self):
         template = Path(__file__).resolve().parents[1].joinpath("template.yaml").read_text(encoding="utf-8")
 

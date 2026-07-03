@@ -116,6 +116,9 @@ Resources:
         PointInTimeRecoveryEnabled: true
       SSESpecification:
         SSEEnabled: true
+      TimeToLiveSpecification:
+        AttributeName: expiresAtEpoch
+        Enabled: true
       AttributeDefinitions:
         - AttributeName: pk
           AttributeType: S
@@ -243,6 +246,13 @@ Resources:
               Ref: ContentHubApi
             Method: POST
             Path: /features/content-hub/action
+        PublicAction:
+          Type: HttpApi
+          Properties:
+            ApiId:
+              Ref: ContentHubApi
+            Method: POST
+            Path: /features/content-hub/public-action
         OptionsRead:
           Type: HttpApi
           Properties:
@@ -257,6 +267,13 @@ Resources:
               Ref: ContentHubApi
             Method: OPTIONS
             Path: /features/content-hub/action
+        OptionsPublicAction:
+          Type: HttpApi
+          Properties:
+            ApiId:
+              Ref: ContentHubApi
+            Method: OPTIONS
+            Path: /features/content-hub/public-action
 
   DueSchedulesRule:
     Type: AWS::Events::Rule

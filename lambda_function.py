@@ -147,6 +147,12 @@ class ContentHubForbidden(ContentHubError):
     public_message = "Content hub access denied"
 
 
+class ContentHubRateLimited(ContentHubError):
+    status_code = 429
+    error_code = "rate_limited"
+    public_message = "Please wait before sending this interaction again"
+
+
 class ContentHubNotFound(ContentHubError):
     status_code = 404
     error_code = "not_found"
@@ -594,6 +600,7 @@ def _create_article(payload: dict[str, Any], session: dict[str, Any], profile: d
         "tags": tags,
         "commentPolicy": _comment_policy(_input_field(payload, "commentPolicy") or "moderated"),
         "contentSafety": _content_safety(payload),
+        "interactions": _public_interactions_policy(_input_field(payload, "interactions") or hub.get("defaultInteractions"), default_enabled=True),
         "canonicalMode": _canonical_mode(_input_field(payload, "canonicalMode") or "self"),
         "canonicalUrl": _safe_canonical_url(_input_field(payload, "canonicalUrl") or ""),
         "path": path,
@@ -1219,11 +1226,15 @@ def _record_public_interaction(
 ) -> dict[str, Any]:
     if _clean_string(_input_field(payload, "website") or _input_field(payload, "honeypot")):
         raise ContentHubError("Interaction could not be accepted")
-    event_type = _interaction_event_type(payload)
-    article_id = _optional_safe_id(binding.get("articleId") or _input_field(payload, "articleId"))
+    event_type = _public_interaction_event_type(payload)
+    article_id = _safe_id(binding.get("articleId") or _input_field(payload, "articleId"))
     target_id = _optional_safe_id(_input_field(payload, "targetId"))
+    store = _store()
+    article = store.get_metadata(f"HUB#{hub['hubId']}", f"ARTICLE#{article_id}")
+    _require_public_interaction_article(article, event_type)
     now = _now_iso()
     actor_hash = _public_actor_hash(event, profile)
+    _put_public_interaction_rate_limit(store, hub["hubId"], actor_hash, article_id, event_type, target_id)
     interaction_seed = f"{event_type}:{now}:{time.time_ns()}:{article_id}:{target_id}:{actor_hash}"
     interaction_id = _safe_id(_input_field(payload, "interactionId") or f"evt_{hashlib.sha256(interaction_seed.encode()).hexdigest()[:16]}")
     item = {
@@ -1242,8 +1253,57 @@ def _record_public_interaction(
         "createdAt": now,
         "public": True,
     }
-    _store().put_interaction(item)
+    store.put_interaction(item)
     return {"interaction": _interaction_summary(item)}
+
+
+def _public_interaction_event_type(payload: dict[str, Any]) -> str:
+    event_type = _interaction_event_type(payload)
+    if event_type == "like":
+        event_type = "reaction"
+    if event_type not in {"cta", "reaction", "share", "readProgress", "assetDownload", "form"}:
+        raise ContentHubError("Invalid interaction type")
+    return event_type
+
+
+def _require_public_interaction_article(article: Optional[dict[str, Any]], event_type: str) -> None:
+    if not article:
+        raise ContentHubNotFound("Content hub item not found")
+    if article.get("status") != "published" or article.get("visibility") != "public":
+        raise ContentHubForbidden("Content is not available")
+    if not _clean_string(article.get("publishedBundleKey")):
+        raise ContentHubForbidden("Content is not available")
+    policy_key = {
+        "cta": "ctas",
+        "reaction": "reactions",
+        "share": "shares",
+        "readProgress": "readProgress",
+        "assetDownload": "assetDownloads",
+        "form": "forms",
+    }[event_type]
+    interactions = article.get("interactions") if isinstance(article.get("interactions"), dict) else {}
+    policy = interactions.get(policy_key) if isinstance(interactions.get(policy_key), dict) else {}
+    if policy.get("enabled") is not True:
+        raise ContentHubForbidden("Interaction is not available")
+
+
+def _put_public_interaction_rate_limit(
+    store: Any,
+    hub_id: str,
+    actor_hash: str,
+    article_id: str,
+    event_type: str,
+    target_id: str,
+) -> None:
+    minute = _now_epoch() // 60
+    target_part = target_id or "none"
+    digest = _sha256(f"{hub_id}:{actor_hash}:{article_id}:{event_type}:{target_part}:{minute}")
+    store.put_public_interaction_rate_limit({
+        "pk": f"HUB#{hub_id}",
+        "sk": f"RATE#{digest}",
+        "itemFamily": "RATE_LIMIT",
+        "expiresAtEpoch": _now_epoch() + 180,
+    })
 
 
 def _interaction_event_type(payload: dict[str, Any]) -> str:
@@ -1605,6 +1665,18 @@ class DynamoContentHubStore:
     def put_interaction(self, item: dict[str, Any]) -> None:
         self.table(self.interactions_table_name).put_item(Item=_without_empty(item))
 
+    def put_public_interaction_rate_limit(self, item: dict[str, Any]) -> None:
+        try:
+            self.table(self.interactions_table_name).put_item(
+                Item=_without_empty(item),
+                ConditionExpression="attribute_not_exists(pk) AND attribute_not_exists(sk)",
+            )
+        except Exception as exc:
+            error = getattr(exc, "response", {}).get("Error", {}) if hasattr(exc, "response") else {}
+            if error.get("Code") == "ConditionalCheckFailedException":
+                raise ContentHubRateLimited() from exc
+            raise
+
     def query_interactions(self, pk: str, sk_prefix: str) -> list[dict[str, Any]]:
         return _query_items(self.table(self.interactions_table_name), pk, sk_prefix)
 
@@ -1776,6 +1848,7 @@ def _article_package(
         "tags": _taxonomy_refs(article.get("tags")),
         "commentPolicy": article.get("commentPolicy"),
         "contentSafety": _content_safety_from_value(article.get("contentSafety")),
+        "interactions": _public_interactions_policy(article.get("interactions"), default_enabled=False),
         "canonical": {
             "mode": article.get("canonicalMode"),
             "url": article.get("canonicalUrl"),
@@ -1854,6 +1927,7 @@ def _article_bundle(
         "tags": _taxonomy_refs(article.get("tags")),
         "commentPolicy": _comment_policy(article.get("commentPolicy") or "moderated"),
         "contentSafety": _content_safety_from_value(article.get("contentSafety")),
+        "interactions": _public_interactions_policy(article.get("interactions"), default_enabled=False),
         "seo": {
             "title": seo_title,
             "description": seo_description,
@@ -1922,6 +1996,7 @@ def _article_summary(item: dict[str, Any]) -> dict[str, Any]:
         "tags": _taxonomy_refs(item.get("tags")),
         "commentPolicy": item.get("commentPolicy"),
         "contentSafety": _content_safety_from_value(item.get("contentSafety")),
+        "interactions": _public_interactions_policy(item.get("interactions"), default_enabled=False),
         "canonicalMode": item.get("canonicalMode"),
         "canonicalUrl": item.get("canonicalUrl"),
         "primaryLocale": item.get("primaryLocale"),
@@ -2616,6 +2691,20 @@ def _content_safety_from_value(value: Any) -> dict[str, Any]:
         "rating": rating,
         "warnings": [_safe_text(item, max_length=80) for item in _list_value(value.get("warnings"))[:10]],
     }
+
+
+def _public_interactions_policy(value: Any, *, default_enabled: bool) -> dict[str, Any]:
+    source = value if isinstance(value, dict) else {}
+    output: dict[str, Any] = {}
+    for key in ("ctas", "reactions", "shares", "readProgress", "assetDownloads", "forms"):
+        raw = source.get(key) if isinstance(source.get(key), dict) else {}
+        output[key] = {
+            "enabled": _safe_bool(raw.get("enabled"), default=default_enabled),
+        }
+        moderation = _clean_string(raw.get("moderation"))
+        if moderation:
+            output[key]["moderation"] = _safe_text(moderation, max_length=40)
+    return output
 
 
 def _taxonomy_ref(value: Any) -> dict[str, Any]:
