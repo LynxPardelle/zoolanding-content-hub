@@ -2,6 +2,7 @@ import base64
 import json
 import os
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import lambda_function as content_hub
@@ -31,6 +32,7 @@ def encoded_config(**overrides):
                     "publish": ["zoosite-admin", "zoosite-blog-publisher"],
                     "media": ["zoosite-admin", "zoosite-blog-media"],
                     "moderate": ["zoosite-admin", "zoosite-blog-moderator"],
+                    "analytics": ["zoosite-admin", "zoosite-blog-analyst"],
                 },
                 "analyticsContext": {
                     "contentGroup": "zoosite_blog",
@@ -44,7 +46,15 @@ def encoded_config(**overrides):
     return base64.b64encode(raw).decode("ascii")
 
 
-def event(path, body, *, csrf=True, cookies=None, headers=None):
+def encoded_role_policy_config(role_policies):
+    raw = json.loads(base64.b64decode(encoded_config()).decode("utf-8"))
+    hub = raw["profiles"][0]["contentHubs"][0]
+    hub.pop("roles", None)
+    hub["rolePolicies"] = role_policies
+    return base64.b64encode(json.dumps(raw, separators=(",", ":")).encode("utf-8")).decode("ascii")
+
+
+def event(path, body, *, csrf=True, cookies=None, headers=None, request_id=None):
     req_headers = {
         "x-zlp-domain": "zoositioweb.com.mx",
         "x-zlp-auth-profile-id": "staff",
@@ -57,12 +67,15 @@ def event(path, body, *, csrf=True, cookies=None, headers=None):
         f"__Host-zlp_session={SESSION_VALUE}",
         "zlp_csrf=csrf-value",
     ] if cookies is None else cookies
+    request_context = {"http": {"method": "POST", "path": path}, "stage": "test"}
+    if request_id:
+        request_context["requestId"] = request_id
     return {
         "version": "2.0",
         "rawPath": path,
         "headers": req_headers,
         "cookies": request_cookies,
-        "requestContext": {"http": {"method": "POST", "path": path}, "stage": "test"},
+        "requestContext": request_context,
         "body": json.dumps(body),
     }
 
@@ -81,6 +94,7 @@ class FakeStore:
         self.metadata = {}
         self.media = {}
         self.moderation = {}
+        self.interactions = {}
         self.objects = {}
         self.bytes = {}
         self.roles = roles or ["zoosite-admin"]
@@ -125,6 +139,9 @@ class FakeStore:
         item.update(updates)
         return dict(item)
 
+    def delete_metadata(self, pk, sk):
+        self.metadata.pop((pk, sk), None)
+
     def query_metadata(self, pk, sk_prefix):
         return [dict(item) for (item_pk, item_sk), item in self.metadata.items() if item_pk == pk and item_sk.startswith(sk_prefix)]
 
@@ -137,8 +154,23 @@ class FakeStore:
     def put_moderation(self, item):
         self.moderation[(item["pk"], item["sk"])] = dict(item)
 
+    def delete_moderation(self, pk, sk):
+        self.moderation.pop((pk, sk), None)
+
     def query_moderation(self, pk, sk_prefix):
         return [dict(item) for (item_pk, item_sk), item in self.moderation.items() if item_pk == pk and item_sk.startswith(sk_prefix)]
+
+    def put_interaction(self, item):
+        self.interactions[(item["pk"], item["sk"])] = dict(item)
+
+    def put_public_interaction_rate_limit(self, item):
+        key = (item["pk"], item["sk"])
+        if key in self.interactions:
+            raise content_hub.ContentHubRateLimited()
+        self.interactions[key] = dict(item)
+
+    def query_interactions(self, pk, sk_prefix):
+        return [dict(item) for (item_pk, item_sk), item in self.interactions.items() if item_pk == pk and item_sk.startswith(sk_prefix)]
 
     def put_json(self, key, payload):
         self.objects[key] = dict(payload)
@@ -168,6 +200,7 @@ class ContentHubHandlerTests(unittest.TestCase):
     def tearDown(self):
         self.store_patch.stop()
         self.env_patch.stop()
+        content_hub._CONFIG_CACHE.clear()
 
     def request(self, path, binding, extra=None, **kwargs):
         payload = {
@@ -181,6 +214,12 @@ class ContentHubHandlerTests(unittest.TestCase):
             },
         }
         return content_hub.lambda_handler(event(path, payload, **kwargs), None)
+
+    def audit_events(self):
+        return [item for key, item in self.store.objects.items() if "/audit/" in key]
+
+    def set_article_status(self, article_id, status):
+        self.store.update_metadata("HUB#zoosite-main", f"ARTICLE#{article_id}", {"status": status})
 
     def test_read_requires_session(self):
         response = self.request(
@@ -200,6 +239,239 @@ class ContentHubHandlerTests(unittest.TestCase):
         )
         self.assertEqual(response["statusCode"], 403)
         self.assertEqual(body(response)["error"], "CSRF validation failed")
+
+    def test_action_requires_content_hub_action(self):
+        response = self.request(
+            "/features/content-hub/action",
+            {},
+            {"title": "Blog builder SEO"},
+        )
+        self.assertEqual(response["statusCode"], 400)
+        self.assertEqual(body(response)["error"], "contentHub.action is required")
+
+    def test_validation_error_response_includes_code_and_request_id(self):
+        response = self.request(
+            "/features/content-hub/action",
+            {},
+            {"title": "Blog builder SEO"},
+            request_id="req-safe-123",
+        )
+
+        self.assertEqual(response["statusCode"], 400)
+        self.assertEqual(body(response), {
+            "ok": False,
+            "code": "validation_error",
+            "error": "contentHub.action is required",
+            "message": "contentHub.action is required",
+            "requestId": "req-safe-123",
+        })
+
+    def test_malformed_json_returns_validation_error(self):
+        malformed = event(
+            "/features/content-hub/read",
+            {},
+            csrf=False,
+            cookies=[],
+            request_id="req-bad-json-123",
+        )
+        malformed["body"] = "{not-json"
+
+        response = content_hub.lambda_handler(malformed, None)
+
+        self.assertEqual(response["statusCode"], 400)
+        self.assertEqual(body(response), {
+            "ok": False,
+            "code": "validation_error",
+            "error": "Request body must be valid JSON",
+            "message": "Request body must be valid JSON",
+            "requestId": "req-bad-json-123",
+        })
+
+    def test_error_response_generates_fallback_request_id(self):
+        response = self.request(
+            "/features/content-hub/read",
+            {"read": "articleList"},
+            cookies=[],
+            csrf=False,
+        )
+
+        self.assertEqual(response["statusCode"], 401)
+        payload = body(response)
+        self.assertEqual(payload["code"], "auth_required")
+        self.assertRegex(payload["requestId"], r"^req-[0-9]+$")
+
+    def test_internal_error_response_is_sanitized(self):
+        def leaking_query_metadata(pk, sk_prefix):
+            del pk, sk_prefix
+            raise RuntimeError("token=secret auth-session-table private-bucket stack trace")
+
+        self.store.query_metadata = leaking_query_metadata
+
+        with patch.object(content_hub, "_log"):
+            response = self.request(
+                "/features/content-hub/read",
+                {"read": "articleList"},
+                csrf=False,
+                request_id="req-internal-456",
+            )
+
+        self.assertEqual(response["statusCode"], 500)
+        self.assertEqual(body(response), {
+            "ok": False,
+            "code": "internal_error",
+            "error": "Content hub request failed",
+            "message": "Content hub request failed",
+            "requestId": "req-internal-456",
+        })
+        for leaked in ["token=secret", "auth-session-table", "private-bucket", "RuntimeError", "stack trace"]:
+            self.assertNotIn(leaked, response["body"])
+
+    def test_config_error_response_is_generic_internal_error(self):
+        os.environ["CONTENT_HUB_CONFIG_JSON_BASE64"] = base64.b64encode(b"{not-json").decode("ascii")
+        content_hub._CONFIG_CACHE.clear()
+
+        with patch.object(content_hub, "_log"):
+            response = self.request(
+                "/features/content-hub/read",
+                {"read": "articleList"},
+                csrf=False,
+                request_id="req-config-789",
+            )
+
+        self.assertEqual(response["statusCode"], 500)
+        payload = body(response)
+        self.assertEqual(payload["code"], "internal_error")
+        self.assertEqual(payload["error"], "Content hub service is temporarily unavailable")
+        self.assertEqual(payload["requestId"], "req-config-789")
+        self.assertNotIn("valid JSON", response["body"])
+
+    def test_successful_action_writes_sanitized_s3_audit_events(self):
+        response = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Audit Article"},
+            request_id="req-audit-success",
+        )
+
+        self.assertEqual(response["statusCode"], 200)
+        events = self.audit_events()
+        self.assertEqual([event["status"] for event in events], ["started", "succeeded"])
+        self.assertTrue(all(event["requestId"] == "req-audit-success" for event in events))
+        self.assertTrue(all(event["action"] == "createArticle" for event in events))
+        self.assertTrue(all(event["decision"] == "allowed" for event in events))
+        self.assertTrue(events[-1]["targetIds"]["articleId"].startswith("art_"))
+        serialized = json.dumps(events, sort_keys=True)
+        self.assertNotIn("admin-sub", serialized)
+        self.assertNotIn("csrf-value", serialized)
+        self.assertNotIn(SESSION_VALUE, serialized)
+        self.assertNotIn("cookie", serialized.lower())
+        self.assertNotIn("token", serialized.lower())
+
+    def test_denied_action_writes_sanitized_s3_audit_event(self):
+        self.store.roles = ["zoosite-blog-editor"]
+        response = self.request(
+            "/features/content-hub/action",
+            {"action": "publish", "articleId": "art_existing", "revisionId": "rev_001"},
+            {"path": "/blog/denied"},
+            request_id="req-audit-denied",
+        )
+
+        self.assertEqual(response["statusCode"], 403)
+        events = self.audit_events()
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["requestId"], "req-audit-denied")
+        self.assertEqual(events[0]["action"], "publish")
+        self.assertEqual(events[0]["decision"], "denied")
+        self.assertEqual(events[0]["status"], "forbidden")
+        self.assertEqual(events[0]["targetIds"], {"articleId": "art_existing", "revisionId": "rev_001"})
+
+    def test_template_keeps_audit_bucket_versioned_without_delete_object(self):
+        template = Path("template.yaml").read_text(encoding="utf-8")
+
+        self.assertIn("ContentHubPackagesBucket:", template)
+        self.assertIn("VersioningConfiguration:", template)
+        self.assertIn("Status: Enabled", template)
+        self.assertIn("- s3:PutObject", template)
+        self.assertNotIn("- s3:DeleteObject", template)
+
+    def test_role_policies_authorize_by_action_scoped_permission(self):
+        os.environ["CONTENT_HUB_CONFIG_JSON_BASE64"] = encoded_role_policy_config([
+            {
+                "roleId": "blog-editor",
+                "groups": ["zoosite-blog-editor"],
+                "permissions": [
+                    "blog:article:read",
+                    "blog:article:create",
+                    "blog:article:update",
+                    "blog:article:validate",
+                ],
+            },
+            {
+                "roleId": "blog-publisher",
+                "groups": ["zoosite-blog-publisher"],
+                "permissions": [
+                    "blog:article:read",
+                    "blog:article:approve",
+                    "blog:article:publish",
+                ],
+            },
+        ])
+        content_hub._CONFIG_CACHE.clear()
+        self.store.roles = ["zoosite-blog-editor"]
+
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Policy article", "summary": "Permisos accionables"},
+        )
+        self.assertEqual(create["statusCode"], 200)
+        article_id = body(create)["data"]["article"]["articleId"]
+
+        read = self.request("/features/content-hub/read", {"read": "articleDetail"}, {"articleId": article_id}, csrf=False)
+        self.assertEqual(read["statusCode"], 200)
+
+        self.store.roles = ["zoosite-blog-publisher"]
+        self.set_article_status(article_id, "review")
+        approved = self.request(
+            "/features/content-hub/action",
+            {"action": "approveArticle", "articleId": article_id},
+        )
+        self.assertEqual(approved["statusCode"], 200)
+
+        published = self.request(
+            "/features/content-hub/action",
+            {"action": "publish", "articleId": article_id, "revisionId": "rev_001"},
+        )
+        self.assertEqual(published["statusCode"], 200)
+
+        self.store.roles = ["zoosite-blog-editor"]
+        preview = self.request(
+            "/features/content-hub/read",
+            {"read": "publicBundlePreview", "articleId": article_id},
+            csrf=False,
+        )
+        self.assertEqual(preview["statusCode"], 200)
+
+        publish = self.request(
+            "/features/content-hub/action",
+            {"action": "publish", "articleId": article_id, "revisionId": "rev_001"},
+        )
+        self.assertEqual(publish["statusCode"], 403)
+
+    def test_role_policy_config_rejects_wildcard_permission(self):
+        os.environ["CONTENT_HUB_CONFIG_JSON_BASE64"] = encoded_role_policy_config([
+            {
+                "roleId": "bad-role",
+                "groups": ["zoosite-admin"],
+                "permissions": ["blog:article:*"],
+            },
+        ])
+        content_hub._CONFIG_CACHE.clear()
+
+        with patch.object(content_hub, "_log"):
+            response = self.request("/features/content-hub/read", {"read": "articleList"}, csrf=False)
+        self.assertEqual(response["statusCode"], 500)
+        self.assertEqual(body(response)["error"], "Content hub service is temporarily unavailable")
 
     def test_rejects_server_only_public_payload(self):
         response = self.request(
@@ -226,6 +498,275 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertEqual(len(body(read)["data"]["items"]), 1)
         self.assertNotIn("packageKey", read["body"])
 
+        detail = self.request(
+            "/features/content-hub/read",
+            {"read": "articleDetail"},
+            {"articleId": article_id},
+            csrf=False,
+        )
+        self.assertEqual(detail["statusCode"], 200)
+        self.assertEqual(body(detail)["data"]["item"]["articleId"], article_id)
+        self.assertEqual(body(detail)["data"]["item"]["title"], "Blog builder SEO")
+        self.assertEqual(body(detail)["data"]["item"]["summary"], "Guía de SEO")
+        self.assertNotIn("packageKey", detail["body"])
+
+    def test_create_article_does_not_require_article_id(self):
+        self.store.roles = ["zoosite-blog-editor"]
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Sin id previo"},
+        )
+        self.assertEqual(create["statusCode"], 200)
+        self.assertTrue(body(create)["data"]["article"]["articleId"].startswith("art_"))
+
+    def test_article_detail_requires_existing_article(self):
+        read = self.request(
+            "/features/content-hub/read",
+            {"read": "articleDetail"},
+            {"articleId": "missing-article"},
+            csrf=False,
+        )
+        self.assertEqual(read["statusCode"], 404)
+
+    def test_validate_article_reports_editorial_issues_without_storage_keys(self):
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Validacion editorial"},
+        )
+        self.assertEqual(create["statusCode"], 200)
+        article_id = body(create)["data"]["article"]["articleId"]
+
+        response = self.request(
+            "/features/content-hub/action",
+            {"action": "validate", "articleId": article_id},
+        )
+
+        self.assertEqual(response["statusCode"], 200)
+        data = body(response)["data"]
+        self.assertTrue(data["valid"])
+        self.assertEqual(data["articleId"], article_id)
+        self.assertEqual(data["issues"], [{
+            "severity": "warning",
+            "code": "missing-summary",
+            "message": "Agrega una descripción para SEO.",
+        }])
+        self.assertNotIn("packageKey", response["body"])
+        self.assertNotIn("publishedBundleKey", response["body"])
+
+    def test_validate_article_requires_existing_article(self):
+        response = self.request(
+            "/features/content-hub/action",
+            {"action": "validate", "articleId": "art_missing"},
+        )
+
+        self.assertEqual(response["statusCode"], 404)
+
+    def test_create_article_stores_blog_metadata_and_public_summary(self):
+        self.store.roles = ["zoosite-blog-editor"]
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {
+                "articleTitle": "SEO local",
+                "articleSummary": "Guía de posicionamiento local",
+                "articleSeoTitle": "SEO local para veterinarias",
+                "articleSeoDescription": "Descripción SEO segura",
+                "categoryId": "cat-seo",
+                "articleTags": ["tag-seo", {"taxonomyId": "tag-vet", "slug": "veterinarias", "label": "Veterinarias"}],
+                "articleCommentPolicy": "authenticated",
+                "articleContentSafety": {"rating": "sensitive", "warnings": ["salud"]},
+                "articleCanonicalMode": "custom",
+                "articleCanonicalUrl": "https://zoositioweb.com.mx/blog/seo-local",
+            },
+        )
+        self.assertEqual(create["statusCode"], 200)
+        article = body(create)["data"]["article"]
+        self.assertEqual(article["seoTitle"], "SEO local para veterinarias")
+        self.assertEqual(article["category"]["taxonomyId"], "cat-seo")
+        self.assertEqual(article["tags"][1]["slug"], "veterinarias")
+        self.assertEqual(article["commentPolicy"], "authenticated")
+        self.assertEqual(article["contentSafety"]["rating"], "sensitive")
+        self.assertEqual(article["canonicalMode"], "custom")
+
+        read = self.request("/features/content-hub/read", {"read": "articleList"}, csrf=False)
+        self.assertEqual(body(read)["data"]["items"][0]["canonicalUrl"], "https://zoositioweb.com.mx/blog/seo-local")
+        self.assertNotIn("updatedBy", read["body"])
+
+    def test_create_article_accepts_draft_policy_aliases_and_comma_tags(self):
+        self.store.roles = ["zoosite-blog-editor"]
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {
+                "articleTitle": "Editor visual",
+                "articleTags": "seo, blog-builder",
+                "articleCanonicalPolicy": "creator-domain",
+                "articleCommentPolicy": "authenticated-moderated",
+                "articleContentSafetyPolicy": "advanced-freeform",
+                "articleVisibility": "private-draft",
+            },
+        )
+        self.assertEqual(create["statusCode"], 200)
+        article = body(create)["data"]["article"]
+        self.assertEqual(article["canonicalMode"], "self")
+        self.assertEqual(article["commentPolicy"], "authenticated")
+        self.assertEqual(article["contentSafety"]["rating"], "sensitive")
+        self.assertEqual(article["visibility"], "private")
+        self.assertEqual([item["taxonomyId"] for item in article["tags"]], ["seo", "blog-builder"])
+
+    def test_create_article_accepts_localized_builder_labels_and_human_tags(self):
+        self.store.roles = ["zoosite-blog-editor"]
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {
+                "articleTitle": "E2E Test Article Manual",
+                "articleLanguage": "es",
+                "articleCategory": "test",
+                "articleTags": "test, algo más, manual",
+                "articleSummary": "Este es un artículo de test manual.",
+                "articleSeoTitle": "E2E Test Manual",
+                "articleSeoDescription": "Este es un artículo de test manual.",
+                "articleSlug": "e2e-test-manual",
+                "articleCanonicalPolicy": "Adaptable al sitio actual",
+                "articleCommentPolicy": "Públicos + moderación",
+                "articleContentSafetyPolicy": "Avanzado libre",
+                "articleVisibility": "Listo para revisión",
+            },
+        )
+        self.assertEqual(create["statusCode"], 200)
+        article = body(create)["data"]["article"]
+        self.assertEqual(article["canonicalMode"], "self")
+        self.assertEqual(article["commentPolicy"], "moderated")
+        self.assertEqual(article["contentSafety"]["rating"], "sensitive")
+        self.assertEqual(article["visibility"], "private")
+        self.assertEqual([item["taxonomyId"] for item in article["tags"]], ["test", "algo-mas", "manual"])
+        self.assertEqual(article["tags"][1]["label"], "algo más")
+        self.assertEqual(article["categorySlug"], "test")
+        self.assertEqual(article["path"], "/blog/test/e2e-test-manual")
+
+        taxonomy = self.request("/features/content-hub/read", {"read": "taxonomyList"}, csrf=False)
+        self.assertEqual(taxonomy["statusCode"], 200)
+        taxonomy_items = body(taxonomy)["data"]["items"]
+        self.assertTrue(any(item["kind"] == "category" and item["slug"] == "test" for item in taxonomy_items))
+        self.assertTrue(any(item["kind"] == "tag" and item["slug"] == "algo-mas" for item in taxonomy_items))
+
+        self.store.roles = ["zoosite-blog-publisher"]
+        self.set_article_status(article["articleId"], "approved")
+        publish = self.request(
+            "/features/content-hub/action",
+            {"action": "publish", "articleId": article["articleId"], "revisionId": "rev_001"},
+            {"seoDescription": "Descripción SEO"},
+        )
+        self.assertEqual(publish["statusCode"], 200)
+        self.assertEqual(body(publish)["data"]["path"], "/blog/test/e2e-test-manual")
+        published_article = self.store.get_metadata(f"HUB#zoosite-main", f"ARTICLE#{article['articleId']}")
+        self.assertEqual(published_article["status"], "published")
+        self.assertEqual(published_article["visibility"], "public")
+
+    def test_create_article_rejects_empty_human_tag_slugs(self):
+        self.store.roles = ["zoosite-blog-editor"]
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"articleTitle": "Invalid tag", "articleTags": "!!!"},
+        )
+        self.assertEqual(create["statusCode"], 400)
+        self.assertEqual(body(create)["error"], "Invalid slug")
+
+    def test_taxonomy_upsert_and_list_exposes_safe_fields(self):
+        self.store.roles = ["zoosite-blog-editor"]
+        upsert = self.request(
+            "/features/content-hub/action",
+            {"action": "upsertTaxonomy", "taxonomyKind": "category"},
+            {
+                "taxonomyId": "cat-blog",
+                "translation": "Blog",
+                "description": "Categoría principal",
+                "seoTitle": "Blog Zoosite",
+                "visible": True,
+            },
+        )
+        self.assertEqual(upsert["statusCode"], 200)
+        self.assertEqual(body(upsert)["data"]["taxonomy"]["slug"], "blog")
+
+        read = self.request(
+            "/features/content-hub/read",
+            {"read": "taxonomyList", "taxonomyKind": "category"},
+            csrf=False,
+        )
+        data = body(read)["data"]
+        self.assertEqual(len(data["categories"]), 1)
+        self.assertEqual(data["categories"][0]["seoTitle"], "Blog Zoosite")
+        self.assertNotIn("updatedBy", read["body"])
+
+    def test_config_is_cached_for_same_environment(self):
+        first = content_hub.load_config()
+        with patch("lambda_function.json.loads") as loads:
+            second = content_hub.load_config()
+        self.assertIs(second, first)
+        loads.assert_not_called()
+
+    def test_store_does_not_create_s3_client_until_object_storage_is_used(self):
+        env = {
+            "AUTH_SESSION_TABLE_NAME": "auth-session",
+            "AUTH_USER_STATE_TABLE_NAME": "auth-user",
+            "CONTENT_HUB_METADATA_TABLE_NAME": "metadata",
+            "CONTENT_HUB_MEDIA_TABLE_NAME": "media",
+            "CONTENT_HUB_MODERATION_TABLE_NAME": "moderation",
+            "CONTENT_HUB_INTERACTIONS_TABLE_NAME": "interactions",
+            "CONTENT_HUB_PACKAGES_BUCKET_NAME": "packages",
+        }
+        fake_dynamodb = unittest.mock.Mock()
+        fake_dynamodb.Table.return_value.query.return_value = {"Items": []}
+        with patch.dict(os.environ, env, clear=True), \
+             patch("lambda_function._dynamodb_resource", return_value=fake_dynamodb), \
+             patch("lambda_function._s3_client") as s3_client:
+            store = content_hub.DynamoContentHubStore()
+            s3_client.assert_not_called()
+
+            store.query_metadata("HUB#zoosite-main", "ARTICLE#")
+            s3_client.assert_not_called()
+
+            _ = store.s3
+            s3_client.assert_called_once()
+
+    def test_dynamo_query_metadata_reads_every_page(self):
+        class PagedTable:
+            def __init__(self):
+                self.calls = []
+
+            def query(self, **kwargs):
+                self.calls.append(kwargs)
+                if len(self.calls) == 1:
+                    return {
+                        "Items": [{"pk": "HUB#zoosite-main", "sk": "ARTICLE#1"}],
+                        "LastEvaluatedKey": {"pk": "HUB#zoosite-main", "sk": "ARTICLE#1"},
+                    }
+                return {"Items": [{"pk": "HUB#zoosite-main", "sk": "ARTICLE#2"}]}
+
+        env = {
+            "AUTH_SESSION_TABLE_NAME": "auth-session",
+            "AUTH_USER_STATE_TABLE_NAME": "auth-user",
+            "CONTENT_HUB_METADATA_TABLE_NAME": "metadata",
+            "CONTENT_HUB_MEDIA_TABLE_NAME": "media",
+            "CONTENT_HUB_MODERATION_TABLE_NAME": "moderation",
+            "CONTENT_HUB_INTERACTIONS_TABLE_NAME": "interactions",
+            "CONTENT_HUB_PACKAGES_BUCKET_NAME": "packages",
+        }
+        table = PagedTable()
+        fake_dynamodb = unittest.mock.Mock()
+        fake_dynamodb.Table.return_value = table
+
+        with patch.dict(os.environ, env, clear=True), patch("lambda_function._dynamodb_resource", return_value=fake_dynamodb):
+            store = content_hub.DynamoContentHubStore()
+            items = store.query_metadata("HUB#zoosite-main", "ARTICLE#")
+
+        self.assertEqual([item["sk"] for item in items], ["ARTICLE#1", "ARTICLE#2"])
+        self.assertEqual(table.calls[1]["ExclusiveStartKey"], {"pk": "HUB#zoosite-main", "sk": "ARTICLE#1"})
+
     def test_editor_cannot_publish_without_publish_role(self):
         self.store.roles = ["zoosite-blog-editor"]
         create = self.request(
@@ -234,6 +775,7 @@ class ContentHubHandlerTests(unittest.TestCase):
             {"title": "No publicar"},
         )
         article_id = body(create)["data"]["article"]["articleId"]
+        self.set_article_status(article_id, "approved")
         publish = self.request(
             "/features/content-hub/action",
             {"action": "publish", "articleId": article_id, "revisionId": "rev_001"},
@@ -245,19 +787,1186 @@ class ContentHubHandlerTests(unittest.TestCase):
         create = self.request(
             "/features/content-hub/action",
             {"action": "createArticle"},
-            {"title": "Publicar", "summary": "Descripción"},
+            {
+                "title": "Publicar",
+                "summary": "Descripción",
+                "category": {"taxonomyId": "cat-blog", "slug": "blog", "label": "Blog"},
+                "tags": ["tag-seo"],
+                "commentPolicy": "moderated",
+                "canonicalMode": "custom",
+                "canonicalUrl": "https://zoositioweb.com.mx/blog/publicar",
+            },
         )
         article_id = body(create)["data"]["article"]["articleId"]
+        self.set_article_status(article_id, "approved")
         publish = self.request(
             "/features/content-hub/action",
             {"action": "publish", "articleId": article_id, "revisionId": "rev_001"},
-            {"path": "/blog/publicar", "seoDescription": "Descripción SEO"},
+            {"path": "/blog/publicar", "seoDescription": "Descripción SEO", "robots": "noindex,nofollow"},
         )
         self.assertEqual(publish["statusCode"], 200)
         data = body(publish)["data"]
         self.assertEqual(data["path"], "/blog/publicar")
-        self.assertIn(data["publishedBundleKey"], self.store.objects)
+        self.assertNotIn("publishedBundleKey", data)
+        self.assertNotIn("publishedBundleKey", publish["body"])
+        published_article = self.store.get_metadata(f"HUB#zoosite-main", f"ARTICLE#{article_id}")
+        self.assertEqual(published_article["visibility"], "public")
+        self.assertEqual(published_article["robots"], "noindex,nofollow")
+        bundle_key, bundle = next((key, item) for key, item in self.store.objects.items() if item.get("safeArticlePath") == "/blog/publicar")
+        self.assertEqual(published_article.get("publishedBundleKey"), bundle_key)
+        self.assertEqual(bundle["safeArticlePath"], "/blog/publicar")
+        self.assertEqual(bundle["category"]["taxonomyId"], "cat-blog")
+        self.assertEqual(bundle["tags"][0]["taxonomyId"], "tag-seo")
+        self.assertEqual(bundle["commentPolicy"], "moderated")
+        self.assertEqual(bundle["seo"]["canonicalMode"], "custom")
+        self.assertEqual(bundle["seo"]["canonical"], "https://zoositioweb.com.mx/blog/publicar")
+        self.assertEqual(bundle["seo"]["robots"], "noindex,nofollow")
+        self.assertEqual(bundle["analytics"]["piiPolicy"], "no-pii")
         self.assertNotIn("bucket", publish["body"].lower())
+
+    def test_publish_preserves_top_level_article_content_in_public_variables(self):
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Contenido público", "summary": "Debe verse publicado"},
+        )
+        article_id = body(create)["data"]["article"]["articleId"]
+        article_content = {
+            "ops": [
+                {"insert": "Cuerpo publicado desde texto enriquecido."},
+                {"insert": "\n"},
+            ],
+        }
+        update = self.request(
+            "/features/content-hub/action",
+            {"action": "updatePackage"},
+            {
+                "articleId": article_id,
+                "revisionId": "rev_public_body",
+                "articleContent": article_content,
+                "components": [{"type": "generic-rich-text", "config": {"valueFrom": "articleContent"}}],
+            },
+        )
+        self.assertEqual(update["statusCode"], 200)
+        revision_id = body(update)["data"]["revision"]["revisionId"]
+        revision = self.store.get_metadata(f"ARTICLE#{article_id}", f"REVISION#{revision_id}")
+        package = self.store.get_json(revision["packageKey"])
+        package["variables"].pop("articleContent", None)
+        self.store.put_json(revision["packageKey"], package)
+
+        self.set_article_status(article_id, "approved")
+        publish = self.request(
+            "/features/content-hub/action",
+            {"action": "publish", "articleId": article_id, "revisionId": revision_id},
+            {"path": "/blog/contenido-publico"},
+        )
+
+        self.assertEqual(publish["statusCode"], 200)
+        _, bundle = next((key, item) for key, item in self.store.objects.items() if item.get("safeArticlePath") == "/blog/contenido-publico")
+        self.assertEqual(bundle["variables"]["articleContent"], article_content)
+
+    def test_publish_requires_approved_article(self):
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Sin aprobar", "summary": "No debe publicarse"},
+        )
+        article_id = body(create)["data"]["article"]["articleId"]
+
+        self.store.roles = ["zoosite-blog-publisher"]
+        publish = self.request(
+            "/features/content-hub/action",
+            {"action": "publish", "articleId": article_id, "revisionId": "rev_001"},
+        )
+
+        self.assertEqual(publish["statusCode"], 400)
+        self.assertEqual(body(publish)["error"], "Article must be approved before publishing")
+        article = self.store.get_metadata("HUB#zoosite-main", f"ARTICLE#{article_id}")
+        self.assertEqual(article["status"], "draft")
+        self.assertNotIn("publishedBundleKey", article)
+
+    def test_publish_rejects_path_collision_with_another_article(self):
+        first = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Primero", "slug": "primero"},
+        )
+        second = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Segundo", "slug": "segundo"},
+        )
+        first_id = body(first)["data"]["article"]["articleId"]
+        second_id = body(second)["data"]["article"]["articleId"]
+        self.set_article_status(first_id, "approved")
+        first_publish = self.request(
+            "/features/content-hub/action",
+            {"action": "publish", "articleId": first_id, "revisionId": "rev_001"},
+            {"path": "/blog/colision"},
+        )
+        self.assertEqual(first_publish["statusCode"], 200)
+
+        self.set_article_status(second_id, "approved")
+        collision = self.request(
+            "/features/content-hub/action",
+            {"action": "publish", "articleId": second_id, "revisionId": "rev_001"},
+            {"path": "/blog/colision"},
+        )
+
+        self.assertEqual(collision["statusCode"], 400)
+        self.assertEqual(body(collision)["error"], "Article path already exists")
+        slug = self.store.get_metadata("SLUG#test#zoositioweb.com.mx#es", "PATH#/blog/colision")
+        self.assertEqual(slug["articleId"], first_id)
+
+    def test_unpublish_does_not_remove_slug_owned_by_another_article(self):
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "No borrar ajeno"},
+        )
+        article_id = body(create)["data"]["article"]["articleId"]
+        self.set_article_status(article_id, "published")
+        self.store.put_metadata({
+            "pk": "SLUG#test#zoositioweb.com.mx#es",
+            "sk": "PATH#/blog/ajeno",
+            "itemFamily": "SLUG",
+            "hubId": "zoosite-main",
+            "articleId": "art_other",
+            "revisionId": "rev_001",
+            "path": "/blog/ajeno",
+        })
+
+        unpublish = self.request(
+            "/features/content-hub/action",
+            {"action": "unpublishArticle", "articleId": article_id},
+            {"path": "/blog/ajeno"},
+        )
+
+        self.assertEqual(unpublish["statusCode"], 200)
+        slug = self.store.get_metadata("SLUG#test#zoositioweb.com.mx#es", "PATH#/blog/ajeno")
+        self.assertEqual(slug["articleId"], "art_other")
+
+    def test_publish_rejects_revision_from_another_hub(self):
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Revision ajena"},
+        )
+        article_id = body(create)["data"]["article"]["articleId"]
+        self.set_article_status(article_id, "approved")
+        revision = self.store.get_metadata(f"ARTICLE#{article_id}", "REVISION#rev_001")
+        revision["hubId"] = "other-hub"
+
+        publish = self.request(
+            "/features/content-hub/action",
+            {"action": "publish", "articleId": article_id, "revisionId": "rev_001"},
+            {"path": "/blog/revision-ajena"},
+        )
+
+        self.assertEqual(publish["statusCode"], 404)
+
+    def test_publisher_can_approve_unpublish_and_archive_article(self):
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Ciclo editorial", "summary": "Flujo completo"},
+        )
+        article_id = body(create)["data"]["article"]["articleId"]
+
+        self.set_article_status(article_id, "review")
+        self.store.roles = ["zoosite-blog-publisher"]
+        approve = self.request(
+            "/features/content-hub/action",
+            {"action": "approveArticle", "articleId": article_id},
+        )
+        self.assertEqual(approve["statusCode"], 200)
+        self.assertEqual(body(approve)["data"]["status"], "approved")
+
+        publish = self.request(
+            "/features/content-hub/action",
+            {"action": "publish", "articleId": article_id, "revisionId": "rev_001"},
+            {"path": "/blog/ciclo-editorial"},
+        )
+        self.assertEqual(publish["statusCode"], 200)
+        self.assertIsNotNone(self.store.get_metadata("SLUG#test#zoositioweb.com.mx#es", "PATH#/blog/ciclo-editorial"))
+
+        unpublish = self.request(
+            "/features/content-hub/action",
+            {"action": "unpublishArticle", "articleId": article_id},
+        )
+        self.assertEqual(unpublish["statusCode"], 200)
+        self.assertEqual(body(unpublish)["data"]["status"], "unpublished")
+        article = self.store.get_metadata("HUB#zoosite-main", f"ARTICLE#{article_id}")
+        self.assertEqual(article["visibility"], "private")
+        self.assertIsNone(self.store.get_metadata("SLUG#test#zoositioweb.com.mx#es", "PATH#/blog/ciclo-editorial"))
+        self.assertNotIn("publishedBundleKey", unpublish["body"])
+
+        archive = self.request(
+            "/features/content-hub/action",
+            {"action": "archiveArticle", "articleId": article_id},
+        )
+        self.assertEqual(archive["statusCode"], 200)
+        self.assertEqual(body(archive)["data"]["status"], "archived")
+        article = self.store.get_metadata("HUB#zoosite-main", f"ARTICLE#{article_id}")
+        self.assertEqual(article["visibility"], "private")
+
+    def test_editorial_release_flow_creates_updates_reviews_publishes_previews_and_schedules_unpublish(self):
+        self.store.roles = ["zoosite-blog-editor"]
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {
+                "articleTitle": "Flujo editorial completo",
+                "articleSummary": "Resumen inicial",
+                "articleCategory": "web",
+                "articleTags": "seo, blog, seo",
+                "articleSlug": "flujo-editorial-completo",
+                "articleVisibility": "Listo para revisión",
+            },
+        )
+        self.assertEqual(create["statusCode"], 200)
+        article_id = body(create)["data"]["article"]["articleId"]
+        self.assertEqual(body(create)["data"]["article"]["path"], "/blog/web/flujo-editorial-completo")
+
+        update = self.request(
+            "/features/content-hub/action",
+            {"action": "updatePackage"},
+            {
+                "articleId": article_id,
+                "revisionId": "rev_release",
+                "articleTitle": "Flujo editorial completo actualizado",
+                "articleSummary": "Resumen listo para publicar",
+                "articleCategory": {"taxonomyId": "web", "slug": "web", "label": "Web"},
+                "articleTags": "seo, producto, blog",
+                "components": [
+                    {
+                        "type": "generic-text",
+                        "config": {
+                            "text": "Contenido editorial aprobado.",
+                        },
+                    },
+                ],
+            },
+        )
+        self.assertEqual(update["statusCode"], 200)
+        self.assertNotIn("packageKey", update["body"])
+
+        submit_review = self.request(
+            "/features/content-hub/action",
+            {"action": "submitReview", "articleId": article_id},
+        )
+        self.assertEqual(submit_review["statusCode"], 200)
+        self.assertEqual(body(submit_review)["data"]["status"], "review")
+
+        self.store.roles = ["zoosite-blog-publisher"]
+        approve = self.request(
+            "/features/content-hub/action",
+            {"action": "approveArticle", "articleId": article_id},
+        )
+        self.assertEqual(approve["statusCode"], 200)
+        self.assertEqual(body(approve)["data"]["status"], "approved")
+
+        publish = self.request(
+            "/features/content-hub/action",
+            {"action": "publish", "articleId": article_id, "revisionId": "rev_release"},
+            {
+                "seoTitle": "Flujo editorial completo SEO",
+                "seoDescription": "Prueba completa de publicación editorial.",
+            },
+        )
+        self.assertEqual(publish["statusCode"], 200)
+        self.assertEqual(body(publish)["data"]["path"], "/blog/web/flujo-editorial-completo")
+        self.assertNotIn("publishedBundleKey", publish["body"])
+
+        self.store.roles = ["zoosite-admin"]
+        detail = self.request(
+            "/features/content-hub/read",
+            {"read": "articleDetail", "articleId": article_id},
+            csrf=False,
+        )
+        self.assertEqual(detail["statusCode"], 200)
+        self.assertEqual(body(detail)["data"]["item"]["status"], "published")
+        self.assertEqual(body(detail)["data"]["item"]["latestRevisionId"], "rev_release")
+
+        preview = self.request(
+            "/features/content-hub/read",
+            {"read": "publicBundlePreview", "articleId": article_id},
+            csrf=False,
+        )
+        self.assertEqual(preview["statusCode"], 200)
+        preview_bundle = body(preview)["data"]["bundle"]
+        self.assertEqual(preview_bundle["articleId"], article_id)
+        self.assertEqual(preview_bundle["seo"]["title"], "Flujo editorial completo SEO")
+        self.assertEqual(preview_bundle["components"][0]["type"], "generic-text")
+
+        schedule = self.request(
+            "/features/content-hub/action",
+            {"action": "schedule", "articleId": article_id},
+            {
+                "scheduleAction": "unpublish",
+                "unpublishAt": "2000-01-01T00:00:00Z",
+                "timezone": "UTC",
+            },
+        )
+        self.assertEqual(schedule["statusCode"], 200)
+        self.assertEqual(body(schedule)["data"]["schedule"]["action"], "unpublish")
+
+        scheduled_run = content_hub.lambda_handler({"contentHubTask": "runDueSchedules"}, None)
+        self.assertEqual(scheduled_run["data"]["processed"], 1)
+        article = self.store.get_metadata("HUB#zoosite-main", f"ARTICLE#{article_id}")
+        self.assertEqual(article["status"], "unpublished")
+        self.assertEqual(article["visibility"], "private")
+        self.assertIsNone(self.store.get_metadata("SLUG#test#zoositioweb.com.mx#es", "PATH#/blog/web/flujo-editorial-completo"))
+
+    def test_public_bundle_preview_reads_unpublished_revision_package(self):
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {
+                "title": "Preview sin publicar",
+                "summary": "Resumen preview",
+                "components": [{"id": "articleText", "type": "text"}],
+                "variables": {"headline": "Preview"},
+            },
+        )
+        self.assertEqual(create["statusCode"], 200)
+        article_id = body(create)["data"]["article"]["articleId"]
+
+        preview = self.request(
+            "/features/content-hub/read",
+            {"read": "publicBundlePreview", "articleId": article_id, "revisionId": "rev_001"},
+            {"renderDomain": "zoositioweb.com.mx"},
+            csrf=False,
+        )
+
+        self.assertEqual(preview["statusCode"], 200)
+        bundle = body(preview)["data"]["bundle"]
+        self.assertEqual(bundle["articleId"], article_id)
+        self.assertEqual(bundle["revisionId"], "rev_001")
+        self.assertEqual(bundle["status"], "preview")
+        self.assertEqual(bundle["seo"]["robots"], "noindex,nofollow")
+        self.assertEqual(bundle["components"][0]["id"], "articleText")
+        self.assertFalse(any("/published/" in key for key in self.store.objects))
+
+    def test_editor_cannot_approve_or_unpublish_article(self):
+        self.store.roles = ["zoosite-blog-editor"]
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Permisos ciclo editorial"},
+        )
+        article_id = body(create)["data"]["article"]["articleId"]
+
+        approve = self.request(
+            "/features/content-hub/action",
+            {"action": "approveArticle", "articleId": article_id},
+        )
+        self.assertEqual(approve["statusCode"], 403)
+
+        unpublish = self.request(
+            "/features/content-hub/action",
+            {"action": "unpublishArticle", "articleId": article_id},
+        )
+        self.assertEqual(unpublish["statusCode"], 403)
+
+    def test_status_transition_requires_existing_article(self):
+        response = self.request(
+            "/features/content-hub/action",
+            {"action": "submitReview", "articleId": "art_missing"},
+        )
+        self.assertEqual(response["statusCode"], 404)
+
+    def test_status_transitions_reject_skipped_editorial_steps(self):
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Sin atajos editoriales"},
+        )
+        article_id = body(create)["data"]["article"]["articleId"]
+
+        approve = self.request(
+            "/features/content-hub/action",
+            {"action": "approveArticle", "articleId": article_id},
+        )
+        self.assertEqual(approve["statusCode"], 400)
+        self.assertEqual(body(approve)["error"], "Article must be in review before approval")
+
+        unpublish = self.request(
+            "/features/content-hub/action",
+            {"action": "unpublishArticle", "articleId": article_id},
+        )
+        self.assertEqual(unpublish["statusCode"], 400)
+        self.assertEqual(body(unpublish)["error"], "Article must be published before unpublishing")
+
+        for invalid_review_status in ["review", "approved", "published"]:
+            with self.subTest(status=invalid_review_status):
+                self.set_article_status(article_id, invalid_review_status)
+                review = self.request(
+                    "/features/content-hub/action",
+                    {"action": "submitReview", "articleId": article_id},
+                )
+                self.assertEqual(review["statusCode"], 400)
+                self.assertEqual(body(review)["error"], "Article must be draft or unpublished before review")
+
+    def test_schedule_requires_existing_article_and_safe_publish_time(self):
+        missing = self.request(
+            "/features/content-hub/action",
+            {"action": "schedule", "articleId": "art_missing"},
+            {"publishAt": "2026-07-01T10:00:00Z", "timezone": "America/Mexico_City"},
+        )
+        self.assertEqual(missing["statusCode"], 404)
+
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Programar", "summary": "Programacion segura"},
+        )
+        article_id = body(create)["data"]["article"]["articleId"]
+
+        invalid_time = self.request(
+            "/features/content-hub/action",
+            {"action": "schedule", "articleId": article_id},
+            {"publishAt": "not-a-date", "timezone": "America/Mexico_City"},
+        )
+        self.assertEqual(invalid_time["statusCode"], 400)
+        self.assertEqual(body(invalid_time)["error"], "Invalid publish time")
+
+        invalid_timezone = self.request(
+            "/features/content-hub/action",
+            {"action": "schedule", "articleId": article_id},
+            {"publishAt": "2026-07-01T10:00:00Z", "timezone": "../UTC"},
+        )
+        self.assertEqual(invalid_timezone["statusCode"], 400)
+        self.assertEqual(body(invalid_timezone)["error"], "Invalid timezone")
+
+        not_approved = self.request(
+            "/features/content-hub/action",
+            {"action": "schedule", "articleId": article_id},
+            {"publishAt": "2026-07-01T10:00:00Z", "timezone": "America/Mexico_City"},
+        )
+        self.assertEqual(not_approved["statusCode"], 400)
+        self.assertEqual(body(not_approved)["error"], "Article must be approved before publishing")
+
+    def test_schedule_publish_uses_existing_immutable_revision(self):
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Revision programada", "summary": "Revision fija"},
+        )
+        article_id = body(create)["data"]["article"]["articleId"]
+        self.set_article_status(article_id, "approved")
+
+        schedule = self.request(
+            "/features/content-hub/action",
+            {"action": "schedule", "articleId": article_id},
+            {"publishAt": "2026-07-01T10:00:00Z", "timezone": "America/Mexico_City"},
+        )
+        self.assertEqual(schedule["statusCode"], 200)
+        scheduled = body(schedule)["data"]["schedule"]
+        self.assertEqual(scheduled["revisionId"], "rev_001")
+        self.assertEqual(scheduled["publishAt"], "2026-07-01T10:00:00Z")
+        self.assertEqual(scheduled["timezone"], "America/Mexico_City")
+        self.assertNotIn("createdBy", schedule["body"])
+
+        rejected = self.request(
+            "/features/content-hub/action",
+            {"action": "schedule", "articleId": article_id},
+            {"publishAt": "2026-07-01T10:00:00Z", "revisionId": "rev_missing"},
+        )
+        self.assertEqual(rejected["statusCode"], 404)
+        self.assertEqual(body(rejected)["error"], "Revision not found")
+
+    def test_schedule_list_and_cancel_schedule_are_supported(self):
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Programable"},
+        )
+        article_id = body(create)["data"]["article"]["articleId"]
+        self.set_article_status(article_id, "approved")
+        schedule = self.request(
+            "/features/content-hub/action",
+            {"action": "schedule", "articleId": article_id},
+            {"publishAt": "2026-07-01T10:00:00Z", "timezone": "America/Mexico_City"},
+        )
+        self.assertEqual(schedule["statusCode"], 200)
+        schedule_id = body(schedule)["data"]["schedule"]["scheduleId"]
+
+        read = self.request(
+            "/features/content-hub/read",
+            {"read": "scheduleList", "articleId": article_id},
+            csrf=False,
+        )
+        self.assertEqual(read["statusCode"], 200)
+        self.assertEqual([item["scheduleId"] for item in body(read)["data"]["items"]], [schedule_id])
+
+        cancel = self.request(
+            "/features/content-hub/action",
+            {"action": "cancelSchedule", "articleId": article_id, "scheduleId": schedule_id},
+            {},
+        )
+        self.assertEqual(cancel["statusCode"], 200)
+        self.assertEqual(body(cancel)["data"]["schedule"]["status"], "canceled")
+        self.assertEqual(self.store.query_metadata("SCHEDULE#test", "DUE#"), [])
+
+    def test_schedule_unpublish_validates_unpublish_time_without_revision(self):
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Desprogramar", "summary": "Salida programada"},
+        )
+        article_id = body(create)["data"]["article"]["articleId"]
+
+        unpublished = self.request(
+            "/features/content-hub/action",
+            {"action": "schedule", "articleId": article_id},
+            {
+                "scheduleAction": "unpublish",
+                "unpublishAt": "2026-07-02T18:30:00-06:00",
+                "timezone": "America/Mexico_City",
+            },
+        )
+        self.assertEqual(unpublished["statusCode"], 400)
+        self.assertEqual(body(unpublished)["error"], "Article must be published before unpublishing")
+
+        self.set_article_status(article_id, "published")
+
+        schedule = self.request(
+            "/features/content-hub/action",
+            {"action": "schedule", "articleId": article_id},
+            {
+                "scheduleAction": "unpublish",
+                "unpublishAt": "2026-07-02T18:30:00-06:00",
+                "timezone": "America/Mexico_City",
+            },
+        )
+        self.assertEqual(schedule["statusCode"], 200)
+        scheduled = body(schedule)["data"]["schedule"]
+        self.assertEqual(scheduled["action"], "unpublish")
+        self.assertNotIn("revisionId", scheduled)
+        self.assertEqual(scheduled["unpublishAt"], "2026-07-02T18:30:00-06:00")
+
+        invalid = self.request(
+            "/features/content-hub/action",
+            {"action": "schedule", "articleId": article_id},
+            {"scheduleAction": "unpublish", "publishAt": "2026-07-02T18:30:00Z"},
+        )
+        self.assertEqual(invalid["statusCode"], 400)
+        self.assertEqual(body(invalid)["error"], "unpublishAt is required")
+
+    def test_scheduler_event_publishes_due_schedule_and_removes_it(self):
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Publicacion vencida", "slug": "publicacion-vencida"},
+        )
+        article_id = body(create)["data"]["article"]["articleId"]
+        article = self.store.get_metadata("HUB#zoosite-main", f"ARTICLE#{article_id}")
+        self.set_article_status(article_id, "approved")
+        schedule = self.request(
+            "/features/content-hub/action",
+            {"action": "schedule", "articleId": article_id},
+            {"publishAt": "2000-01-01T00:00:00Z", "timezone": "UTC"},
+        )
+        schedule_data = body(schedule)["data"]["schedule"]
+
+        result = content_hub.lambda_handler({"contentHubTask": "runDueSchedules"}, None)
+
+        self.assertEqual(result["data"]["processed"], 1)
+        self.assertEqual(result["data"]["failed"], 0)
+        published = self.store.get_metadata("HUB#zoosite-main", f"ARTICLE#{article_id}")
+        self.assertEqual(published["status"], "published")
+        slug = self.store.get_metadata("SLUG#test#zoositioweb.com.mx#es", f"PATH#{article['path']}")
+        self.assertEqual(slug["articleId"], article_id)
+        remaining = self.store.query_metadata("SCHEDULE#test", "DUE#")
+        self.assertEqual([item["scheduleId"] for item in remaining], [])
+        self.assertEqual(result["data"]["items"][0]["scheduleId"], schedule_data["scheduleId"])
+
+    def test_scheduler_event_leaves_future_schedule_pending(self):
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Futura", "slug": "futura"},
+        )
+        article_id = body(create)["data"]["article"]["articleId"]
+        self.set_article_status(article_id, "approved")
+        schedule = self.request(
+            "/features/content-hub/action",
+            {"action": "schedule", "articleId": article_id},
+            {"publishAt": "2999-01-01T00:00:00Z", "timezone": "UTC"},
+        )
+        schedule_id = body(schedule)["data"]["schedule"]["scheduleId"]
+
+        result = content_hub.lambda_handler({"contentHubTask": "runDueSchedules"}, None)
+
+        self.assertEqual(result["data"]["processed"], 0)
+        remaining = self.store.query_metadata("SCHEDULE#test", "DUE#")
+        self.assertEqual([item["scheduleId"] for item in remaining], [schedule_id])
+
+    def test_scheduler_event_records_invalid_schedule_without_stopping_batch(self):
+        self.store.put_metadata({
+            "pk": "SCHEDULE#test",
+            "sk": "DUE#bad#ARTICLE#bad#ACTION#publish",
+            "itemFamily": "SCHEDULE",
+            "scheduleId": "sch_bad",
+            "hubId": "zoosite-main",
+            "domain": "zoositioweb.com.mx",
+            "authProfileId": "staff",
+            "articleId": "art_bad",
+            "revisionId": "rev_001",
+            "action": "publish",
+            "scheduledAt": "bad",
+        })
+
+        result = content_hub.lambda_handler({"contentHubTask": "runDueSchedules"}, None)
+
+        self.assertEqual(result["data"]["processed"], 0)
+        self.assertEqual(result["data"]["failed"], 1)
+        self.assertEqual(result["data"]["failures"][0]["scheduleId"], "sch_bad")
+        failed = self.store.get_metadata("SCHEDULE#test", "DUE#bad#ARTICLE#bad#ACTION#publish")
+        self.assertEqual(failed["lastError"], "Invalid schedule time")
+
+    def test_scheduler_event_unpublishes_due_schedule_and_removes_slug(self):
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Retiro vencido", "slug": "retiro-vencido"},
+        )
+        article_id = body(create)["data"]["article"]["articleId"]
+        article = self.store.get_metadata("HUB#zoosite-main", f"ARTICLE#{article_id}")
+        self.set_article_status(article_id, "approved")
+        publish = self.request(
+            "/features/content-hub/action",
+            {"action": "publish", "articleId": article_id, "revisionId": "rev_001"},
+        )
+        self.assertEqual(publish["statusCode"], 200)
+        schedule = self.request(
+            "/features/content-hub/action",
+            {"action": "schedule", "articleId": article_id},
+            {"scheduleAction": "unpublish", "unpublishAt": "2000-01-01T00:00:00Z", "timezone": "UTC"},
+        )
+        self.assertEqual(schedule["statusCode"], 200)
+
+        result = content_hub.lambda_handler({"detail": {"contentHubTask": "runDueSchedules"}}, None)
+
+        self.assertEqual(result["data"]["processed"], 1)
+        unpublished = self.store.get_metadata("HUB#zoosite-main", f"ARTICLE#{article_id}")
+        self.assertEqual(unpublished["status"], "unpublished")
+        self.assertIsNone(self.store.get_metadata("SLUG#test#zoositioweb.com.mx#es", f"PATH#{article['path']}"))
+
+    def test_revision_list_requires_existing_article_and_redacts_actor(self):
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Revisiones", "summary": "Historial seguro"},
+        )
+        article_id = body(create)["data"]["article"]["articleId"]
+
+        read = self.request(
+            "/features/content-hub/read",
+            {"read": "revisionList"},
+            {"articleId": article_id},
+            csrf=False,
+        )
+        self.assertEqual(read["statusCode"], 200)
+        revision = body(read)["data"]["items"][0]
+        self.assertEqual(revision["revisionId"], "rev_001")
+        self.assertNotIn("createdBy", revision)
+        self.assertNotIn("admin-sub", read["body"])
+
+        missing = self.request(
+            "/features/content-hub/read",
+            {"read": "revisionList"},
+            {"articleId": "art_missing"},
+            csrf=False,
+        )
+        self.assertEqual(missing["statusCode"], 404)
+
+    def test_restore_revision_requires_existing_article_and_safe_revision_id(self):
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Restauracion segura", "summary": "Sin fantasma"},
+        )
+        article_id = body(create)["data"]["article"]["articleId"]
+
+        unsafe = self.request(
+            "/features/content-hub/action",
+            {"action": "restoreRevision"},
+            {"articleId": article_id, "revisionId": "../rev_001"},
+        )
+        self.assertEqual(unsafe["statusCode"], 400)
+        self.assertEqual(body(unsafe)["error"], "The content request could not be identified.")
+        self.assertEqual(body(unsafe)["code"], "validation_error")
+
+        missing_article = self.request(
+            "/features/content-hub/action",
+            {"action": "restoreRevision"},
+            {"articleId": "art_missing", "revisionId": "rev_001"},
+        )
+        self.assertEqual(missing_article["statusCode"], 404)
+        self.assertIsNone(self.store.get_metadata("HUB#zoosite-main", "ARTICLE#art_missing"))
+
+        restore = self.request(
+            "/features/content-hub/action",
+            {"action": "restoreRevision"},
+            {"articleId": article_id, "revisionId": "rev_001"},
+        )
+        self.assertEqual(restore["statusCode"], 200)
+        self.assertEqual(body(restore)["data"]["revisionId"], "rev_001")
+
+    def test_public_preview_uses_latest_revision_when_revision_id_is_omitted(self):
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Preview latest"},
+        )
+        article_id = body(create)["data"]["article"]["articleId"]
+        self.set_article_status(article_id, "approved")
+        publish = self.request(
+            "/features/content-hub/action",
+            {"action": "publish", "articleId": article_id},
+            {"path": "/blog/preview-latest"},
+        )
+        self.assertEqual(publish["statusCode"], 200)
+
+        preview = self.request(
+            "/features/content-hub/read",
+            {"read": "publicBundlePreview", "articleId": article_id},
+            csrf=False,
+        )
+        self.assertEqual(preview["statusCode"], 200)
+        self.assertEqual(body(preview)["data"]["bundle"]["articleId"], article_id)
+
+    def test_update_package_and_restore_do_not_expose_storage_keys(self):
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Restaurar"},
+        )
+        article_id = body(create)["data"]["article"]["articleId"]
+        update = self.request(
+            "/features/content-hub/action",
+            {"action": "updatePackage"},
+            {"articleId": article_id, "revisionId": "rev_restore", "components": []},
+        )
+        self.assertEqual(update["statusCode"], 200)
+        self.assertNotIn("packageKey", update["body"])
+
+        restore = self.request(
+            "/features/content-hub/action",
+            {"action": "restoreRevision"},
+            {"articleId": article_id, "revisionId": "rev_restore"},
+        )
+        self.assertEqual(restore["statusCode"], 200)
+        self.assertEqual(body(restore)["data"]["revisionId"], "rev_restore")
+
+    def test_update_package_persists_editable_article_content_in_article_detail(self):
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Contenido enriquecido", "summary": "Resumen editable"},
+        )
+        article_id = body(create)["data"]["article"]["articleId"]
+        article_content = {
+            "ops": [
+                {"insert": "Encabezado editable"},
+                {"insert": "\n", "attributes": {"header": 2}},
+                {"insert": "Cuerpo con "},
+                {"insert": "enfasis", "attributes": {"bold": True}},
+                {"insert": "\n"},
+            ],
+        }
+
+        update = self.request(
+            "/features/content-hub/action",
+            {"action": "updatePackage"},
+            {
+                "articleId": article_id,
+                "revisionId": "rev_rich_text",
+                "articleContent": article_content,
+                "variables": {"draftNote": "visible-safe"},
+                "components": [{"type": "generic-rich-text", "config": {"valueFrom": "articleContent"}}],
+            },
+        )
+        self.assertEqual(update["statusCode"], 200)
+
+        detail = self.request(
+            "/features/content-hub/read",
+            {"read": "articleDetail", "articleId": article_id},
+            csrf=False,
+        )
+        self.assertEqual(detail["statusCode"], 200)
+        item = body(detail)["data"]["item"]
+        self.assertEqual(item["revisionId"], "rev_rich_text")
+        self.assertEqual(item["articleContent"], article_content)
+        self.assertEqual(item["variables"]["articleContent"], article_content)
+        self.assertEqual(item["variables"]["draftNote"], "visible-safe")
+        self.assertEqual(item["components"][0]["type"], "generic-rich-text")
+        self.assertNotIn("packageKey", detail["body"])
+        self.assertNotIn("publishedBundleKey", detail["body"])
+
+    def test_update_package_requires_existing_article(self):
+        update = self.request(
+            "/features/content-hub/action",
+            {"action": "updatePackage"},
+            {"articleId": "art_missing", "revisionId": "rev_missing", "components": []},
+        )
+
+        self.assertEqual(update["statusCode"], 404)
+        self.assertIsNone(self.store.get_metadata("HUB#zoosite-main", "ARTICLE#art_missing"))
+
+    def test_update_package_updates_public_identity_fields_and_taxonomy(self):
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Antes", "summary": "Resumen anterior"},
+        )
+        article_id = body(create)["data"]["article"]["articleId"]
+
+        update = self.request(
+            "/features/content-hub/action",
+            {"action": "updatePackage"},
+            {
+                "articleId": article_id,
+                "revisionId": "rev_update",
+                "title": "Despues",
+                "summary": "Resumen actualizado",
+                "slug": "despues",
+                "path": "/blog/web/despues",
+                "language": "es",
+                "visibility": "public",
+                "category": {"taxonomyId": "cat-web", "slug": "web", "label": "Web"},
+                "tags": "seo, sitios web, seo",
+                "components": [],
+            },
+        )
+
+        self.assertEqual(update["statusCode"], 200)
+        article = self.store.get_metadata("HUB#zoosite-main", f"ARTICLE#{article_id}")
+        self.assertEqual(article["title"], "Despues")
+        self.assertEqual(article["summary"], "Resumen actualizado")
+        self.assertEqual(article["slug"], "despues")
+        self.assertEqual(article["path"], "/blog/web/despues")
+        self.assertEqual(article["visibility"], "public")
+        self.assertEqual(article["categorySlug"], "web")
+        self.assertEqual(article["category"]["taxonomyId"], "cat-web")
+        self.assertEqual([tag["slug"] for tag in article["tags"]], ["seo", "sitios-web"])
+        self.assertIsNotNone(self.store.get_metadata("HUB#zoosite-main", "TAXONOMY#category#cat-web"))
+        self.assertIsNotNone(self.store.get_metadata("HUB#zoosite-main", "TAXONOMY#tag#seo"))
+
+    def test_template_allows_delete_item_for_public_slug_cleanup(self):
+        template = Path("template.yaml").read_text(encoding="utf-8")
+        self.assertIn("dynamodb:DeleteItem", template)
+
+    def test_queue_comment_redacts_private_contact_values(self):
+        response = self.request(
+            "/features/content-hub/action",
+            {"action": "queueComment", "articleId": "art_123"},
+            {"commentText": "Escríbeme a persona@example.com o +52 555 555 5555"},
+        )
+        self.assertEqual(response["statusCode"], 200)
+        queued = body(response)["data"]["comment"]
+        self.assertEqual(queued["status"], "queued")
+        self.assertIn("[redacted-email]", queued["bodyPreview"])
+        self.assertIn("[redacted-phone]", queued["bodyPreview"])
+        self.assertNotIn("persona@example.com", response["body"])
+
+    def test_moderation_queue_read_returns_sanitized_queued_comments(self):
+        queued = self.request(
+            "/features/content-hub/action",
+            {"action": "queueComment", "articleId": "art_123"},
+            {"commentText": "Escríbeme a persona@example.com"},
+        )
+        self.assertEqual(queued["statusCode"], 200)
+
+        read = self.request("/features/content-hub/read", {"read": "moderationQueue"}, csrf=False)
+
+        self.assertEqual(read["statusCode"], 200)
+        items = body(read)["data"]["items"]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["articleId"], "art_123")
+        self.assertEqual(items[0]["status"], "queued")
+        self.assertIn("[redacted-email]", items[0]["bodyPreview"])
+        for forbidden in ["bodyHash", "createdByHash", "persona@example.com", "admin-sub"]:
+            self.assertNotIn(forbidden, read["body"])
+
+    def test_moderate_comment_updates_existing_queue_record(self):
+        queued = self.request(
+            "/features/content-hub/action",
+            {"action": "queueComment", "articleId": "art_123"},
+            {"commentText": "Comentario listo para revisar"},
+        )
+        self.assertEqual(queued["statusCode"], 200)
+        comment_id = body(queued)["data"]["comment"]["commentId"]
+
+        moderated = self.request(
+            "/features/content-hub/action",
+            {"action": "moderateComment", "commentId": comment_id},
+            {"moderationStatus": "approved"},
+        )
+
+        self.assertEqual(moderated["statusCode"], 200)
+        self.assertEqual(body(moderated)["data"]["moderation"]["status"], "approved")
+        moderation_rows = self.store.query_moderation("HUB#zoosite-main", "MODERATION#")
+        self.assertEqual(len(moderation_rows), 1)
+        self.assertEqual(moderation_rows[0]["commentId"], comment_id)
+        self.assertEqual(moderation_rows[0]["articleId"], "art_123")
+        self.assertEqual(moderation_rows[0]["bodyPreview"], "Comentario listo para revisar")
+
+    def test_moderate_comment_requires_existing_comment(self):
+        response = self.request(
+            "/features/content-hub/action",
+            {"action": "moderateComment", "commentId": "cmt_missing"},
+            {"moderationStatus": "approved"},
+        )
+
+        self.assertEqual(response["statusCode"], 404)
+
+    def test_record_interaction_accepts_safe_metadata_and_rejects_pii(self):
+        response = self.request(
+            "/features/content-hub/action",
+            {"action": "recordInteraction", "articleId": "art_123"},
+            {
+                "eventType": "cta",
+                "targetId": "newsletter-button",
+                "value": "click",
+                "path": "/blog/publicar",
+                "metadata": {"placement": "hero", "variant": "a"},
+            },
+        )
+        self.assertEqual(response["statusCode"], 200)
+        interaction = body(response)["data"]["interaction"]
+        self.assertEqual(interaction["metadata"]["placement"], "hero")
+        self.assertNotIn("actorHash", response["body"])
+
+        rejected = self.request(
+            "/features/content-hub/action",
+            {"action": "recordInteraction", "articleId": "art_123"},
+            {"eventType": "form", "metadata": {"email": "persona@example.com"}},
+        )
+        self.assertEqual(rejected["statusCode"], 400)
+        self.assertNotIn("persona@example.com", rejected["body"])
+
+    def test_public_action_records_interactions_without_session_but_requires_allowed_origin(self):
+        article_id = self.published_public_article(interactions={"ctas": {"enabled": True}})
+        payload = {
+            "domain": "zoositioweb.com.mx",
+            "input": {
+                "contentHub": {
+                    "hubId": "zoosite-main",
+                    "action": "recordInteraction",
+                    "articleId": article_id,
+                },
+                "eventType": "cta_click",
+                "targetId": "primary_cta",
+                "path": "/blog/web/public",
+                "metadata": {"placement": "hero"},
+            },
+        }
+        response = content_hub.lambda_handler(event(
+            "/features/content-hub/public-action",
+            payload,
+            csrf=False,
+            cookies=[],
+            headers={"origin": "https://zoositioweb.com.mx", "user-agent": "unit-test"},
+        ), None)
+
+        self.assertEqual(response["statusCode"], 200)
+        interaction = body(response)["data"]["interaction"]
+        self.assertEqual(interaction["eventType"], "cta")
+        self.assertEqual(interaction["articleId"], article_id)
+        self.assertNotIn("actorHash", response["body"])
+        self.assertEqual(len([key for key in self.store.interactions if key[1].startswith("INTERACTION#")]), 1)
+
+        forbidden_action = content_hub.lambda_handler(event(
+            "/features/content-hub/public-action",
+            {
+                "domain": "zoositioweb.com.mx",
+                "input": {
+                    "contentHub": {"hubId": "zoosite-main", "action": "queueComment", "articleId": article_id},
+                    "commentText": "Necesita sesión",
+                },
+            },
+            csrf=False,
+            cookies=[],
+            headers={"origin": "https://zoositioweb.com.mx"},
+        ), None)
+        self.assertEqual(forbidden_action["statusCode"], 403)
+
+        forbidden_origin = content_hub.lambda_handler(event(
+            "/features/content-hub/public-action",
+            payload,
+            csrf=False,
+            cookies=[],
+            headers={"origin": "https://evil.example"},
+        ), None)
+        self.assertEqual(forbidden_origin["statusCode"], 403)
+
+    def published_public_article(self, *, interactions=None):
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Interaccion publica", "summary": "Articulo publico"},
+        )
+        article_id = body(create)["data"]["article"]["articleId"]
+        self.set_article_status(article_id, "approved")
+        publish = self.request(
+            "/features/content-hub/action",
+            {"action": "publish", "articleId": article_id, "revisionId": "rev_001"},
+            {"path": f"/blog/web/{article_id}"},
+        )
+        self.assertEqual(publish["statusCode"], 200)
+        if interactions is not None:
+            self.store.update_metadata("HUB#zoosite-main", f"ARTICLE#{article_id}", {"interactions": interactions})
+        return article_id
+
+    def public_interaction(self, article_id, *, event_type="cta_click", target_id="primary_cta"):
+        payload = {
+            "domain": "zoositioweb.com.mx",
+            "input": {
+                "contentHub": {
+                    "hubId": "zoosite-main",
+                    "action": "recordInteraction",
+                    "articleId": article_id,
+                },
+                "eventType": event_type,
+                "targetId": target_id,
+                "path": "/blog/web/public",
+                "metadata": {"placement": "hero"},
+            },
+        }
+        return content_hub.lambda_handler(event(
+            "/features/content-hub/public-action",
+            payload,
+            csrf=False,
+            cookies=[],
+            headers={"origin": "https://zoositioweb.com.mx", "user-agent": "unit-test"},
+        ), None)
+
+    def test_public_action_rejects_missing_unpublished_private_and_policy_disabled_articles(self):
+        missing = self.public_interaction("art_missing")
+        self.assertEqual(missing["statusCode"], 404)
+        self.assertNotIn("actorHash", missing["body"])
+        self.assertNotIn("RATE#", json.dumps(self.store.interactions))
+
+        draft_article = self.published_public_article()
+        self.store.update_metadata("HUB#zoosite-main", f"ARTICLE#{draft_article}", {"status": "draft"})
+        unpublished = self.public_interaction(draft_article)
+        self.assertEqual(unpublished["statusCode"], 403)
+
+        private_article = self.published_public_article()
+        self.store.update_metadata("HUB#zoosite-main", f"ARTICLE#{private_article}", {"visibility": "private"})
+        private = self.public_interaction(private_article)
+        self.assertEqual(private["statusCode"], 403)
+
+        disabled_article = self.published_public_article(interactions={"ctas": {"enabled": False}})
+        disabled = self.public_interaction(disabled_article)
+        self.assertEqual(disabled["statusCode"], 403)
+
+    def test_public_action_accepts_enabled_interactions_and_rate_limits_duplicates(self):
+        article_id = self.published_public_article(interactions={"ctas": {"enabled": True}})
+
+        first = self.public_interaction(article_id)
+        second = self.public_interaction(article_id)
+
+        self.assertEqual(first["statusCode"], 200)
+        self.assertEqual(second["statusCode"], 429)
+        response_text = first["body"] + second["body"]
+        for forbidden in ["actorHash", "RATE#", "publishedBundleKey", "bucket", "table"]:
+            self.assertNotIn(forbidden, response_text)
+        self.assertEqual(len([key for key in self.store.interactions if key[1].startswith("INTERACTION#")]), 1)
+
+    def test_created_articles_publish_safe_public_interaction_defaults(self):
+        article_id = self.published_public_article()
+        article = self.store.get_metadata("HUB#zoosite-main", f"ARTICLE#{article_id}")
+
+        self.assertTrue(article["interactions"]["reactions"]["enabled"])
+        bundle = next(item for item in self.store.objects.values() if item.get("articleId") == article_id)
+        self.assertTrue(bundle["interactions"]["reactions"]["enabled"])
+        reaction = self.public_interaction(article_id, event_type="reaction", target_id="useful")
+        self.assertEqual(reaction["statusCode"], 200)
+
+    def test_blog_analyst_can_read_aggregated_analytics_without_raw_events(self):
+        create = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Analíticas del blog", "category": "web"},
+        )
+        self.assertEqual(create["statusCode"], 200)
+        article_id = body(create)["data"]["article"]["articleId"]
+
+        for event_type in ["view", "readProgress", "cta_click", "like", "share", "assetDownload", "form"]:
+            response = self.request(
+                "/features/content-hub/action",
+                {"action": "recordInteraction", "articleId": article_id},
+                {
+                    "eventType": event_type,
+                    "targetId": "hero",
+                    "metadata": {"placement": "hero"},
+                },
+            )
+            self.assertEqual(response["statusCode"], 200)
+            if event_type == "cta_click":
+                self.assertEqual(body(response)["data"]["interaction"]["eventType"], "cta")
+
+        other = self.request(
+            "/features/content-hub/action",
+            {"action": "createArticle"},
+            {"title": "Otra categoria", "category": "operacion"},
+        )
+        self.assertEqual(other["statusCode"], 200)
+        other_article_id = body(other)["data"]["article"]["articleId"]
+        other_event = self.request(
+            "/features/content-hub/action",
+            {"action": "recordInteraction", "articleId": other_article_id},
+            {"eventType": "view"},
+        )
+        self.assertEqual(other_event["statusCode"], 200)
+
+        comment = self.request(
+            "/features/content-hub/action",
+            {"action": "queueComment", "articleId": article_id},
+            {"commentText": "Comentario para moderar"},
+        )
+        self.assertEqual(comment["statusCode"], 200)
+
+        self.store.roles = ["zoosite-blog-analyst"]
+        read = self.request("/features/content-hub/read", {"read": "analyticsSummary"}, csrf=False)
+        self.assertEqual(read["statusCode"], 200)
+        item = next(entry for entry in body(read)["data"]["items"] if entry["articleId"] == article_id)
+        self.assertEqual(item["articleId"], article_id)
+        self.assertEqual(item["views"], 1)
+        self.assertEqual(item["readProgress"], 1)
+        self.assertEqual(item["ctaClicks"], 1)
+        self.assertEqual(item["reactions"], 1)
+        self.assertEqual(item["shares"], 1)
+        self.assertEqual(item["assetDownloads"], 1)
+        self.assertEqual(item["forms"], 1)
+        self.assertEqual(item["comments"], 1)
+        self.assertNotIn("metadata", read["body"])
+        self.assertNotIn("actorHash", read["body"])
+        self.assertNotIn("admin-sub", read["body"])
+
+        filtered = self.request(
+            "/features/content-hub/read",
+            {"read": "analyticsSummary"},
+            {"articleId": article_id, "category": "web"},
+            csrf=False,
+        )
+        self.assertEqual(filtered["statusCode"], 200)
+        filtered_items = body(filtered)["data"]["items"]
+        self.assertEqual([entry["articleId"] for entry in filtered_items], [article_id])
+        self.assertEqual(filtered_items[0]["ctaClicks"], 1)
+
+        invalid_date = self.request(
+            "/features/content-hub/read",
+            {"read": "analyticsSummary"},
+            {"from": "not-a-date"},
+            csrf=False,
+        )
+        self.assertEqual(invalid_date["statusCode"], 400)
+        self.assertIn("Invalid analytics date filter", invalid_date["body"])
 
     def test_media_upload_accepts_public_metadata_without_signed_url(self):
         response = self.request(
@@ -273,6 +1982,50 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertEqual(response["statusCode"], 200)
         self.assertEqual(body(response)["data"]["asset"]["kind"], "image")
 
+    def test_asset_list_read_returns_sanitized_media_metadata(self):
+        upload = self.request(
+            "/features/content-hub/action",
+            {"action": "uploadAsset"},
+            {
+                "fileName": "foto.png",
+                "mimeType": "image/png",
+                "base64": base64.b64encode(b"asset").decode("ascii"),
+                "title": "Foto publica",
+                "alt": "Foto del articulo",
+            },
+        )
+        self.assertEqual(upload["statusCode"], 200)
+
+        read = self.request("/features/content-hub/read", {"read": "assetList"}, csrf=False)
+
+        self.assertEqual(read["statusCode"], 200)
+        items = body(read)["data"]["items"]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["kind"], "image")
+        self.assertEqual(items[0]["fileName"], "foto.png")
+        self.assertEqual(items[0]["title"], "Foto publica")
+        self.assertEqual(items[0]["alt"], "Foto del articulo")
+        for forbidden in ["objectKey", "createdBy", "admin-sub", "content-hubs/test"]:
+            self.assertNotIn(forbidden, read["body"])
+
+    def test_media_upload_accepts_browser_upload_bridge_data_base64(self):
+        response = self.request(
+            "/features/content-hub/action",
+            {"action": "uploadAsset"},
+            {
+                "upload": {
+                    "name": "foto.png",
+                    "mimeType": "image/png",
+                    "dataBase64": base64.b64encode(b"asset").decode("ascii"),
+                },
+                "metadata": {"alt": "Foto del editor"},
+            },
+        )
+        self.assertEqual(response["statusCode"], 200)
+        asset = body(response)["data"]["asset"]
+        self.assertEqual(asset["kind"], "image")
+        self.assertEqual(asset["fileName"], "foto.png")
+
     def test_media_upload_rejects_signed_url(self):
         response = self.request(
             "/features/content-hub/action",
@@ -285,6 +2038,27 @@ class ContentHubHandlerTests(unittest.TestCase):
         )
         self.assertEqual(response["statusCode"], 400)
         self.assertNotIn("X-Amz-Signature", response["body"])
+
+
+class ContentHubTemplateTests(unittest.TestCase):
+    def test_public_action_route_is_declared_in_api_gateway(self):
+        template = Path(__file__).resolve().parents[1].joinpath("template.yaml").read_text(encoding="utf-8")
+
+        self.assertIn("PublicAction:", template)
+        self.assertIn("OptionsPublicAction:", template)
+        self.assertIn("Method: POST", template)
+        self.assertIn("Method: OPTIONS", template)
+        self.assertIn("Path: /features/content-hub/public-action", template)
+
+    def test_due_schedule_is_explicit_eventbridge_rule(self):
+        template = Path(__file__).resolve().parents[1].joinpath("template.yaml").read_text(encoding="utf-8")
+
+        self.assertIn("DueSchedulesRule:", template)
+        self.assertIn("Type: AWS::Events::Rule", template)
+        self.assertIn("ScheduleExpression: rate(5 minutes)", template)
+        self.assertIn("DueSchedulesPermission:", template)
+        self.assertIn("Principal: events.amazonaws.com", template)
+        self.assertNotIn("Type: Schedule", template)
 
 
 if __name__ == "__main__":

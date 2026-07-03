@@ -26,12 +26,19 @@ Parameters:
       - INFO
       - WARNING
       - ERROR
+  FunctionMemorySize:
+    Type: Number
+    Default: 512
+    MinValue: 256
+    MaxValue: 1024
+    Description: Lambda memory in MB. Higher memory gives more CPU for the boto3/DynamoDB cold read path.
 
 Globals:
   Function:
     Runtime: python3.13
     Timeout: 30
-    MemorySize: 256
+    MemorySize:
+      Ref: FunctionMemorySize
     Tracing: PassThrough
 
 Resources:
@@ -109,6 +116,9 @@ Resources:
         PointInTimeRecoveryEnabled: true
       SSESpecification:
         SSEEnabled: true
+      TimeToLiveSpecification:
+        AttributeName: expiresAtEpoch
+        Enabled: true
       AttributeDefinitions:
         - AttributeName: pk
           AttributeType: S
@@ -163,6 +173,7 @@ Resources:
               - Effect: Allow
                 Action:
                   - dynamodb:GetItem
+                  - dynamodb:DeleteItem
                   - dynamodb:PutItem
                   - dynamodb:Query
                   - dynamodb:UpdateItem
@@ -235,6 +246,13 @@ Resources:
               Ref: ContentHubApi
             Method: POST
             Path: /features/content-hub/action
+        PublicAction:
+          Type: HttpApi
+          Properties:
+            ApiId:
+              Ref: ContentHubApi
+            Method: POST
+            Path: /features/content-hub/public-action
         OptionsRead:
           Type: HttpApi
           Properties:
@@ -249,6 +267,40 @@ Resources:
               Ref: ContentHubApi
             Method: OPTIONS
             Path: /features/content-hub/action
+        OptionsPublicAction:
+          Type: HttpApi
+          Properties:
+            ApiId:
+              Ref: ContentHubApi
+            Method: OPTIONS
+            Path: /features/content-hub/public-action
+
+  DueSchedulesRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name:
+        Fn::Sub: ${AWS::StackName}-DueScheduleRunner
+      ScheduleExpression: rate(5 minutes)
+      State: ENABLED
+      Targets:
+        - Arn:
+            Fn::GetAtt:
+              - ContentHubFunction
+              - Arn
+          Id: ContentHubFunctionDueSchedulesTarget
+          Input: '{"contentHubTask":"runDueSchedules"}'
+
+  DueSchedulesPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName:
+        Ref: ContentHubFunction
+      Principal: events.amazonaws.com
+      SourceArn:
+        Fn::GetAtt:
+          - DueSchedulesRule
+          - Arn
 
 Outputs:
   ApiEndpoint:
@@ -279,4 +331,3 @@ Outputs:
     Description: Content hub package bucket name.
     Value:
       Ref: ContentHubPackagesBucket
-
