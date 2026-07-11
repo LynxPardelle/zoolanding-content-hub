@@ -1,13 +1,27 @@
-# Instructions
+# Zoolanding Content Hub Agent Guide
 
-## Accuracy
-- Never guess, fabricate, or fill in information you do not have.
-- When presenting data from tools or external sources, report exactly what was returned.
-- If a tool call fails or returns no results, say so.
-- Proactively flag any security or vulnerability concerns introduced by a requested change or activity.
+This repository owns the generic serverless BFF for protected Zoolanding content authoring.
 
-## Project
-This repository owns the generic serverless content-hub BFF for Zoolanding protected content authoring flows.
+## Read only what the task needs
 
-Read `Codex.md` and `README.md` before editing.
+- Start with [README.md](README.md) for the current contract, endpoints, release path, and local checks.
+- For request handling, authorization, editorial lifecycle, or public projections, inspect [lambda_function.py](lambda_function.py) and the matching tests in [tests/test_content_hub_handler.py](tests/test_content_hub_handler.py).
+- For IAM, environment inputs, schedules, or deployment shape, inspect [template.yaml](template.yaml), [samconfig.toml](samconfig.toml), and [.github/workflows/](.github/workflows/).
+- For cross-repository ownership and shared contracts, use the canonical hub [repository map](https://github.com/LynxPardelle/zoolandingpage/blob/main/docs/repository-map.md) and [content-hub package contract](https://github.com/LynxPardelle/zoolandingpage/blob/main/docs/api-driven-config/18-content-hub-article-packages.md).
+- Open [changelog/](changelog/) only when prior implementation, QA, or release history is relevant. `Codex.md` is a compatibility pointer, not a changelog.
 
+## Non-negotiable boundaries
+
+- Accept only allowlisted public identifiers, actions, content, locale, and safe form fields. Derive environment policy server-side and validate domain, auth profile, hub, tenant, and environment scope; the browser must never choose policy, tables, buckets, or storage prefixes.
+- Protected reads/actions require the auth-admin HttpOnly session and an approved enabled user. Mutations also require cookie/header/stored-hash CSRF agreement. Enforce explicit action permissions; wildcard permissions are invalid and UI groups are hints only.
+- `public-action` is limited to sanitized interaction writes. Fail closed unless origin, published/public article, published bundle, event policy, and rate limit all pass. Public comments/forms are not authorized by this surface.
+- Preserve `draft|unpublished -> review -> approved -> published -> unpublished` transitions. Schedules pin immutable revisions; unpublish/archive keep bundle and revision history.
+- Browser responses expose only allowlisted projections. Never return secrets, config values, table/bucket/object keys, signed URLs, actor identifiers, raw interaction/comment/form data, private contact data, or parser/internal error details.
+- Keep release order `feature -> dev -> test -> main`. Pushes to `dev`, `test`, or `main` deploy, so do not merge or deploy without explicit authorization.
+
+## Verification and records
+
+- Verify claims against repository or tool evidence; never guess or hide failed/empty checks, and flag security risk.
+- Run `python -m unittest discover -s tests -p "test_*.py"`, `pip-audit -r requirements.txt`, `sam validate`, and `actionlint` when available; report unavailable tools exactly.
+- Put chronology in [changelog/](changelog/), reusable current guidance in `AGENTS.md` or `README.md`, and temporary plans/evidence in ignored `.superpowers/`.
+- Never store credentials, tokens, raw environment values, signed URLs, private customer data, or other PII in documentation or logs.
