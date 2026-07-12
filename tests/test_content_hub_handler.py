@@ -2041,6 +2041,21 @@ class ContentHubHandlerTests(unittest.TestCase):
 
 
 class ContentHubTemplateTests(unittest.TestCase):
+    def test_promotion_guard_routes_github_context_through_environment(self):
+        workflow = Path(__file__).resolve().parents[1].joinpath(
+            ".github", "workflows", "ci.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("EVENT_NAME: ${{ github.event_name }}", workflow)
+        self.assertIn("BASE_REF: ${{ github.base_ref }}", workflow)
+        self.assertIn("HEAD_REF: ${{ github.head_ref }}", workflow)
+        self.assertIn('if [[ "$EVENT_NAME" == "pull_request" ]]', workflow)
+        self.assertIn('base="$BASE_REF"', workflow)
+        self.assertIn('head="$HEAD_REF"', workflow)
+        self.assertNotIn('"${{ github.event_name }}"', workflow)
+        self.assertNotIn('"${{ github.base_ref }}"', workflow)
+        self.assertNotIn('"${{ github.head_ref }}"', workflow)
+
     def test_public_action_route_is_declared_in_api_gateway(self):
         template = Path(__file__).resolve().parents[1].joinpath("template.yaml").read_text(encoding="utf-8")
 
