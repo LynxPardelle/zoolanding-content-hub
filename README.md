@@ -4,6 +4,14 @@ Generic serverless BFF for Zoolanding content hub reads and authoring mutations.
 
 It supports draft-configurable blog/content workflows without putting storage, policy, or authorization material in public `site-config.json`.
 
+## Repository Guide
+
+- Read [AGENTS.md](AGENTS.md) first, then open only the files its task router identifies.
+- Runtime, lifecycle, and authorization live in [lambda_function.py](lambda_function.py), with contract coverage in [tests/test_content_hub_handler.py](tests/test_content_hub_handler.py).
+- Infrastructure and release behavior live in [template.yaml](template.yaml), [samconfig.toml](samconfig.toml), and [.github/workflows/](.github/workflows/).
+- Historical implementation and release evidence is opt-in under [changelog/](changelog/); [Codex.md](Codex.md) remains only a compatibility pointer.
+- Cross-repository ownership is defined by the canonical hub [documentation index](https://github.com/LynxPardelle/zoolandingpage/blob/main/docs/README.md), [repository map](https://github.com/LynxPardelle/zoolandingpage/blob/main/docs/repository-map.md), [article-package contract](https://github.com/LynxPardelle/zoolandingpage/blob/main/docs/api-driven-config/18-content-hub-article-packages.md), and [protected-feature contract](https://github.com/LynxPardelle/zoolandingpage/blob/main/docs/api-driven-config/19-protected-feature-contract.md).
+
 ## Endpoints
 
 - `POST /features/content-hub/read`
@@ -87,7 +95,7 @@ This is an operational audit trail using the existing versioned S3 bucket. It is
 - The SAM schedule event runs due publish/unpublish items every 5 minutes. A bad schedule row records `lastError` on that row without stopping the rest of the due batch.
 - DynamoDB-backed list reads page through all query pages internally instead of silently truncating at the first 200 metadata rows.
 - `revisionList` and `restoreRevision` require safe existing article/revision ids and never return actor identifiers or storage keys to the browser.
-- `queueComment` and `recordInteraction` remain protected, authenticated, and CSRF-checked actions in this BFF. Public unauthenticated comments, likes, CTA clicks, or form submissions should use a separate public ingestion surface with its own abuse controls; this BFF depends on auth-admin sessions by design.
+- `queueComment` remains protected, authenticated, and CSRF-checked. `recordInteraction` is also available through the narrow `public-action` route only after its origin, article, event policy, and rate-limit checks; that route never accepts comments or forms.
 - `moderateComment` requires an existing queued moderation record and replaces the prior status row for that comment, preserving the safe preview without duplicating queue entries.
 - Interaction metadata rejects private fields and obvious email/phone values. Comment queue previews redact obvious email and phone values and do not return raw private contact data.
 
@@ -101,7 +109,7 @@ This repo follows the Zoolanding promotion graph:
 
 Required GitHub environment inputs:
 
-- `CONTENT_HUB_CONFIG_JSON_BASE64` secret: non-secret compact JSON policy. It must not contain credentials or refs.
+- `CONTENT_HUB_CONFIG_JSON_BASE64` secret: server-only compact JSON policy. It must not contain credentials or secret references, and its value must never be copied or logged.
 - `AUTH_SESSION_TABLE_NAME` variable.
 - `AUTH_USER_STATE_TABLE_NAME` variable.
 - `AWS_ROLE_ARN` variable.
