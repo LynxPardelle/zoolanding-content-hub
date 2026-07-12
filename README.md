@@ -1,5 +1,20 @@
 # Zoolanding Content Hub
 
+<!-- zoolanding-hub-routing:start -->
+## Zoolanding Knowledge Router
+
+Shared procedures are routed through the Zoolandingpage hub. Start with [AGENTS.md](AGENTS.md) and open only the document needed for the current task.
+
+| Task | Read |
+| --- | --- |
+| Article package contract | [docs/api-driven-config/18-content-hub-article-packages.md](https://github.com/LynxPardelle/zoolandingpage/blob/main/docs/api-driven-config/18-content-hub-article-packages.md) |
+| Protected feature contract | [docs/api-driven-config/19-protected-feature-contract.md](https://github.com/LynxPardelle/zoolandingpage/blob/main/docs/api-driven-config/19-protected-feature-contract.md) |
+| Draft lifecycle and publication | [docs/11-draft-lifecycle.md](https://github.com/LynxPardelle/zoolandingpage/blob/main/docs/11-draft-lifecycle.md) |
+| Fleet ownership | [docs/repository-map.md](https://github.com/LynxPardelle/zoolandingpage/blob/main/docs/repository-map.md) |
+
+Critical repository-specific safety, deployment, and rollback rules remain local.
+<!-- zoolanding-hub-routing:end -->
+
 Generic serverless BFF for Zoolanding content hub reads and authoring mutations.
 
 It supports draft-configurable blog/content workflows without putting storage, policy, or authorization material in public `site-config.json`.
