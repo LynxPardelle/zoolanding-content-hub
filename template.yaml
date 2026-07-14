@@ -5,9 +5,8 @@ Description: Zoolanding generic content hub BFF for protected content authoring 
 Parameters:
   EnvironmentName:
     Type: String
-    Default: dev
+    Default: test
     AllowedValues:
-      - dev
       - test
       - prod
   ContentHubConfigJsonBase64:
