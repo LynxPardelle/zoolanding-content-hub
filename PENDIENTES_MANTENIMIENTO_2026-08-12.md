@@ -9,6 +9,27 @@ No hay código pendiente por portar desde la rama histórica ni desde el stash l
 - La prueba `test_public_bundle_preview_reads_unpublished_revision_package` pasa tanto en el stash aplicado sobre su commit padre como en el `origin/dev` actual.
 - La suite completa detectó que Windows no aporta una base IANA a `zoneinfo`; se agregó la dependencia oficial `tzdata` para que la validación de zonas horarias y las pruebas sean portables sin relajar la validación de seguridad.
 
+## Ramas históricas adicionales revisadas
+
+Tampoco deben publicarse o mezclarse directamente estas ramas locales antiguas:
+
+- `codex/content-hub-article-metadata-safety` tiene dos commits que no son
+  alcanzables desde una ref remota por SHA. El primero (`1af56d2`) ya tiene un
+  árbol equivalente publicado. El segundo (`80d10e7`) partía de una base 99
+  commits anterior a `origin/dev`; su intención —persistir slug, categoría,
+  etiquetas, ruta y taxonomía— quedó integrada y ampliada por `924ee15` y los
+  cambios posteriores presentes en `origin/dev`. Publicar la rama histórica
+  sólo duplicaría historia y ofrecería una implementación anterior.
+- `codex/content-hub-public-runtime` conserva `860441c`, basado 92 commits antes
+  de `origin/dev`. El flujo vigente ya exige aprobación, valida colisiones de
+  ruta, genera el bundle público centralizado, conserva `publishedBundleKey` y
+  fuerza visibilidad pública con cobertura actual. El parche histórico usa el
+  flujo anterior y su prueba espera una ruta por defecto `blog/blog`; no debe
+  promoverse sobre la implementación vigente.
+
+Esta conclusión se obtuvo comparando los parches, su ancestro, las funciones y
+las pruebas vigentes; no se reescribió ni eliminó ninguna rama local.
+
 ## Estado preservado deliberadamente
 
 - Repositorio raíz `Z:\GitHub\zoolanding-content-hub`: `HEAD` separado y limpio; no se modificó.
