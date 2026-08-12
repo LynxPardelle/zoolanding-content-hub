@@ -135,6 +135,7 @@ The Lambda defaults to 512 MB through the `FunctionMemorySize` SAM parameter. Th
 ## Local Tests
 
 ```powershell
+python -m pip install -r requirements.txt
 python -m unittest discover -s tests -p "test_*.py"
 sam validate
 pip-audit -r requirements.txt
