@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 import service_binding_registry_v2 as registry
+import content_hub_v2_registry_fence as registry_fence
 
 
 TRUSTED_RESOURCE_SCOPE = {
@@ -479,6 +480,20 @@ class ServiceBindingRegistryTemplateTests(unittest.TestCase):
         self.assertIsNotNone(condition_match)
         self.assertIn("Condition: IsTestEnvironment", condition_match.group(0))
 
+    def test_operator_parameter_must_equal_the_exact_local_test_role_arn(self):
+        condition_match = re.search(
+            r"(?ms)^  HasServiceBindingRegistryOperatorRole:.*?(?=^  [A-Za-z0-9]+:|^Resources:)",
+            self.template,
+        )
+        self.assertIsNotNone(condition_match)
+        condition_block = condition_match.group(0)
+        self.assertIn("Ref: ServiceBindingRegistryOperatorRoleArn", condition_block)
+        self.assertIn(
+            "Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-thn-registry-test-operator",
+            condition_block,
+        )
+        self.assertNotIn("- ''", condition_block)
+
     def test_lambda_permission_derives_the_operator_from_the_deployment_account(self):
         permission_match = re.search(
             r"(?ms)^  ServiceBindingRegistryOperatorInvokePermission:.*?(?=^  [A-Za-z0-9]+:|\Z)",
@@ -568,6 +583,58 @@ class ServiceBindingRegistryTemplateTests(unittest.TestCase):
         )
         self.assertIsNotNone(broad_deny)
         self.assertNotIn("dynamodb:GetItem", broad_deny.group(0))
+
+    def test_condition_check_is_limited_to_exact_mutation_roles_key_and_transaction(self):
+        table_match = re.search(
+            r"(?ms)^  ServiceBindingRegistryV2Table:.*?(?=^  [A-Za-z0-9]+:|\Z)",
+            self.template,
+        )
+        self.assertIsNotNone(table_match)
+        table_block = table_match.group(0)
+
+        allow_match = re.search(
+            r"(?ms)- Sid: AllowRegistryConditionCheckForMutationRoles.*?(?=\n\s+- Sid:|\Z)",
+            table_block,
+        )
+        self.assertIsNotNone(allow_match)
+        allow_block = allow_match.group(0)
+        self.assertIn("- dynamodb:ConditionCheckItem", allow_block)
+        self.assertIn(registry_fence.APPROVED_PARTITION_KEY, allow_block)
+        self.assertIn("dynamodb:EnclosingOperation: TransactWriteItems", allow_block)
+        self.assertIn("dynamodb:ReturnValues: NONE", allow_block)
+
+        exact_mutation_roles = (
+            "zoolanding-image-upload-test-ThnImageUploadV2Role",
+            "zoolanding-content-hub-test-ThnContentHubV2AuthoringRole",
+            "zoolanding-content-hub-test-ThnContentHubV2PrivateAssetCollectorRole",
+            "zoolanding-content-hub-test-ThnContentHubV2PublisherRole",
+            "zoolanding-content-hub-test-ThnContentHubV2InvalidationWorkerRole",
+            "zoolanding-content-hub-test-ThnContentHubV2EmergencyWithdrawRole",
+            "zoolanding-content-hub-test-ThnContentHubV2PreparedOrphanCollectorRole",
+        )
+        for role_name in exact_mutation_roles:
+            self.assertIn(f"role/{role_name}", allow_block)
+        for read_only_role in (
+            "zoolanding-auth-admin-test-FunctionRole",
+            "zoolanding-content-hub-test-ThnContentHubV2PublicMediaRole",
+            "zoolanding-api-proxy-test-",
+        ):
+            self.assertNotIn(read_only_role, allow_block)
+
+        for sid in (
+            "DenyRegistryConditionCheckOutsideApprovedMutationRoles",
+            "DenyRegistryConditionCheckOutsideExactBindingKey",
+            "DenyRegistryConditionCheckOutsideTransaction",
+            "DenyRegistryConditionCheckFailureValues",
+        ):
+            deny_match = re.search(
+                rf"(?ms)- Sid: {sid}.*?(?=\n\s+- Sid:|\Z)",
+                table_block,
+            )
+            self.assertIsNotNone(deny_match, sid)
+            self.assertIn("- dynamodb:ConditionCheckItem", deny_match.group(0))
+
+        self.assertNotIn("dynamodb:TransactWriteItems", table_block)
 
     def test_registry_has_no_http_mutation_route(self):
         self.assertNotIn("/service-binding-registry", self.template)

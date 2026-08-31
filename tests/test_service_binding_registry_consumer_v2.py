@@ -48,7 +48,6 @@ class ServiceBindingRegistryConsumerTests(unittest.TestCase):
         return consumer.load_active_service_binding(
             client,
             expected_descriptor=self.expected_descriptor,
-            expected_registry_revision=self.record["registryRevision"],
             trusted_resource_scope=self.trusted_scope,
         )
 
@@ -105,27 +104,34 @@ class ServiceBindingRegistryConsumerTests(unittest.TestCase):
                     consumer.load_active_service_binding(
                         client,
                         expected_descriptor=expected,
-                        expected_registry_revision=self.record["registryRevision"],
                         trusted_resource_scope=self.trusted_scope,
                     )
 
-    def test_registry_revision_must_be_the_expected_positive_integer(self):
-        for revision in (0, -1, True, "1", self.record["registryRevision"] + 1):
+    def test_live_revision_transition_is_followed_without_redeploying_the_consumer(self):
+        client = RecordingDynamoClient(self.record)
+
+        self.assertEqual(self.read(client)["registryRevision"], 1)
+
+        client.item = build_record(
+            registry_definition(
+                activationStatus="active",
+                registryRevision=2,
+            )
+        )
+        self.assertEqual(self.read(client)["registryRevision"], 2)
+        self.assertEqual(len(client.calls), 2)
+        self.assertTrue(all(call["ConsistentRead"] for call in client.calls))
+
+    def test_registry_revision_in_the_authoritative_row_must_be_a_positive_integer(self):
+        for revision in (0, -1, True, "1"):
             with self.subTest(revision=revision):
-                client = RecordingDynamoClient(self.record)
+                client = RecordingDynamoClient({**self.record, "registryRevision": revision})
                 with self.assertRaisesRegex(
                     consumer.RegistryConsumerError,
                     "service binding is unavailable",
                 ):
-                    consumer.load_active_service_binding(
-                        client,
-                        expected_descriptor=self.expected_descriptor,
-                        expected_registry_revision=revision,
-                        trusted_resource_scope=self.trusted_scope,
-                    )
-
-                if type(revision) is not int or revision < 1:
-                    self.assertEqual(client.calls, [])
+                    self.read(client)
+                self.assertEqual(len(client.calls), 1)
 
     def test_expected_descriptor_and_resource_scope_are_closed_inputs(self):
         invalid_inputs = [
@@ -144,7 +150,6 @@ class ServiceBindingRegistryConsumerTests(unittest.TestCase):
                     consumer.load_active_service_binding(
                         client,
                         expected_descriptor=expected,
-                        expected_registry_revision=self.record["registryRevision"],
                         trusted_resource_scope=scope,
                     )
                 self.assertEqual(client.calls, [])

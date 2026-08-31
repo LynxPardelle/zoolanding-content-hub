@@ -88,7 +88,6 @@ class RegistryFenceTests(unittest.TestCase):
             self.client,
             mutation_items=mutation_items or [self.mutation],
             expected_descriptor=self.expected_descriptor,
-            expected_registry_revision=3,
             expected_writer_mode="client-owner",
             trusted_resource_scope=self.scope,
         )
@@ -104,6 +103,7 @@ class RegistryFenceTests(unittest.TestCase):
         self.assertEqual(transaction[1:], [self.mutation])
         check = transaction[0]["ConditionCheck"]
         self.assertEqual(check["TableName"], fence.APPROVED_TABLE_NAME)
+        self.assertNotIn("ReturnValuesOnConditionCheckFailure", check)
         self.assertEqual(
             fence.unmarshal_item(check["Key"]),
             {
@@ -115,6 +115,7 @@ class RegistryFenceTests(unittest.TestCase):
             "activationStatus",
             "writerMode",
             "writerEpoch",
+            "registryRevision",
             "environment",
             "domain",
             "authProfileId",
@@ -122,6 +123,18 @@ class RegistryFenceTests(unittest.TestCase):
             "hubId",
         ):
             self.assertIn(f"#{field}", check["ExpressionAttributeNames"])
+
+    def test_current_revision_is_loaded_and_fenced_without_an_artifact_pin(self):
+        self.client.record["registryRevision"] = 4
+
+        self.execute()
+
+        check = self.client.transact_calls[0]["TransactItems"][0]["ConditionCheck"]
+        values = {
+            name: fence.unmarshal_item({"value": value})["value"]
+            for name, value in check["ExpressionAttributeValues"].items()
+        }
+        self.assertEqual(values[":registryRevision"], 4)
 
     def test_writer_disable_between_read_and_commit_applies_nothing(self):
         def disable_writers(client):
@@ -154,13 +167,12 @@ class RegistryFenceTests(unittest.TestCase):
                         client,
                         mutation_items=[self.mutation],
                         expected_descriptor=self.expected_descriptor,
-                        expected_registry_revision=3,
                         expected_writer_mode=expected_mode,
                         trusted_resource_scope=self.scope,
                     )
                 self.assertEqual(client.transact_calls, [])
 
-    def test_rejects_empty_oversized_or_registry_targeting_mutations(self):
+    def test_rejects_structurally_invalid_mutations_before_registry_read(self):
         invalid_sets = [
             [],
             [self.mutation] * 100,
@@ -171,17 +183,32 @@ class RegistryFenceTests(unittest.TestCase):
 
         for mutation_items in invalid_sets:
             with self.subTest(size=len(mutation_items)):
+                client = InMemoryTransactionalDynamo(self.record)
                 with self.assertRaises(fence.RegistryFenceError):
                     fence.execute_registry_fenced_transaction(
-                        self.client,
+                        client,
                         mutation_items=mutation_items,
                         expected_descriptor=self.expected_descriptor,
-                        expected_registry_revision=3,
                         expected_writer_mode="client-owner",
                         trusted_resource_scope=self.scope,
                     )
-                self.assertEqual(self.client.get_calls, [])
-                self.assertEqual(self.client.transact_calls, [])
+                self.assertEqual(client.get_calls, [])
+                self.assertEqual(client.transact_calls, [])
+
+    def test_rejects_mutations_outside_the_registry_bound_metadata_table(self):
+        client = InMemoryTransactionalDynamo(self.record)
+
+        with self.assertRaises(fence.RegistryFenceError):
+            fence.execute_registry_fenced_transaction(
+                client,
+                mutation_items=[{"Put": {"TableName": "another-table", "Item": {}}}],
+                expected_descriptor=self.expected_descriptor,
+                expected_writer_mode="client-owner",
+                trusted_resource_scope=self.scope,
+            )
+
+        self.assertEqual(len(client.get_calls), 1)
+        self.assertEqual(client.transact_calls, [])
 
 
 if __name__ == "__main__":

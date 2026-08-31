@@ -74,7 +74,6 @@ def load_active_service_binding(
     dynamodb_client: Any,
     *,
     expected_descriptor: Mapping[str, Any],
-    expected_registry_revision: int,
     trusted_resource_scope: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Load and revalidate the one active registry row.
@@ -85,8 +84,6 @@ def load_active_service_binding(
     """
 
     expected = _validate_expected_descriptor(expected_descriptor)
-    if type(expected_registry_revision) is not int or expected_registry_revision < 1:
-        _reject()
     scope = _validate_trusted_resource_scope(trusted_resource_scope)
     try:
         response = dynamodb_client.get_item(
@@ -104,8 +101,6 @@ def load_active_service_binding(
             trusted_resource_scope=scope,
         )
         if item != rebuilt or item.get("activationStatus") != "active":
-            _reject()
-        if item.get("registryRevision") != expected_registry_revision:
             _reject()
         if any(item.get(field) != value for field, value in expected.items()):
             _reject()

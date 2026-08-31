@@ -58,10 +58,9 @@ Conditions:
   HasServiceBindingRegistryOperatorRole:
     Fn::And:
       - Condition: IsTestEnvironment
-      - Fn::Not:
-          - Fn::Equals:
-              - Ref: ServiceBindingRegistryOperatorRoleArn
-              - ''
+      - Fn::Equals:
+          - Ref: ServiceBindingRegistryOperatorRoleArn
+          - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-thn-registry-test-operator
 
 Resources:
   ContentHubApi:
@@ -138,6 +137,78 @@ Resources:
                 ForAllValues:StringEquals:
                   dynamodb:LeadingKeys:
                     - SERVICE_BINDING#test#thn-journal-test-v2
+            - Sid: AllowRegistryConditionCheckForMutationRoles
+              Effect: Allow
+              Principal: '*'
+              Action:
+                - dynamodb:ConditionCheckItem
+              Resource:
+                Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-content-hub-test-ServiceBindingRegistryV2
+              Condition:
+                ArnEquals:
+                  aws:PrincipalArn:
+                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-image-upload-test-ThnImageUploadV2Role
+                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-test-ThnContentHubV2AuthoringRole
+                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-test-ThnContentHubV2PrivateAssetCollectorRole
+                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-test-ThnContentHubV2PublisherRole
+                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-test-ThnContentHubV2InvalidationWorkerRole
+                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-test-ThnContentHubV2EmergencyWithdrawRole
+                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-test-ThnContentHubV2PreparedOrphanCollectorRole
+                ForAllValues:StringEquals:
+                  dynamodb:LeadingKeys:
+                    - SERVICE_BINDING#test#thn-journal-test-v2
+                StringEquals:
+                  dynamodb:EnclosingOperation: TransactWriteItems
+                StringEqualsIfExists:
+                  dynamodb:ReturnValues: NONE
+            - Sid: DenyRegistryConditionCheckOutsideApprovedMutationRoles
+              Effect: Deny
+              Principal: '*'
+              Action:
+                - dynamodb:ConditionCheckItem
+              Resource:
+                Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-content-hub-test-ServiceBindingRegistryV2
+              Condition:
+                ArnNotEquals:
+                  aws:PrincipalArn:
+                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-image-upload-test-ThnImageUploadV2Role
+                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-test-ThnContentHubV2AuthoringRole
+                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-test-ThnContentHubV2PrivateAssetCollectorRole
+                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-test-ThnContentHubV2PublisherRole
+                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-test-ThnContentHubV2InvalidationWorkerRole
+                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-test-ThnContentHubV2EmergencyWithdrawRole
+                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-test-ThnContentHubV2PreparedOrphanCollectorRole
+            - Sid: DenyRegistryConditionCheckOutsideExactBindingKey
+              Effect: Deny
+              Principal: '*'
+              Action:
+                - dynamodb:ConditionCheckItem
+              Resource:
+                Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-content-hub-test-ServiceBindingRegistryV2
+              Condition:
+                ForAllValues:StringNotEquals:
+                  dynamodb:LeadingKeys:
+                    - SERVICE_BINDING#test#thn-journal-test-v2
+            - Sid: DenyRegistryConditionCheckOutsideTransaction
+              Effect: Deny
+              Principal: '*'
+              Action:
+                - dynamodb:ConditionCheckItem
+              Resource:
+                Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-content-hub-test-ServiceBindingRegistryV2
+              Condition:
+                StringNotEqualsIfExists:
+                  dynamodb:EnclosingOperation: TransactWriteItems
+            - Sid: DenyRegistryConditionCheckFailureValues
+              Effect: Deny
+              Principal: '*'
+              Action:
+                - dynamodb:ConditionCheckItem
+              Resource:
+                Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-content-hub-test-ServiceBindingRegistryV2
+              Condition:
+                StringEquals:
+                  dynamodb:ReturnValues: ALL_OLD
             - Sid: DenyRegistryAccessOutsideMutationFunction
               Effect: Deny
               Principal: '*'
@@ -156,7 +227,6 @@ Resources:
                 - dynamodb:Query
                 - dynamodb:Scan
                 - dynamodb:TransactGetItems
-                - dynamodb:TransactWriteItems
                 - dynamodb:UpdateItem
               Resource:
                 Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-content-hub-test-ServiceBindingRegistryV2
@@ -239,7 +309,6 @@ Resources:
                 - dynamodb:PartiQLDelete
                 - dynamodb:PartiQLInsert
                 - dynamodb:PartiQLUpdate
-                - dynamodb:TransactWriteItems
               Resource:
                 Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-content-hub-test-ServiceBindingRegistryV2
 

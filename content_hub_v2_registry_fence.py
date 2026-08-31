@@ -76,6 +76,29 @@ def _validated_mutation_items(value: Any) -> list[dict[str, Any]]:
     return items
 
 
+def _metadata_table_name(record: Mapping[str, Any]) -> str:
+    bindings = record.get("resourceBindings")
+    table_arn = bindings.get("metadataTableArn") if isinstance(bindings, Mapping) else None
+    marker = ":table/"
+    if not isinstance(table_arn, str) or marker not in table_arn:
+        _reject_binding()
+    table_name = table_arn.rsplit(marker, 1)[1]
+    if not table_name or "/" in table_name:
+        _reject_binding()
+    return table_name
+
+
+def _assert_mutations_target_bound_table(
+    items: Sequence[Mapping[str, Any]],
+    record: Mapping[str, Any],
+) -> None:
+    approved_table = _metadata_table_name(record)
+    for candidate in items:
+        operation = next(iter(candidate))
+        if candidate[operation].get("TableName") != approved_table:
+            _reject_binding()
+
+
 def _condition_check(record: Mapping[str, Any]) -> dict[str, Any]:
     names = {f"#{field}": field for field in _FENCED_FIELDS}
     values = {
@@ -99,7 +122,6 @@ def execute_registry_fenced_transaction(
     *,
     mutation_items: Sequence[Mapping[str, Any]],
     expected_descriptor: Mapping[str, Any],
-    expected_registry_revision: int,
     expected_writer_mode: str,
     trusted_resource_scope: Mapping[str, Any],
 ) -> Mapping[str, Any]:
@@ -118,7 +140,6 @@ def execute_registry_fenced_transaction(
         record = load_active_service_binding(
             dynamodb_client,
             expected_descriptor=expected_descriptor,
-            expected_registry_revision=expected_registry_revision,
             trusted_resource_scope=trusted_resource_scope,
         )
     except RegistryConsumerError:
@@ -126,6 +147,7 @@ def execute_registry_fenced_transaction(
 
     if record.get("writerMode") != expected_writer_mode:
         _reject_binding()
+    _assert_mutations_target_bound_table(items, record)
 
     try:
         return dynamodb_client.transact_write_items(
