@@ -1,5 +1,6 @@
 import copy
 import pathlib
+import traceback
 import unittest
 
 
@@ -68,6 +69,16 @@ def current_user(*, purpose="client-owner", version=4, **overrides):
     return value
 
 
+def scoped_record(*, purpose="client-owner", article_id="article-1", **overrides):
+    value = {
+        **{field: REGISTRY[field] for field in authorization.THN_CURRENT_USER_SCOPE},
+        "recordPurpose": purpose,
+        "articleId": article_id,
+    }
+    value.update(overrides)
+    return value
+
+
 class FakeAuthorizationStore:
     def __init__(self, *, session_record=None, user_record=None):
         self.session_record = copy.deepcopy(session_record or session())
@@ -105,10 +116,18 @@ class ContentHubV2AuthorizationTests(unittest.TestCase):
             registry_record=registry,
             now_epoch=1_000,
         )
-        return result, store
+        return result, store, registry
+
+    def final_kwargs(self, store, registry):
+        return {
+            "store": store,
+            "session_id_hash": "a" * 64,
+            "current_registry_record": registry,
+            "now_epoch": 1_000,
+        }
 
     def test_loads_session_and_current_user_strongly_before_authorizing(self):
-        context, store = self.context()
+        context, store, _ = self.context()
 
         self.assertEqual(context.account_purpose, "client-owner")
         self.assertEqual(context.session_version, 4)
@@ -137,6 +156,48 @@ class ContentHubV2AuthorizationTests(unittest.TestCase):
             )
 
         self.assertEqual(len(store.calls), 2)
+
+    def test_provider_failures_are_not_chained_into_authorization_tracebacks(self):
+        class ExplodingStore:
+            def get_session(self, session_id_hash, *, consistent_read):
+                raise RuntimeError("PRIVATE_PROVIDER_SENTINEL")
+
+        with self.assertRaises(
+            authorization.ContentHubV2AuthorizationError
+        ) as caught:
+            authorization.load_authorization_context(
+                ExplodingStore(),
+                session_id_hash="a" * 64,
+                registry_record=REGISTRY,
+                now_epoch=1_000,
+            )
+
+        rendered = "".join(traceback.format_exception(caught.exception))
+        self.assertNotIn("PRIVATE_PROVIDER_SENTINEL", rendered)
+        self.assertTrue(caught.exception.__suppress_context__)
+
+    def test_session_version_change_after_context_load_denies_final_access(self):
+        context, store, registry = self.context()
+        store.user_record["sessionVersion"] = 5
+
+        with self.assertRaises(authorization.ContentHubV2AuthorizationError):
+            authorization.authorize_final_read(
+                context,
+                operation="articleList",
+                records=[scoped_record()],
+                **self.final_kwargs(store, registry),
+            )
+        with self.assertRaises(authorization.ContentHubV2AuthorizationError):
+            authorization.authorize_mutation(
+                context,
+                operation="createArticle",
+                **self.final_kwargs(store, registry),
+            )
+
+        self.assertEqual(
+            [call[0] for call in store.calls],
+            ["session", "current-user"] * 3,
+        )
 
     def test_missing_mismatched_or_expired_session_fields_fail_closed(self):
         invalid_sessions = [
@@ -183,7 +244,7 @@ class ContentHubV2AuthorizationTests(unittest.TestCase):
         for writer_mode in ("disabled", "qa-only", "client-owner"):
             for purpose in ("qa", "client-owner"):
                 with self.subTest(writer_mode=writer_mode, purpose=purpose):
-                    context, _ = self.context(
+                    context, store, registry = self.context(
                         purpose=purpose,
                         writer_mode=writer_mode,
                     )
@@ -192,6 +253,7 @@ class ContentHubV2AuthorizationTests(unittest.TestCase):
                             authorization.authorize_mutation(
                                 context,
                                 operation="createArticle",
+                                **self.final_kwargs(store, registry),
                             ),
                             purpose,
                         )
@@ -202,36 +264,46 @@ class ContentHubV2AuthorizationTests(unittest.TestCase):
                             authorization.authorize_mutation(
                                 context,
                                 operation="createArticle",
+                                **self.final_kwargs(store, registry),
                             )
 
     def test_disabled_mode_allows_valid_reads_but_no_mutation(self):
-        context, _ = self.context(writer_mode="disabled")
-        records = [{"recordPurpose": "client-owner", "articleId": "article-1"}]
+        context, store, registry = self.context(writer_mode="disabled")
+        records = [scoped_record()]
 
         self.assertEqual(
             authorization.authorize_final_read(
                 context,
                 operation="articleList",
                 records=records,
+                **self.final_kwargs(store, registry),
             ),
             records,
         )
         with self.assertRaises(authorization.ContentHubV2AuthorizationError):
-            authorization.authorize_mutation(context, operation="createArticle")
+            authorization.authorize_mutation(
+                context,
+                operation="createArticle",
+                **self.final_kwargs(store, registry),
+            )
 
     def test_list_reads_filter_the_other_purpose_symmetrically(self):
         records = [
-            {"recordPurpose": "client-owner", "articleId": "client"},
-            {"recordPurpose": "qa", "articleId": "qa"},
+            scoped_record(purpose="client-owner", article_id="client"),
+            scoped_record(purpose="qa", article_id="qa"),
         ]
         for purpose in ("qa", "client-owner"):
             with self.subTest(purpose=purpose):
-                context, _ = self.context(purpose=purpose, writer_mode="disabled")
+                context, store, registry = self.context(
+                    purpose=purpose,
+                    writer_mode="disabled",
+                )
                 for operation in ("articleList", "assetList"):
                     visible = authorization.authorize_final_read(
                         context,
                         operation=operation,
                         records=records,
+                        **self.final_kwargs(store, registry),
                     )
                     self.assertEqual(
                         [record["recordPurpose"] for record in visible],
@@ -239,18 +311,19 @@ class ContentHubV2AuthorizationTests(unittest.TestCase):
                     )
 
     def test_missing_record_purpose_fails_the_whole_list_closed(self):
-        context, _ = self.context(writer_mode="disabled")
+        context, store, registry = self.context(writer_mode="disabled")
 
         with self.assertRaises(authorization.ContentHubV2AuthorizationError):
             authorization.authorize_final_read(
                 context,
                 operation="articleList",
-                records=[{"articleId": "unclassified"}],
+                records=[scoped_record(recordPurpose=None)],
+                **self.final_kwargs(store, registry),
             )
 
     def test_direct_detail_and_preview_deny_foreign_purpose(self):
-        context, _ = self.context(writer_mode="disabled")
-        qa_record = {"recordPurpose": "qa", "articleId": "qa-record"}
+        context, store, registry = self.context(writer_mode="disabled")
+        qa_record = scoped_record(purpose="qa", article_id="qa-record")
 
         for operation in ("articleDetail", "publicBundlePreview"):
             with self.subTest(operation=operation):
@@ -259,11 +332,13 @@ class ContentHubV2AuthorizationTests(unittest.TestCase):
                         context,
                         operation=operation,
                         record=qa_record,
+                        record_id="qa-record",
+                        **self.final_kwargs(store, registry),
                     )
 
     def test_update_asset_validate_publish_and_unpublish_deny_qa_record(self):
-        context, _ = self.context()
-        qa_record = {"recordPurpose": "qa", "articleId": "qa-record"}
+        context, store, registry = self.context()
+        qa_record = scoped_record(purpose="qa", article_id="qa-record")
 
         for operation in (
             "updatePackage",
@@ -278,15 +353,51 @@ class ContentHubV2AuthorizationTests(unittest.TestCase):
                         context,
                         operation=operation,
                         record=qa_record,
+                        record_id="qa-record",
+                        **self.final_kwargs(store, registry),
                     )
 
+    def test_same_purpose_record_from_another_scope_is_denied(self):
+        context, store, registry = self.context()
+        foreign_record = scoped_record(tenantId="another-tenant")
+
+        with self.assertRaises(authorization.ContentHubV2AuthorizationError):
+            authorization.authorize_final_read(
+                context,
+                operation="articleDetail",
+                record=foreign_record,
+                record_id="article-1",
+                **self.final_kwargs(store, registry),
+            )
+        with self.assertRaises(authorization.ContentHubV2AuthorizationError):
+            authorization.authorize_mutation(
+                context,
+                operation="publish",
+                record=foreign_record,
+                record_id="article-1",
+                **self.final_kwargs(store, registry),
+            )
+
+    def test_direct_id_mismatch_is_not_authorized(self):
+        context, store, registry = self.context(writer_mode="disabled")
+
+        with self.assertRaises(authorization.ContentHubV2NotFoundError):
+            authorization.authorize_final_read(
+                context,
+                operation="articleDetail",
+                record=scoped_record(article_id="article-2"),
+                record_id="article-1",
+                **self.final_kwargs(store, registry),
+            )
+
     def test_create_stamps_server_purpose_and_rejects_record_override(self):
-        context, _ = self.context()
+        context, store, registry = self.context()
 
         self.assertEqual(
             authorization.authorize_mutation(
                 context,
                 operation="createArticle",
+                **self.final_kwargs(store, registry),
             ),
             "client-owner",
         )
@@ -294,11 +405,12 @@ class ContentHubV2AuthorizationTests(unittest.TestCase):
             authorization.authorize_mutation(
                 context,
                 operation="createArticle",
-                record={"recordPurpose": "client-owner"},
+                record=scoped_record(),
+                **self.final_kwargs(store, registry),
             )
 
     def test_epoch_mode_or_scope_change_before_finalization_denies(self):
-        context, _ = self.context()
+        context, _, _ = self.context()
         changes = [
             {"writerEpoch": 8},
             {"writerMode": "disabled"},
@@ -314,11 +426,20 @@ class ContentHubV2AuthorizationTests(unittest.TestCase):
                     authorization.assert_writer_epoch_current(context, current)
 
     def test_unknown_operations_and_ambiguous_arguments_fail_closed(self):
-        context, _ = self.context(writer_mode="disabled")
+        context, store, registry = self.context(writer_mode="disabled")
         with self.assertRaises(authorization.ContentHubV2AuthorizationError):
-            authorization.authorize_final_read(context, operation="revisionList", records=[])
+            authorization.authorize_final_read(
+                context,
+                operation="revisionList",
+                records=[],
+                **self.final_kwargs(store, registry),
+            )
         with self.assertRaises(authorization.ContentHubV2AuthorizationError):
-            authorization.authorize_mutation(context, operation="archiveArticle")
+            authorization.authorize_mutation(
+                context,
+                operation="archiveArticle",
+                **self.final_kwargs(store, registry),
+            )
 
     def test_v1_dispatch_does_not_import_or_reference_v2_authorization(self):
         root = pathlib.Path(__file__).resolve().parents[1]
@@ -326,7 +447,8 @@ class ContentHubV2AuthorizationTests(unittest.TestCase):
         template = (root / "template.yaml").read_text(encoding="utf-8")
 
         self.assertNotIn("content_hub_v2_authorization", handler)
-        self.assertNotIn("ContentHubV2Authorization", template)
+        self.assertNotIn("content_hub_v2_authorization", template)
+        self.assertNotIn("Path: /features/content-hub-v2", template)
 
 
 if __name__ == "__main__":

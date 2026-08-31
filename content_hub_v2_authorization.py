@@ -33,6 +33,7 @@ _RECORD_MUTATION_OPERATIONS = frozenset(
 )
 _HASH_RE = re.compile(r"^[a-f0-9]{64}$")
 _SAFE_SUBJECT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,255}$")
+_SAFE_RECORD_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
 
 class ContentHubV2AuthorizationError(RuntimeError):
@@ -60,7 +61,9 @@ class AuthorizationContext:
 
 
 def _reject() -> None:
-    raise ContentHubV2AuthorizationError("authorization context is unavailable")
+    raise ContentHubV2AuthorizationError(
+        "authorization context is unavailable"
+    ) from None
 
 
 def _not_found() -> None:
@@ -230,6 +233,15 @@ def assert_record_purpose_visible(
 ) -> None:
     if not isinstance(record, Mapping):
         _reject()
+    expected_scope = {
+        "environment": context.environment,
+        "domain": context.domain,
+        "serviceBindingId": context.service_binding_id,
+        "authProfileId": context.auth_profile_id,
+        "tenantId": context.tenant_id,
+        "hubId": context.hub_id,
+    }
+    _require_record_scope(record, expected_scope)
     record_purpose = record.get("recordPurpose")
     if record_purpose not in ALLOWED_ACCOUNT_PURPOSES:
         _reject()
@@ -237,22 +249,76 @@ def assert_record_purpose_visible(
         _not_found()
 
 
+def _revalidate_context(
+    context: AuthorizationContext,
+    *,
+    store: Any,
+    session_id_hash: str,
+    current_registry_record: Mapping[str, Any],
+    now_epoch: int,
+) -> AuthorizationContext:
+    fresh = load_authorization_context(
+        store,
+        session_id_hash=session_id_hash,
+        registry_record=current_registry_record,
+        now_epoch=now_epoch,
+    )
+    if fresh != context:
+        _reject()
+    return fresh
+
+
+def _assert_record_identity(record: Mapping[str, Any], record_id: Any) -> None:
+    if (
+        not isinstance(record_id, str)
+        or not _SAFE_RECORD_ID_RE.fullmatch(record_id)
+        or record.get("articleId") != record_id
+    ):
+        _not_found()
+
+
 def authorize_final_read(
     context: AuthorizationContext,
     *,
+    store: Any,
+    session_id_hash: str,
+    current_registry_record: Mapping[str, Any],
+    now_epoch: int,
     operation: str,
     record: Mapping[str, Any] | None = None,
     records: Iterable[Mapping[str, Any]] | None = None,
+    record_id: str | None = None,
 ) -> Any:
     """Apply purpose isolation immediately before returning private data."""
 
+    context = _revalidate_context(
+        context,
+        store=store,
+        session_id_hash=session_id_hash,
+        current_registry_record=current_registry_record,
+        now_epoch=now_epoch,
+    )
     if operation in _LIST_READ_OPERATIONS:
-        if record is not None or records is None or isinstance(records, (str, bytes, Mapping)):
+        if (
+            record is not None
+            or record_id is not None
+            or records is None
+            or isinstance(records, (str, bytes, Mapping))
+        ):
             _reject()
         visible = []
         for candidate in records:
             if not isinstance(candidate, Mapping):
                 _reject()
+            expected_scope = {
+                "environment": context.environment,
+                "domain": context.domain,
+                "serviceBindingId": context.service_binding_id,
+                "authProfileId": context.auth_profile_id,
+                "tenantId": context.tenant_id,
+                "hubId": context.hub_id,
+            }
+            _require_record_scope(candidate, expected_scope)
             purpose = candidate.get("recordPurpose")
             if purpose not in ALLOWED_ACCOUNT_PURPOSES:
                 _reject()
@@ -263,6 +329,7 @@ def authorize_final_read(
         if records is not None or record is None:
             _reject()
         assert_record_purpose_visible(context, record)
+        _assert_record_identity(record, record_id)
         return deepcopy(dict(record))
     _reject()
 
@@ -280,21 +347,34 @@ def _writer_mode_allows(context: AuthorizationContext) -> bool:
 def authorize_mutation(
     context: AuthorizationContext,
     *,
+    store: Any,
+    session_id_hash: str,
+    current_registry_record: Mapping[str, Any],
+    now_epoch: int,
     operation: str,
     record: Mapping[str, Any] | None = None,
+    record_id: str | None = None,
 ) -> str | None:
     """Authorize a v2 mutation and derive its server-owned record purpose."""
 
+    context = _revalidate_context(
+        context,
+        store=store,
+        session_id_hash=session_id_hash,
+        current_registry_record=current_registry_record,
+        now_epoch=now_epoch,
+    )
     if not _writer_mode_allows(context):
         _reject()
     if operation == _CREATE_OPERATION:
-        if record is not None:
+        if record is not None or record_id is not None:
             _reject()
         return context.account_purpose
     if operation in _RECORD_MUTATION_OPERATIONS:
         if record is None:
             _reject()
         assert_record_purpose_visible(context, record)
+        _assert_record_identity(record, record_id)
         return None
     _reject()
 
