@@ -36,11 +36,6 @@ Parameters:
     Default: ''
     AllowedPattern: '^$|^arn:(aws|aws-us-gov|aws-cn):iam::[0-9]{12}:role/zoolanding-thn-registry-test-operator$'
     Description: Exact TEST operator/OIDC role ARN allowed to invoke only the private registry mutation Lambda.
-  ApiProxyRegistryV2ReaderRoleArn:
-    Type: String
-    Default: arn:aws:iam::000000000000:role/zoolanding-api-proxy-test-UNCONFIGURED
-    AllowedPattern: '^arn:(aws|aws-us-gov|aws-cn):iam::[0-9]{12}:role/zoolanding-api-proxy-test-[A-Za-z0-9+=,.@_-]{1,64}$'
-    Description: Exact resolved TEST ApiProxyFunctionRole ARN exported by the API Proxy stack.
 
 Globals:
   Function:
@@ -249,8 +244,6 @@ Resources:
                     - Fn::GetAtt:
                         - ServiceBindingRegistryV2MutationRole
                         - Arn
-                    - Ref: ApiProxyRegistryV2ReaderRoleArn
-                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-auth-admin-test-FunctionRole
                     - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-image-upload-test-ThnImageUploadV2Role
                     - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-test-ThnContentHubV2AuthoringRole
                     - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-test-ThnContentHubV2PrivateAssetCollectorRole

@@ -533,18 +533,6 @@ class ServiceBindingRegistryTemplateTests(unittest.TestCase):
             self.assertNotIn(forbidden, role_block)
 
     def test_exact_registry_readers_are_exempted_only_from_get_item_deny(self):
-        parameter_match = re.search(
-            r"(?ms)^  ApiProxyRegistryV2ReaderRoleArn:.*?(?=^  [A-Za-z0-9]+:|^Globals:)",
-            self.template,
-        )
-        self.assertIsNotNone(parameter_match)
-        parameter_block = parameter_match.group(0)
-        self.assertIn(
-            "role/zoolanding-api-proxy-test-",
-            parameter_block,
-        )
-        self.assertNotIn("role/*", parameter_block)
-
         table_match = re.search(
             r"(?ms)^  ServiceBindingRegistryV2Table:.*?(?=^  [A-Za-z0-9]+:|\Z)",
             self.template,
@@ -559,9 +547,7 @@ class ServiceBindingRegistryTemplateTests(unittest.TestCase):
         reader_block = reader_deny.group(0)
         self.assertIn("- dynamodb:GetItem", reader_block)
         self.assertIn("ArnNotEquals:", reader_block)
-        self.assertIn("Ref: ApiProxyRegistryV2ReaderRoleArn", reader_block)
         exact_roles = (
-            "zoolanding-auth-admin-test-FunctionRole",
             "zoolanding-image-upload-test-ThnImageUploadV2Role",
             "zoolanding-content-hub-test-ThnContentHubV2AuthoringRole",
             "zoolanding-content-hub-test-ThnContentHubV2PrivateAssetCollectorRole",
@@ -583,6 +569,21 @@ class ServiceBindingRegistryTemplateTests(unittest.TestCase):
         )
         self.assertIsNotNone(broad_deny)
         self.assertNotIn("dynamodb:GetItem", broad_deny.group(0))
+
+    def test_shared_v1_roles_receive_no_registry_authority(self):
+        self.assertNotIn("ApiProxyRegistryV2ReaderRoleArn", self.template)
+        self.assertNotIn("zoolanding-api-proxy-test-", self.template)
+        self.assertNotIn("zoolanding-auth-admin-test-FunctionRole", self.template)
+
+        table_match = re.search(
+            r"(?ms)^  ServiceBindingRegistryV2Table:.*?(?=^  [A-Za-z0-9]+:|\Z)",
+            self.template,
+        )
+        self.assertIsNotNone(table_match)
+        table_block = table_match.group(0)
+        self.assertNotIn("ApiProxyRegistryV2ReaderRoleArn", table_block)
+        self.assertNotIn("zoolanding-api-proxy-test-", table_block)
+        self.assertNotIn("zoolanding-auth-admin-test-FunctionRole", table_block)
 
     def test_condition_check_is_limited_to_exact_mutation_roles_key_and_transaction(self):
         table_match = re.search(
