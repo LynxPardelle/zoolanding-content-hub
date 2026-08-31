@@ -1,5 +1,8 @@
+import copy
+import re
 import unittest
 
+import service_binding_registry_v2 as registry
 from tests.test_service_binding_registry_v2 import build_record, registry_definition
 
 try:
@@ -8,11 +11,18 @@ except ModuleNotFoundError:
     mutation_lambda = None
 
 
+AUDIT_CONTEXT = {
+    "occurredAt": "2026-08-31T12:00:01.000Z",
+    "requestId": "123e4567-e89b-12d3-a456-426614174001",
+}
+
+
 class RecordingDynamoClient:
     def __init__(self):
         self.calls = []
         self.items = {}
         self.fail_put = False
+        self.transaction_tokens = {}
         self.table_arn = (
             "arn:aws:dynamodb:us-east-1:123456789012:"
             "table/zoolanding-content-hub-test-ServiceBindingRegistryV2"
@@ -28,21 +38,77 @@ class RecordingDynamoClient:
         item = self.items.get((key["pk"], key["sk"]))
         return {"Item": mutation_lambda.marshal_item(item)} if item else {}
 
-    def put_item(self, **kwargs):
-        self.calls.append(("put_item", kwargs))
+    def _matches(self, request, current):
+        if current is None:
+            return False
+        names = request.get("ExpressionAttributeNames", {})
+        values = request.get("ExpressionAttributeValues", {})
+        for name_token, value_token in re.findall(
+            r"(#[A-Za-z0-9]+) = (:[A-Za-z0-9]+)",
+            request.get("ConditionExpression", ""),
+        ):
+            field = names[name_token]
+            expected = mutation_lambda.unmarshal_value(values[value_token])
+            if current.get(field) != expected:
+                return False
+        return True
+
+    def transact_write_items(self, **kwargs):
+        self.calls.append(("transact_write_items", kwargs))
+        token = kwargs["ClientRequestToken"]
+        items = copy.deepcopy(kwargs["TransactItems"])
+        if token in self.transaction_tokens:
+            if self.transaction_tokens[token] == items:
+                return {}
+            raise FakeAwsError("IdempotentParameterMismatchException")
         if self.fail_put:
-            raise FakeAwsError("ConditionalCheckFailedException")
-        item = mutation_lambda.unmarshal_item(kwargs["Item"])
-        key = (item["pk"], item["sk"])
-        if "attribute_not_exists" in kwargs["ConditionExpression"] and key in self.items:
-            raise FakeAwsError("ConditionalCheckFailedException")
-        self.items[key] = item
+            raise FakeAwsError(
+                "TransactionCanceledException",
+                cancellation_reasons=[{"Code": "ConditionalCheckFailed"}],
+            )
+
+        pending = []
+        for action in items:
+            if "ConditionCheck" in action:
+                request = action["ConditionCheck"]
+                key = mutation_lambda.unmarshal_item(request["Key"])
+                current = self.items.get((key["pk"], key["sk"]))
+                if not self._matches(request, current):
+                    raise FakeAwsError(
+                        "TransactionCanceledException",
+                        cancellation_reasons=[{"Code": "ConditionalCheckFailed"}],
+                    )
+            elif "Put" in action:
+                request = action["Put"]
+                item = mutation_lambda.unmarshal_item(request["Item"])
+                key = (item["pk"], item["sk"])
+                if "attribute_not_exists" in request["ConditionExpression"]:
+                    if key in self.items:
+                        raise FakeAwsError(
+                            "TransactionCanceledException",
+                            cancellation_reasons=[{"Code": "ConditionalCheckFailed"}],
+                        )
+                elif not self._matches(request, self.items.get(key)):
+                    raise FakeAwsError(
+                        "TransactionCanceledException",
+                        cancellation_reasons=[{"Code": "ConditionalCheckFailed"}],
+                    )
+                pending.append((key, item))
+            else:
+                raise AssertionError("unexpected transaction action")
+
+        for key, item in pending:
+            self.items[key] = item
+        self.transaction_tokens[token] = items
+        return {}
 
 
 class FakeAwsError(RuntimeError):
-    def __init__(self, code):
+    def __init__(self, code, cancellation_reasons=None):
         super().__init__(code)
         self.response = {"Error": {"Code": code}}
+        if cancellation_reasons is not None:
+            self.response["CancellationReasons"] = cancellation_reasons
 
 
 @unittest.skipIf(mutation_lambda is None, "private registry mutation Lambda is not implemented")
@@ -51,6 +117,13 @@ class RegistryMutationStoreTests(unittest.TestCase):
         self.client = RecordingDynamoClient()
         self.store = mutation_lambda.DynamoDbRegistryStore(self.client)
         self.record = build_record()
+        self.reservation = registry.build_global_hub_reservation(self.record)
+        self.audit = registry.build_registry_audit_record(
+            self.record,
+            operation="reserve",
+            outcome="created",
+            audit_context=AUDIT_CONTEXT,
+        )
 
     def test_store_uses_exact_table_and_strongly_consistent_exact_key_read(self):
         self.client.items[(self.record["pk"], self.record["sk"])] = self.record
@@ -79,15 +152,22 @@ class RegistryMutationStoreTests(unittest.TestCase):
         mutated = dict(self.record)
         mutated["sk"] = "REGISTRY#V1"
         with self.assertRaises(mutation_lambda.RegistryMutationInputError):
-            self.store.create_binding(mutated)
+            self.store.transact_create_binding(mutated, self.reservation, self.audit)
         self.assertEqual(self.client.calls, [])
 
-    def test_reservation_and_update_are_conditional_puts(self):
-        self.store.create_binding(self.record)
+    def test_reservation_and_update_are_atomic_conditioned_transactions(self):
+        self.store.transact_create_binding(self.record, self.reservation, self.audit)
         create_request = self.client.calls[-1][1]
         self.assertEqual(
-            create_request["ConditionExpression"],
-            "attribute_not_exists(#pk) AND attribute_not_exists(#sk)",
+            [next(iter(action)) for action in create_request["TransactItems"]],
+            ["Put", "Put", "Put"],
+        )
+        self.assertTrue(
+            all(
+                action["Put"]["ConditionExpression"]
+                == "attribute_not_exists(#pk) AND attribute_not_exists(#sk)"
+                for action in create_request["TransactItems"]
+            )
         )
 
         expected = {
@@ -100,11 +180,32 @@ class RegistryMutationStoreTests(unittest.TestCase):
             "tenantId": "thehairnarrative-com",
             "authProfileId": "journal-owner",
         }
-        self.store.replace_binding(self.record, expected)
+        updated = dict(self.record)
+        updated["registryRevision"] = 2
+        update_audit = registry.build_registry_audit_record(
+            updated,
+            operation="update",
+            outcome="updated",
+            audit_context={
+                "occurredAt": "2026-08-31T12:00:02.000Z",
+                "requestId": "123e4567-e89b-12d3-a456-426614174002",
+            },
+        )
+        self.store.transact_replace_binding(
+            updated,
+            self.reservation,
+            expected,
+            update_audit,
+        )
         update_request = self.client.calls[-1][1]
-        self.assertIn("#registryRevision = :registryRevision", update_request["ConditionExpression"])
-        self.assertIn("#writerEpoch = :writerEpoch", update_request["ConditionExpression"])
-        self.assertNotIn("UpdateExpression", update_request)
+        self.assertEqual(
+            [next(iter(action)) for action in update_request["TransactItems"]],
+            ["ConditionCheck", "Put", "Put"],
+        )
+        binding_put = update_request["TransactItems"][1]["Put"]
+        self.assertIn("#registryRevision = :registryRevision", binding_put["ConditionExpression"])
+        self.assertIn("#writerEpoch = :writerEpoch", binding_put["ConditionExpression"])
+        self.assertNotIn("UpdateExpression", binding_put)
 
 
 @unittest.skipIf(mutation_lambda is None, "private registry mutation Lambda is not implemented")
@@ -119,7 +220,11 @@ class RegistryMutationHandlerTests(unittest.TestCase):
             "private-sentinel-field": "private-sentinel-value",
         }
 
-        result = mutation_lambda.handle_registry_request(event, self.client)
+        result = mutation_lambda.handle_registry_request(
+            event,
+            self.client,
+            audit_context=AUDIT_CONTEXT,
+        )
 
         self.assertEqual(result, {"ok": False, "error": "registry request rejected"})
         self.assertEqual(self.client.calls, [])
@@ -129,6 +234,7 @@ class RegistryMutationHandlerTests(unittest.TestCase):
         result = mutation_lambda.handle_registry_request(
             {"operation": "reserve", "definition": registry_definition()},
             self.client,
+            audit_context=AUDIT_CONTEXT,
         )
 
         self.assertTrue(result["ok"])
@@ -163,11 +269,16 @@ class RegistryMutationHandlerTests(unittest.TestCase):
             "descriptorSha256",
         ):
             self.assertNotIn(private_field, serialized)
-        self.assertEqual([call[0] for call in self.client.calls], ["describe_table", "get_item", "put_item"])
+        self.assertEqual(
+            [call[0] for call in self.client.calls],
+            ["describe_table", "get_item", "get_item", "transact_write_items"],
+        )
 
     def test_update_requires_closed_concurrency_fields_and_uses_registry_transition(self):
         current = build_record()
         self.client.items[(current["pk"], current["sk"])] = current
+        reservation = registry.build_global_hub_reservation(current)
+        self.client.items[(reservation["pk"], reservation["sk"])] = reservation
         desired = registry_definition(
             descriptorVersionId="test-v2",
             registryRevision=2,
@@ -182,12 +293,18 @@ class RegistryMutationHandlerTests(unittest.TestCase):
                 "expectedWriterEpoch": 1,
             },
             self.client,
+            audit_context=AUDIT_CONTEXT,
         )
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["operation"], "update")
         self.assertEqual(result["registryRevision"], 2)
-        put_request = [request for operation, request in self.client.calls if operation == "put_item"][-1]
+        transaction = [
+            request
+            for operation, request in self.client.calls
+            if operation == "transact_write_items"
+        ][-1]
+        put_request = transaction["TransactItems"][1]["Put"]
         self.assertIn("#registryRevision = :registryRevision", put_request["ConditionExpression"])
         self.assertIn("#writerEpoch = :writerEpoch", put_request["ConditionExpression"])
 
@@ -197,6 +314,7 @@ class RegistryMutationHandlerTests(unittest.TestCase):
         result = mutation_lambda.handle_registry_request(
             {"operation": "reserve", "definition": registry_definition()},
             self.client,
+            audit_context=AUDIT_CONTEXT,
         )
 
         self.assertEqual(result, {"ok": False, "error": "registry request conflict"})

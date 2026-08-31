@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
+from datetime import datetime, timezone
 from typing import Any, Mapping
 
 import service_binding_registry_v2 as registry
@@ -12,6 +14,13 @@ import service_binding_registry_v2 as registry
 APPROVED_TABLE_NAME = "zoolanding-content-hub-test-ServiceBindingRegistryV2"
 APPROVED_PARTITION_KEY = "SERVICE_BINDING#test#thn-journal-test-v2"
 APPROVED_SORT_KEY = "REGISTRY#V2"
+APPROVED_RESERVATION_PARTITION_KEY = "HUB_RESERVATION#thehairnarrative-com-journal"
+APPROVED_RESERVATION_SORT_KEY = "GLOBAL"
+APPROVED_AUDIT_PARTITION_KEY = "REGISTRY_AUDIT#test#thn-journal-test-v2"
+_AUDIT_SORT_KEY_RE = re.compile(
+    r"^EVENT#[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z#"
+    r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+)
 _APPROVED_TABLE_ARN_RE = re.compile(
     r"^arn:(aws|aws-us-gov|aws-cn):dynamodb:([a-z0-9-]+):([0-9]{12}):"
     r"table/zoolanding-content-hub-test-ServiceBindingRegistryV2$"
@@ -30,6 +39,24 @@ _EXPECTED_CONDITIONAL_FIELDS = frozenset(
         "authProfileId",
     }
 )
+_EXPECTED_AUDIT_FIELDS = frozenset(
+    {
+        "pk",
+        "sk",
+        "recordType",
+        "schemaVersion",
+        "operation",
+        "outcome",
+        "occurredAt",
+        "requestId",
+        "registryRevision",
+        "writerEpoch",
+        "ownerDigest",
+        "actorType",
+    }
+)
+_AUDIT_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 
 
 class RegistryMutationInputError(ValueError):
@@ -90,8 +117,24 @@ def _error_code(error: Exception) -> str:
 
 
 def _raise_registry_service_error(error: Exception) -> None:
-    if _error_code(error) in _CONDITIONAL_ERROR_CODES:
+    code = _error_code(error)
+    if code in _CONDITIONAL_ERROR_CODES:
         raise registry.RegistryConditionalWriteFailed() from None
+    if code == "TransactionCanceledException":
+        response = getattr(error, "response", None)
+        reasons = response.get("CancellationReasons") if isinstance(response, Mapping) else None
+        if isinstance(reasons, list) and reasons:
+            reason_codes = []
+            for reason in reasons:
+                if not isinstance(reason, Mapping) or not isinstance(reason.get("Code"), str):
+                    break
+                reason_codes.append(reason["Code"])
+            else:
+                if (
+                    "ConditionalCheckFailed" in reason_codes
+                    and set(reason_codes) <= {"None", "ConditionalCheckFailed"}
+                ):
+                    raise registry.RegistryConditionalWriteFailed() from None
     raise RegistryMutationServiceError("registry service request failed") from None
 
 
@@ -100,6 +143,99 @@ def _require_exact_binding_key(item: Mapping[str, Any], *, closed: bool = False)
         raise RegistryMutationInputError("registry key is invalid")
     if item.get("pk") != APPROVED_PARTITION_KEY or item.get("sk") != APPROVED_SORT_KEY:
         raise RegistryMutationInputError("registry key is invalid")
+
+
+def _require_exact_reservation_key(
+    item: Mapping[str, Any],
+    *,
+    closed: bool = False,
+) -> None:
+    if closed and set(item) != {"pk", "sk"}:
+        raise RegistryMutationInputError("registry key is invalid")
+    if (
+        item.get("pk") != APPROVED_RESERVATION_PARTITION_KEY
+        or item.get("sk") != APPROVED_RESERVATION_SORT_KEY
+    ):
+        raise RegistryMutationInputError("registry key is invalid")
+
+
+def _require_exact_audit_key(item: Mapping[str, Any]) -> None:
+    occurred_at = item.get("occurredAt")
+    request_id = item.get("requestId")
+    try:
+        valid_occurred_at = isinstance(occurred_at, str) and datetime.strptime(
+            occurred_at,
+            "%Y-%m-%dT%H:%M:%S.%fZ",
+        )
+    except ValueError:
+        valid_occurred_at = False
+    operation_outcome = (item.get("operation"), item.get("outcome"))
+    if (
+        set(item) != _EXPECTED_AUDIT_FIELDS
+        or item.get("pk") != APPROVED_AUDIT_PARTITION_KEY
+        or not isinstance(item.get("sk"), str)
+        or not _AUDIT_SORT_KEY_RE.fullmatch(item["sk"])
+        or not valid_occurred_at
+        or not isinstance(request_id, str)
+        or not _AUDIT_REQUEST_ID_RE.fullmatch(request_id)
+        or item["sk"] != f"EVENT#{occurred_at}#{request_id}"
+        or item.get("recordType") != registry.AUDIT_RECORD_TYPE
+        or item.get("schemaVersion") != registry.SCHEMA_VERSION
+        or operation_outcome
+        not in {("reserve", "created"), ("reserve", "idempotent"), ("update", "updated")}
+        or isinstance(item.get("registryRevision"), bool)
+        or not isinstance(item.get("registryRevision"), int)
+        or item["registryRevision"] < 1
+        or isinstance(item.get("writerEpoch"), bool)
+        or not isinstance(item.get("writerEpoch"), int)
+        or item["writerEpoch"] < 1
+        or not isinstance(item.get("ownerDigest"), str)
+        or not _SHA256_RE.fullmatch(item["ownerDigest"])
+        or item.get("actorType") != "registry-operator"
+    ):
+        raise RegistryMutationInputError("registry audit key is invalid")
+
+
+def _condition_check_for_exact_item(item: Mapping[str, Any]) -> dict[str, Any]:
+    names = {"#pk": "pk", "#sk": "sk"}
+    values: dict[str, Any] = {}
+    conditions = ["attribute_exists(#pk)", "attribute_exists(#sk)"]
+    for index, field in enumerate(sorted(set(item) - {"pk", "sk"})):
+        name = f"#f{index}"
+        value = f":v{index}"
+        names[name] = field
+        values[value] = marshal_value(item[field])
+        conditions.append(f"{name} = {value}")
+    return {
+        "TableName": APPROVED_TABLE_NAME,
+        "Key": marshal_item({"pk": item["pk"], "sk": item["sk"]}),
+        "ConditionExpression": " AND ".join(conditions),
+        "ExpressionAttributeNames": names,
+        "ExpressionAttributeValues": values,
+        "ReturnValuesOnConditionCheckFailure": "NONE",
+    }
+
+
+def _append_only_put(item: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "TableName": APPROVED_TABLE_NAME,
+        "Item": marshal_item(item),
+        "ConditionExpression": "attribute_not_exists(#pk) AND attribute_not_exists(#sk)",
+        "ExpressionAttributeNames": {"#pk": "pk", "#sk": "sk"},
+        "ReturnValuesOnConditionCheckFailure": "NONE",
+    }
+
+
+def _transaction_token(audit: Mapping[str, Any]) -> str:
+    material = "|".join(
+        (
+            str(audit.get("operation") or ""),
+            str(audit.get("outcome") or ""),
+            str(audit.get("requestId") or ""),
+            str(audit.get("sk") or ""),
+        )
+    ).encode("utf-8")
+    return f"thn-{hashlib.sha256(material).hexdigest()[:32]}"
 
 
 class DynamoDbRegistryStore:
@@ -134,20 +270,71 @@ class DynamoDbRegistryStore:
         item = response.get("Item") if isinstance(response, Mapping) else None
         return unmarshal_item(item) if isinstance(item, Mapping) and item else None
 
-    def create_binding(self, binding: Mapping[str, Any]) -> None:
-        _require_exact_binding_key(binding)
+    def get_global_reservation(self, key: Mapping[str, str]) -> dict[str, Any] | None:
+        _require_exact_reservation_key(key, closed=True)
         try:
-            self._client.put_item(
+            response = self._client.get_item(
                 TableName=APPROVED_TABLE_NAME,
-                Item=marshal_item(binding),
-                ConditionExpression="attribute_not_exists(#pk) AND attribute_not_exists(#sk)",
-                ExpressionAttributeNames={"#pk": "pk", "#sk": "sk"},
+                Key=marshal_item(key),
+                ConsistentRead=True,
+            )
+        except Exception as error:
+            _raise_registry_service_error(error)
+        item = response.get("Item") if isinstance(response, Mapping) else None
+        return unmarshal_item(item) if isinstance(item, Mapping) and item else None
+
+    def transact_create_binding(
+        self,
+        binding: Mapping[str, Any],
+        reservation: Mapping[str, Any],
+        audit: Mapping[str, Any],
+    ) -> None:
+        _require_exact_binding_key(binding)
+        _require_exact_reservation_key(reservation)
+        _require_exact_audit_key(audit)
+        try:
+            self._client.transact_write_items(
+                TransactItems=[
+                    {"Put": _append_only_put(reservation)},
+                    {"Put": _append_only_put(binding)},
+                    {"Put": _append_only_put(audit)},
+                ],
+                ClientRequestToken=_transaction_token(audit),
             )
         except Exception as error:
             _raise_registry_service_error(error)
 
-    def replace_binding(self, binding: Mapping[str, Any], expected: Mapping[str, Any]) -> None:
+    def transact_confirm_reservation(
+        self,
+        binding: Mapping[str, Any],
+        reservation: Mapping[str, Any],
+        audit: Mapping[str, Any],
+    ) -> None:
         _require_exact_binding_key(binding)
+        _require_exact_reservation_key(reservation)
+        _require_exact_audit_key(audit)
+        try:
+            self._client.transact_write_items(
+                TransactItems=[
+                    {"ConditionCheck": _condition_check_for_exact_item(reservation)},
+                    {"ConditionCheck": _condition_check_for_exact_item(binding)},
+                    {"Put": _append_only_put(audit)},
+                ],
+                ClientRequestToken=_transaction_token(audit),
+            )
+        except Exception as error:
+            _raise_registry_service_error(error)
+
+    def transact_replace_binding(
+        self,
+        binding: Mapping[str, Any],
+        reservation: Mapping[str, Any],
+        expected: Mapping[str, Any],
+        audit: Mapping[str, Any],
+    ) -> None:
+        _require_exact_binding_key(binding)
+        _require_exact_reservation_key(reservation)
+        _require_exact_audit_key(audit)
         if set(expected) != _EXPECTED_CONDITIONAL_FIELDS:
             raise RegistryMutationInputError("conditional registry fields are invalid")
         names = {"#pk": "pk", "#sk": "sk"}
@@ -158,12 +345,22 @@ class DynamoDbRegistryStore:
             values[f":{field}"] = marshal_value(expected[field])
             conditions.append(f"#{field} = :{field}")
         try:
-            self._client.put_item(
-                TableName=APPROVED_TABLE_NAME,
-                Item=marshal_item(binding),
-                ConditionExpression=" AND ".join(conditions),
-                ExpressionAttributeNames=names,
-                ExpressionAttributeValues=values,
+            self._client.transact_write_items(
+                TransactItems=[
+                    {"ConditionCheck": _condition_check_for_exact_item(reservation)},
+                    {
+                        "Put": {
+                            "TableName": APPROVED_TABLE_NAME,
+                            "Item": marshal_item(binding),
+                            "ConditionExpression": " AND ".join(conditions),
+                            "ExpressionAttributeNames": names,
+                            "ExpressionAttributeValues": values,
+                            "ReturnValuesOnConditionCheckFailure": "NONE",
+                        }
+                    },
+                    {"Put": _append_only_put(audit)},
+                ],
+                ClientRequestToken=_transaction_token(audit),
             )
         except Exception as error:
             _raise_registry_service_error(error)
@@ -220,20 +417,30 @@ def _validate_envelope(event: Any) -> tuple[str, Mapping[str, Any], int | None, 
     raise RegistryMutationInputError("registry operation is invalid")
 
 
-def handle_registry_request(event: Any, dynamodb_client: Any) -> dict[str, Any]:
+def handle_registry_request(
+    event: Any,
+    dynamodb_client: Any,
+    *,
+    audit_context: Mapping[str, Any],
+) -> dict[str, Any]:
     """Validate one closed request and execute the reviewed conditional operation."""
 
     try:
         operation, definition, expected_revision, expected_epoch = _validate_envelope(event)
         store = DynamoDbRegistryStore(dynamodb_client)
         if operation == "reserve":
-            result = registry.reserve_service_binding(store, definition)
+            result = registry.reserve_service_binding(
+                store,
+                definition,
+                audit_context=audit_context,
+            )
             return _safe_summary("reserve", result["record"], created=result["created"])
         record = registry.update_service_binding(
             store,
             definition,
             expected_registry_revision=expected_revision,
             expected_writer_epoch=expected_epoch,
+            audit_context=audit_context,
         )
         return _safe_summary("update", record)
     except registry.RegistryConflictError:
@@ -249,13 +456,24 @@ def handle_registry_request(event: Any, dynamodb_client: Any) -> dict[str, Any]:
         return {"ok": False, "error": "registry request failed"}
 
 
-def lambda_handler(event: Any, _context: Any) -> dict[str, Any]:
+def lambda_handler(event: Any, context: Any) -> dict[str, Any]:
     """AWS entry point; deliberately has no API Gateway or Function URL shape."""
 
     try:
         import boto3
 
         client = boto3.client("dynamodb")
+        request_id = getattr(context, "aws_request_id", None)
+        if not isinstance(request_id, str):
+            raise RegistryMutationInputError("registry audit context is unavailable")
+        occurred_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace(
+            "+00:00",
+            "Z",
+        )
     except Exception:
         return {"ok": False, "error": "registry service request failed"}
-    return handle_registry_request(event, client)
+    return handle_registry_request(
+        event,
+        client,
+        audit_context={"occurredAt": occurred_at, "requestId": request_id},
+    )

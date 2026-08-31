@@ -111,7 +111,7 @@ Resources:
                     Fn::GetAtt:
                       - ServiceBindingRegistryV2MutationRole
                       - Arn
-            - Sid: AllowRegistryMutationFunctionExactBinding
+            - Sid: AllowRegistryMutationFunctionExactRead
               Effect: Allow
               Principal:
                 AWS:
@@ -120,6 +120,26 @@ Resources:
                     - Arn
               Action:
                 - dynamodb:GetItem
+              Resource:
+                Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-content-hub-test-ServiceBindingRegistryV2
+              Condition:
+                ArnEquals:
+                  aws:PrincipalArn:
+                    Fn::GetAtt:
+                      - ServiceBindingRegistryV2MutationRole
+                      - Arn
+                ForAllValues:StringEquals:
+                  dynamodb:LeadingKeys:
+                    - SERVICE_BINDING#test#thn-journal-test-v2
+                    - HUB_RESERVATION#thehairnarrative-com-journal
+            - Sid: AllowRegistryMutationFunctionAtomicPut
+              Effect: Allow
+              Principal:
+                AWS:
+                  Fn::GetAtt:
+                    - ServiceBindingRegistryV2MutationRole
+                    - Arn
+              Action:
                 - dynamodb:PutItem
               Resource:
                 Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-content-hub-test-ServiceBindingRegistryV2
@@ -132,6 +152,37 @@ Resources:
                 ForAllValues:StringEquals:
                   dynamodb:LeadingKeys:
                     - SERVICE_BINDING#test#thn-journal-test-v2
+                    - HUB_RESERVATION#thehairnarrative-com-journal
+                    - REGISTRY_AUDIT#test#thn-journal-test-v2
+                StringEquals:
+                  dynamodb:EnclosingOperation: TransactWriteItems
+                StringEqualsIfExists:
+                  dynamodb:ReturnValues: NONE
+            - Sid: AllowRegistryMutationFunctionAtomicConditionCheck
+              Effect: Allow
+              Principal:
+                AWS:
+                  Fn::GetAtt:
+                    - ServiceBindingRegistryV2MutationRole
+                    - Arn
+              Action:
+                - dynamodb:ConditionCheckItem
+              Resource:
+                Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-content-hub-test-ServiceBindingRegistryV2
+              Condition:
+                ArnEquals:
+                  aws:PrincipalArn:
+                    Fn::GetAtt:
+                      - ServiceBindingRegistryV2MutationRole
+                      - Arn
+                ForAllValues:StringEquals:
+                  dynamodb:LeadingKeys:
+                    - SERVICE_BINDING#test#thn-journal-test-v2
+                    - HUB_RESERVATION#thehairnarrative-com-journal
+                StringEquals:
+                  dynamodb:EnclosingOperation: TransactWriteItems
+                StringEqualsIfExists:
+                  dynamodb:ReturnValues: NONE
             - Sid: AllowRegistryConditionCheckForMutationRoles
               Effect: Allow
               Principal: '*'
@@ -166,6 +217,9 @@ Resources:
               Condition:
                 ArnNotEquals:
                   aws:PrincipalArn:
+                    - Fn::GetAtt:
+                        - ServiceBindingRegistryV2MutationRole
+                        - Arn
                     - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-image-upload-test-ThnImageUploadV2Role
                     - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-test-ThnContentHubV2AuthoringRole
                     - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-test-ThnContentHubV2PrivateAssetCollectorRole
@@ -173,7 +227,7 @@ Resources:
                     - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-test-ThnContentHubV2InvalidationWorkerRole
                     - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-test-ThnContentHubV2EmergencyWithdrawRole
                     - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-test-ThnContentHubV2PreparedOrphanCollectorRole
-            - Sid: DenyRegistryConditionCheckOutsideExactBindingKey
+            - Sid: DenyRegistryConditionCheckOutsideApprovedKeys
               Effect: Deny
               Principal: '*'
               Action:
@@ -181,9 +235,20 @@ Resources:
               Resource:
                 Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-content-hub-test-ServiceBindingRegistryV2
               Condition:
-                ForAllValues:StringNotEquals:
+                ForAnyValue:StringNotEquals:
                   dynamodb:LeadingKeys:
                     - SERVICE_BINDING#test#thn-journal-test-v2
+                    - HUB_RESERVATION#thehairnarrative-com-journal
+            - Sid: DenyRegistryConditionCheckMissingLeadingKeys
+              Effect: Deny
+              Principal: '*'
+              Action:
+                - dynamodb:ConditionCheckItem
+              Resource:
+                Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-content-hub-test-ServiceBindingRegistryV2
+              Condition:
+                'Null':
+                  dynamodb:LeadingKeys: 'true'
             - Sid: DenyRegistryConditionCheckOutsideTransaction
               Effect: Deny
               Principal: '*'
@@ -252,6 +317,33 @@ Resources:
                     - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-test-ThnContentHubV2InvalidationWorkerRole
                     - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-test-ThnContentHubV2EmergencyWithdrawRole
                     - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-test-ThnContentHubV2PreparedOrphanCollectorRole
+            - Sid: DenyRegistryReservationReadOutsideMutationFunction
+              Effect: Deny
+              Principal: '*'
+              Action:
+                - dynamodb:GetItem
+              Resource:
+                Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-content-hub-test-ServiceBindingRegistryV2
+              Condition:
+                ArnNotEquals:
+                  aws:PrincipalArn:
+                    Fn::GetAtt:
+                      - ServiceBindingRegistryV2MutationRole
+                      - Arn
+                ForAnyValue:StringEquals:
+                  dynamodb:LeadingKeys:
+                    - HUB_RESERVATION#thehairnarrative-com-journal
+            - Sid: DenyRegistryAuditRead
+              Effect: Deny
+              Principal: '*'
+              Action:
+                - dynamodb:GetItem
+              Resource:
+                Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-content-hub-test-ServiceBindingRegistryV2
+              Condition:
+                ForAnyValue:StringEquals:
+                  dynamodb:LeadingKeys:
+                    - REGISTRY_AUDIT#test#thn-journal-test-v2
             - Sid: DenyRegistryUnsupportedReads
               Effect: Deny
               Principal: '*'
@@ -263,7 +355,7 @@ Resources:
                 - dynamodb:TransactGetItems
               Resource:
                 Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-content-hub-test-ServiceBindingRegistryV2
-            - Sid: DenyRegistryPutOutsideExactBindingKey
+            - Sid: DenyRegistryPutOutsideApprovedKeys
               Effect: Deny
               Principal: '*'
               Action:
@@ -271,9 +363,21 @@ Resources:
               Resource:
                 Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-content-hub-test-ServiceBindingRegistryV2
               Condition:
-                ForAllValues:StringNotEquals:
+                ForAnyValue:StringNotEquals:
                   dynamodb:LeadingKeys:
                     - SERVICE_BINDING#test#thn-journal-test-v2
+                    - HUB_RESERVATION#thehairnarrative-com-journal
+                    - REGISTRY_AUDIT#test#thn-journal-test-v2
+            - Sid: DenyRegistryPutMissingLeadingKeys
+              Effect: Deny
+              Principal: '*'
+              Action:
+                - dynamodb:PutItem
+              Resource:
+                Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-content-hub-test-ServiceBindingRegistryV2
+              Condition:
+                'Null':
+                  dynamodb:LeadingKeys: 'true'
             - Sid: DenyRegistryUpdateItem
               Effect: Deny
               Principal: '*'
@@ -281,7 +385,17 @@ Resources:
                 - dynamodb:UpdateItem
               Resource:
                 Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-content-hub-test-ServiceBindingRegistryV2
-            - Sid: DenyRegistryPutInsideTransaction
+            - Sid: DenyRegistryPutOutsideTransaction
+              Effect: Deny
+              Principal: '*'
+              Action:
+                - dynamodb:PutItem
+              Resource:
+                Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-content-hub-test-ServiceBindingRegistryV2
+              Condition:
+                StringNotEqualsIfExists:
+                  dynamodb:EnclosingOperation: TransactWriteItems
+            - Sid: DenyRegistryPutFailureValues
               Effect: Deny
               Principal: '*'
               Action:
@@ -290,7 +404,7 @@ Resources:
                 Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-content-hub-test-ServiceBindingRegistryV2
               Condition:
                 StringEquals:
-                  dynamodb:EnclosingOperation: TransactWriteItems
+                  dynamodb:ReturnValues: ALL_OLD
             - Sid: DenyRegistryDeleteAndBatchWrite
               Effect: Deny
               Principal: '*'
@@ -330,10 +444,20 @@ Resources:
                   - dynamodb:DescribeTable
                 Resource:
                   Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-content-hub-test-ServiceBindingRegistryV2
-              - Sid: ReadWriteExactThnBinding
+              - Sid: ReadExactThnRegistryState
                 Effect: Allow
                 Action:
                   - dynamodb:GetItem
+                Resource:
+                  Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-content-hub-test-ServiceBindingRegistryV2
+                Condition:
+                  ForAllValues:StringEquals:
+                    dynamodb:LeadingKeys:
+                      - SERVICE_BINDING#test#thn-journal-test-v2
+                      - HUB_RESERVATION#thehairnarrative-com-journal
+              - Sid: AtomicPutExactRegistryRows
+                Effect: Allow
+                Action:
                   - dynamodb:PutItem
                 Resource:
                   Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-content-hub-test-ServiceBindingRegistryV2
@@ -341,6 +465,27 @@ Resources:
                   ForAllValues:StringEquals:
                     dynamodb:LeadingKeys:
                       - SERVICE_BINDING#test#thn-journal-test-v2
+                      - HUB_RESERVATION#thehairnarrative-com-journal
+                      - REGISTRY_AUDIT#test#thn-journal-test-v2
+                  StringEquals:
+                    dynamodb:EnclosingOperation: TransactWriteItems
+                  StringEqualsIfExists:
+                    dynamodb:ReturnValues: NONE
+              - Sid: AtomicConditionCheckExactRegistryState
+                Effect: Allow
+                Action:
+                  - dynamodb:ConditionCheckItem
+                Resource:
+                  Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-content-hub-test-ServiceBindingRegistryV2
+                Condition:
+                  ForAllValues:StringEquals:
+                    dynamodb:LeadingKeys:
+                      - SERVICE_BINDING#test#thn-journal-test-v2
+                      - HUB_RESERVATION#thehairnarrative-com-journal
+                  StringEquals:
+                    dynamodb:EnclosingOperation: TransactWriteItems
+                  StringEqualsIfExists:
+                    dynamodb:ReturnValues: NONE
 
   ServiceBindingRegistryV2MutationFunction:
     Type: AWS::Serverless::Function

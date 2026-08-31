@@ -7,8 +7,11 @@ registry record.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from copy import deepcopy
+from datetime import datetime
 from typing import Any, Mapping
 from urllib.parse import urlparse
 
@@ -16,6 +19,9 @@ from urllib.parse import urlparse
 SCHEMA_VERSION = 2
 RECORD_TYPE = "service-binding-registry-v2"
 RECORD_SORT_KEY = "REGISTRY#V2"
+GLOBAL_RESERVATION_RECORD_TYPE = "global-hub-reservation-v2"
+GLOBAL_RESERVATION_SORT_KEY = "GLOBAL"
+AUDIT_RECORD_TYPE = "service-binding-registry-audit-v2"
 ALLOWED_ACTIVATION_STATUSES = frozenset({"inactive", "active"})
 ALLOWED_WRITER_MODES = frozenset({"disabled", "qa-only", "client-owner"})
 APPROVED_ENVIRONMENT = "test"
@@ -37,6 +43,8 @@ _REGION_RE = re.compile(r"^[a-z]{2}(?:-gov)?-[a-z0-9-]+-[0-9]+$")
 _ARN_RE = re.compile(
     r"^arn:(aws|aws-us-gov|aws-cn):([a-z0-9-]+):([a-z0-9-]+):([0-9]{12}):(.+)$"
 )
+_AUDIT_TIME_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$")
+_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 # TASK-008 reserves these exact future THN v2 resources. TASK-019 must create
 # them with these physical names before activation and can expand this
@@ -271,12 +279,113 @@ def binding_key(record: Mapping[str, Any]) -> dict[str, str]:
     return {"pk": str(record["pk"]), "sk": str(record["sk"])}
 
 
-def reserve_service_binding(store: Any, definition: Mapping[str, Any]) -> dict[str, Any]:
+def global_reservation_key(record: Mapping[str, Any]) -> dict[str, str]:
+    return {
+        "pk": f"HUB_RESERVATION#{record['hubId']}",
+        "sk": GLOBAL_RESERVATION_SORT_KEY,
+    }
+
+
+def _owner_digest(owner: Mapping[str, Any]) -> str:
+    canonical = json.dumps(
+        dict(owner),
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def build_global_hub_reservation(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Derive the immutable global hub reservation from a validated binding."""
+
+    owner = record.get("reservationOwner")
+    if not isinstance(owner, Mapping):
+        raise RegistryValidationError("reservation ownership is invalid")
+    expected_owner = {
+        "environment": record.get("environment"),
+        "domain": record.get("domain"),
+        "serviceBindingId": record.get("serviceBindingId"),
+        "hubId": record.get("hubId"),
+        "tenantId": record.get("tenantId"),
+        "authProfileId": record.get("authProfileId"),
+    }
+    if dict(owner) != expected_owner:
+        raise RegistryValidationError("reservation ownership is invalid")
+    key = global_reservation_key(record)
+    return {
+        **key,
+        "recordType": GLOBAL_RESERVATION_RECORD_TYPE,
+        "schemaVersion": SCHEMA_VERSION,
+        "hubId": record["hubId"],
+        "reservationOwner": deepcopy(expected_owner),
+        "ownerDigest": _owner_digest(expected_owner),
+    }
+
+
+def _validated_audit_context(value: Any) -> dict[str, str]:
+    if not isinstance(value, Mapping) or set(value) != {"occurredAt", "requestId"}:
+        raise RegistryValidationError("registry audit context is invalid")
+    occurred_at = value.get("occurredAt")
+    request_id = value.get("requestId")
+    if not isinstance(occurred_at, str) or not _AUDIT_TIME_RE.fullmatch(occurred_at):
+        raise RegistryValidationError("registry audit context is invalid")
+    try:
+        datetime.strptime(occurred_at, "%Y-%m-%dT%H:%M:%S.%fZ")
+    except ValueError:
+        raise RegistryValidationError("registry audit context is invalid") from None
+    if not isinstance(request_id, str) or not _REQUEST_ID_RE.fullmatch(request_id):
+        raise RegistryValidationError("registry audit context is invalid")
+    return {"occurredAt": occurred_at, "requestId": request_id}
+
+
+def build_registry_audit_record(
+    record: Mapping[str, Any],
+    *,
+    operation: str,
+    outcome: str,
+    audit_context: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build one append-only, public-safe registry audit row."""
+
+    if operation not in {"reserve", "update"}:
+        raise RegistryValidationError("registry audit operation is invalid")
+    if outcome not in {"created", "idempotent", "updated"}:
+        raise RegistryValidationError("registry audit outcome is invalid")
+    context = _validated_audit_context(audit_context)
+    owner = record.get("reservationOwner")
+    if not isinstance(owner, Mapping):
+        raise RegistryValidationError("reservation ownership is invalid")
+    return {
+        "pk": f"REGISTRY_AUDIT#{record['environment']}#{record['serviceBindingId']}",
+        "sk": f"EVENT#{context['occurredAt']}#{context['requestId']}",
+        "recordType": AUDIT_RECORD_TYPE,
+        "schemaVersion": SCHEMA_VERSION,
+        "operation": operation,
+        "outcome": outcome,
+        "occurredAt": context["occurredAt"],
+        "requestId": context["requestId"],
+        "registryRevision": _require_positive_integer(
+            record.get("registryRevision"),
+            "registryRevision",
+        ),
+        "writerEpoch": _require_positive_integer(record.get("writerEpoch"), "writerEpoch"),
+        "ownerDigest": _owner_digest(owner),
+        "actorType": "registry-operator",
+    }
+
+
+def reserve_service_binding(
+    store: Any,
+    definition: Mapping[str, Any],
+    *,
+    audit_context: Mapping[str, Any],
+) -> dict[str, Any]:
     """Conditionally reserve one authoritative binding record.
 
-    The adapter must implement strongly consistent exact-key reads plus one
-    conditional create. A repeated exact request is idempotent; a conflicting
-    owner or definition fails closed. Global hub reservation is TASK-012.
+    The binding, immutable global reservation, and append-only audit are one
+    conditional transaction. A repeated exact request is idempotent and emits
+    its own audited condition-check transaction.
     """
 
     record = build_registry_record(
@@ -292,19 +401,68 @@ def reserve_service_binding(store: Any, definition: Mapping[str, Any]) -> dict[s
     if record["registryRevision"] != 1:
         raise RegistryValidationError("an initial reservation must start at registryRevision 1")
 
+    _validated_audit_context(audit_context)
+    reservation = build_global_hub_reservation(record)
     current_binding = store.get_binding(binding_key(record))
-    if current_binding:
-        if dict(current_binding) == record:
+    current_reservation = store.get_global_reservation(global_reservation_key(record))
+    if current_binding or current_reservation:
+        if dict(current_binding or {}) == record and dict(current_reservation or {}) == reservation:
+            replay_audit = build_registry_audit_record(
+                record,
+                operation="reserve",
+                outcome="created",
+                audit_context=audit_context,
+            )
+            try:
+                store.transact_create_binding(record, reservation, replay_audit)
+                return {"created": False, "record": deepcopy(dict(current_binding))}
+            except RegistryConditionalWriteFailed:
+                pass
+            audit = build_registry_audit_record(
+                record,
+                operation="reserve",
+                outcome="idempotent",
+                audit_context=audit_context,
+            )
+            try:
+                store.transact_confirm_reservation(record, reservation, audit)
+            except RegistryConditionalWriteFailed:
+                raise RegistryConflictError(
+                    "concurrent service binding reservation conflict"
+                ) from None
             return {"created": False, "record": deepcopy(dict(current_binding))}
         raise RegistryConflictError("service binding is already reserved")
 
+    audit = build_registry_audit_record(
+        record,
+        operation="reserve",
+        outcome="created",
+        audit_context=audit_context,
+    )
     try:
-        store.create_binding(record)
-    except RegistryConditionalWriteFailed as error:
+        store.transact_create_binding(record, reservation, audit)
+    except RegistryConditionalWriteFailed:
         current_binding = store.get_binding(binding_key(record))
-        if current_binding and dict(current_binding) == record:
+        current_reservation = store.get_global_reservation(global_reservation_key(record))
+        if dict(current_binding or {}) == record and dict(current_reservation or {}) == reservation:
+            idempotent_audit = build_registry_audit_record(
+                record,
+                operation="reserve",
+                outcome="idempotent",
+                audit_context=audit_context,
+            )
+            try:
+                store.transact_confirm_reservation(
+                    record,
+                    reservation,
+                    idempotent_audit,
+                )
+            except RegistryConditionalWriteFailed:
+                raise RegistryConflictError(
+                    "concurrent service binding reservation conflict"
+                ) from None
             return {"created": False, "record": deepcopy(dict(current_binding))}
-        raise RegistryConflictError("concurrent service binding reservation conflict") from error
+        raise RegistryConflictError("concurrent service binding reservation conflict") from None
     return {"created": True, "record": deepcopy(record)}
 
 
@@ -314,6 +472,7 @@ def update_service_binding(
     *,
     expected_registry_revision: int,
     expected_writer_epoch: int,
+    audit_context: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Conditionally replace a registry row while preserving its reservation.
 
@@ -333,9 +492,14 @@ def update_service_binding(
         definition,
         trusted_resource_scope=store.get_trusted_resource_scope(),
     )
+    _validated_audit_context(audit_context)
+    reservation = build_global_hub_reservation(desired)
     current = store.get_binding(binding_key(desired))
+    current_reservation = store.get_global_reservation(global_reservation_key(desired))
     if not current:
         raise RegistryConflictError("service binding reservation is missing")
+    if dict(current_reservation or {}) != reservation:
+        raise RegistryConflictError("global hub reservation is missing or conflicting")
     if (
         current.get("registryRevision") != expected_registry_revision
         or current.get("writerEpoch") != expected_writer_epoch
@@ -363,8 +527,14 @@ def update_service_binding(
         "tenantId": current["tenantId"],
         "authProfileId": current["authProfileId"],
     }
+    audit = build_registry_audit_record(
+        desired,
+        operation="update",
+        outcome="updated",
+        audit_context=audit_context,
+    )
     try:
-        store.replace_binding(desired, expected)
-    except RegistryConditionalWriteFailed as error:
-        raise RegistryConflictError("concurrent registry transition conflict") from error
+        store.transact_replace_binding(desired, reservation, expected, audit)
+    except RegistryConditionalWriteFailed:
+        raise RegistryConflictError("concurrent registry transition conflict") from None
     return deepcopy(desired)

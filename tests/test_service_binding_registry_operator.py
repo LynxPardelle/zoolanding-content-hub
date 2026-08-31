@@ -94,6 +94,23 @@ class RegistryOperatorIdentityTests(unittest.TestCase):
 
 
 class RegistryOperatorInvocationTests(unittest.TestCase):
+    def test_unknown_operator_is_denied_before_lambda_client_construction(self):
+        session = RecordingSession(
+            sts_client=RecordingStsClient(
+                arn="arn:aws:iam::123456789012:role/other-role",
+            )
+        )
+
+        with self.assertRaises(operator.OperatorAuthorizationError):
+            operator.execute_operation(
+                session,
+                operation="reserve",
+                definition=registry_definition(),
+            )
+
+        self.assertEqual(session.client_names, ["sts"])
+        self.assertEqual(session.lambda_client.calls, [])
+
     def test_exact_operator_invokes_only_the_exact_private_lambda_request_response(self):
         session = RecordingSession()
 

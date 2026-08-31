@@ -49,6 +49,13 @@ def build_record(definition=None):
     )
 
 
+def audit_context(sequence=1):
+    return {
+        "occurredAt": f"2026-08-31T12:00:0{sequence}.000Z",
+        "requestId": f"123e4567-e89b-12d3-a456-42661417400{sequence}",
+    }
+
+
 class ServiceBindingRegistryRecordTests(unittest.TestCase):
     def test_build_record_contains_versioned_coordinates_and_reservation_owner(self):
         record = build_record()
@@ -204,6 +211,7 @@ class FakeRegistryStore:
     def __init__(self):
         self.bindings = {}
         self.create_calls = 0
+        self.transactions = []
 
     def get_trusted_resource_scope(self):
         return dict(TRUSTED_RESOURCE_SCOPE)
@@ -212,60 +220,113 @@ class FakeRegistryStore:
         item = self.bindings.get((key["pk"], key["sk"]))
         return dict(item) if item else None
 
-    def create_binding(self, binding):
-        self.create_calls += 1
-        binding_key = (binding["pk"], binding["sk"])
-        if binding_key in self.bindings:
-            raise registry.RegistryConditionalWriteFailed()
-        self.bindings[binding_key] = dict(binding)
+    def get_global_reservation(self, key):
+        item = self.bindings.get((key["pk"], key["sk"]))
+        return dict(item) if item else None
 
-    def replace_binding(self, binding, expected):
+    def transact_create_binding(self, binding, reservation, audit):
+        self.create_calls += 1
+        self.transactions.append("create")
+        keys = [
+            (binding["pk"], binding["sk"]),
+            (reservation["pk"], reservation["sk"]),
+            (audit["pk"], audit["sk"]),
+        ]
+        if any(key in self.bindings for key in keys):
+            raise registry.RegistryConditionalWriteFailed()
+        for item in (binding, reservation, audit):
+            self.bindings[(item["pk"], item["sk"])] = dict(item)
+
+    def transact_confirm_reservation(self, binding, reservation, audit):
+        self.transactions.append("idempotent")
+        binding_key = (binding["pk"], binding["sk"])
+        reservation_key = (reservation["pk"], reservation["sk"])
+        audit_key = (audit["pk"], audit["sk"])
+        if (
+            self.bindings.get(binding_key) != binding
+            or self.bindings.get(reservation_key) != reservation
+            or audit_key in self.bindings
+        ):
+            raise registry.RegistryConditionalWriteFailed()
+        self.bindings[audit_key] = dict(audit)
+
+    def transact_replace_binding(self, binding, reservation, expected, audit):
+        self.transactions.append("update")
         key = (binding["pk"], binding["sk"])
         current = self.bindings.get(key)
-        if not current:
+        reservation_key = (reservation["pk"], reservation["sk"])
+        audit_key = (audit["pk"], audit["sk"])
+        if (
+            not current
+            or self.bindings.get(reservation_key) != reservation
+            or audit_key in self.bindings
+        ):
             raise registry.RegistryConditionalWriteFailed()
         for field, value in expected.items():
             if current.get(field) != value:
                 raise registry.RegistryConditionalWriteFailed()
         self.bindings[key] = dict(binding)
+        self.bindings[audit_key] = dict(audit)
 
 
 class ServiceBindingReservationTests(unittest.TestCase):
     def test_reserve_creates_one_binding_with_embedded_reservation_owner(self):
         store = FakeRegistryStore()
 
-        result = registry.reserve_service_binding(store, registry_definition())
+        result = registry.reserve_service_binding(
+            store,
+            registry_definition(),
+            audit_context=audit_context(1),
+        )
 
         self.assertTrue(result["created"])
         self.assertEqual(store.create_calls, 1)
         self.assertEqual(result["record"]["activationStatus"], "inactive")
-        self.assertEqual(len(store.bindings), 1)
+        self.assertEqual(len(store.bindings), 3)
         self.assertEqual(
             result["record"]["reservationOwner"],
-            next(iter(store.bindings.values()))["reservationOwner"],
+            store.bindings[(result["record"]["pk"], result["record"]["sk"])][
+                "reservationOwner"
+            ],
         )
 
     def test_reserve_is_idempotent_for_the_exact_same_owner_and_definition(self):
         store = FakeRegistryStore()
-        first = registry.reserve_service_binding(store, registry_definition())
+        first = registry.reserve_service_binding(
+            store,
+            registry_definition(),
+            audit_context=audit_context(1),
+        )
 
-        second = registry.reserve_service_binding(store, registry_definition())
+        second = registry.reserve_service_binding(
+            store,
+            registry_definition(),
+            audit_context=audit_context(2),
+        )
 
         self.assertTrue(first["created"])
         self.assertFalse(second["created"])
-        self.assertEqual(store.create_calls, 1)
+        self.assertEqual(store.transactions, ["create", "create", "idempotent"])
         self.assertEqual(second["record"], first["record"])
 
     def test_reserve_denies_an_unapproved_domain_before_storage(self):
         store = FakeRegistryStore()
-        registry.reserve_service_binding(store, registry_definition())
+        registry.reserve_service_binding(
+            store,
+            registry_definition(),
+            audit_context=audit_context(1),
+        )
         conflicting = registry_definition(
             domain="other.example.com",
             adminOrigin="https://admin-test.other.example.com",
         )
 
         with self.assertRaises(registry.RegistryValidationError):
-            registry.reserve_service_binding(store, conflicting)
+            registry.reserve_service_binding(
+                store,
+                conflicting,
+                audit_context=audit_context(2),
+            )
 
     def test_initial_reservation_is_fail_closed_until_explicit_activation(self):
         store = FakeRegistryStore()
@@ -278,13 +339,21 @@ class ServiceBindingReservationTests(unittest.TestCase):
         ):
             with self.subTest(field=field):
                 with self.assertRaises(registry.RegistryValidationError):
-                    registry.reserve_service_binding(store, registry_definition(**{field: value}))
+                    registry.reserve_service_binding(
+                        store,
+                        registry_definition(**{field: value}),
+                        audit_context=audit_context(1),
+                    )
 
 
 class ServiceBindingTransitionTests(unittest.TestCase):
     def setUp(self):
         self.store = FakeRegistryStore()
-        registry.reserve_service_binding(self.store, registry_definition())
+        registry.reserve_service_binding(
+            self.store,
+            registry_definition(),
+            audit_context=audit_context(1),
+        )
 
     def test_activation_increments_revision_without_changing_writer_epoch(self):
         desired = registry_definition(
@@ -298,6 +367,7 @@ class ServiceBindingTransitionTests(unittest.TestCase):
             desired,
             expected_registry_revision=1,
             expected_writer_epoch=1,
+            audit_context=audit_context(2),
         )
 
         self.assertEqual(result["registryRevision"], 2)
@@ -317,6 +387,7 @@ class ServiceBindingTransitionTests(unittest.TestCase):
             desired,
             expected_registry_revision=1,
             expected_writer_epoch=1,
+            audit_context=audit_context(2),
         )
 
         self.assertEqual(result["writerMode"], "qa-only")
@@ -331,6 +402,7 @@ class ServiceBindingTransitionTests(unittest.TestCase):
                 desired,
                 expected_registry_revision=1,
                 expected_writer_epoch=1,
+                audit_context=audit_context(2),
             )
 
     def test_stale_revision_or_epoch_is_denied(self):
@@ -344,6 +416,7 @@ class ServiceBindingTransitionTests(unittest.TestCase):
                         desired,
                         expected_registry_revision=revision,
                         expected_writer_epoch=epoch,
+                        audit_context=audit_context(2),
                     )
 
     def test_expected_revision_and_epoch_must_be_positive_integers(self):
@@ -352,13 +425,18 @@ class ServiceBindingTransitionTests(unittest.TestCase):
         for revision, epoch in ((True, 1), (1, True), (0, 1), (1, 0)):
             with self.subTest(revision=revision, epoch=epoch):
                 store = FakeRegistryStore()
-                registry.reserve_service_binding(store, registry_definition())
+                registry.reserve_service_binding(
+                    store,
+                    registry_definition(),
+                    audit_context=audit_context(1),
+                )
                 with self.assertRaises(registry.RegistryValidationError):
                     registry.update_service_binding(
                         store,
                         desired,
                         expected_registry_revision=revision,
                         expected_writer_epoch=epoch,
+                        audit_context=audit_context(2),
                     )
 
     def test_transition_denies_reservation_owner_changes(self):
@@ -373,6 +451,7 @@ class ServiceBindingTransitionTests(unittest.TestCase):
                 desired,
                 expected_registry_revision=1,
                 expected_writer_epoch=1,
+                audit_context=audit_context(2),
             )
 
 
@@ -438,15 +517,19 @@ class ServiceBindingRegistryTemplateTests(unittest.TestCase):
         self.assertNotIn("Ref: ServiceBindingRegistryOperatorRoleArn", table_block)
         self.assertNotIn("AllowNamedTestOperatorExactBinding", table_block)
         self.assertIn("Sid: AllowRegistryMutationFunctionDescribe", table_block)
-        self.assertIn("Sid: AllowRegistryMutationFunctionExactBinding", table_block)
+        self.assertIn("Sid: AllowRegistryMutationFunctionExactRead", table_block)
+        self.assertIn("Sid: AllowRegistryMutationFunctionAtomicPut", table_block)
+        self.assertIn("Sid: AllowRegistryMutationFunctionAtomicConditionCheck", table_block)
         self.assertIn("Sid: DenyRegistryAccessOutsideMutationFunction", table_block)
-        self.assertIn("Sid: DenyRegistryPutOutsideExactBindingKey", self.template)
+        self.assertIn("Sid: DenyRegistryPutOutsideApprovedKeys", self.template)
+        self.assertIn("Sid: DenyRegistryPutMissingLeadingKeys", self.template)
         self.assertIn("Sid: DenyRegistryUpdateItem", self.template)
-        self.assertIn("Sid: DenyRegistryPutInsideTransaction", self.template)
+        self.assertIn("Sid: DenyRegistryPutOutsideTransaction", self.template)
+        self.assertIn("Sid: DenyRegistryPutFailureValues", self.template)
         self.assertIn("Sid: DenyRegistryDeleteAndBatchWrite", self.template)
         self.assertIn("aws:PrincipalArn", self.template)
         self.assertIn("dynamodb:LeadingKeys", self.template)
-        self.assertIn("ForAllValues:StringNotEquals", self.template)
+        self.assertIn("ForAnyValue:StringNotEquals", self.template)
         self.assertIn("SERVICE_BINDING#test#thn-journal-test-v2", self.template)
         self.assertIn("dynamodb:EnclosingOperation", self.template)
         self.assertIn("TransactWriteItems", self.template)
@@ -463,13 +546,13 @@ class ServiceBindingRegistryTemplateTests(unittest.TestCase):
         ):
             self.assertIn(denied_read, table_block)
         deny_key_match = re.search(
-            r"(?ms)Sid: DenyRegistryPutOutsideExactBindingKey.*?(?=\n\s+- Sid:)",
+            r"(?ms)Sid: DenyRegistryPutOutsideApprovedKeys.*?(?=\n\s+- Sid:)",
             self.template,
         )
         self.assertIsNotNone(deny_key_match)
         deny_key_block = deny_key_match.group(0)
         self.assertIn("dynamodb:PutItem", deny_key_block)
-        self.assertIn("ForAllValues:StringNotEquals", deny_key_block)
+        self.assertIn("ForAnyValue:StringNotEquals", deny_key_block)
         self.assertIn("SERVICE_BINDING#test#thn-journal-test-v2", deny_key_block)
 
     def test_operator_invocation_resources_are_fail_closed_outside_test(self):
@@ -624,7 +707,8 @@ class ServiceBindingRegistryTemplateTests(unittest.TestCase):
 
         for sid in (
             "DenyRegistryConditionCheckOutsideApprovedMutationRoles",
-            "DenyRegistryConditionCheckOutsideExactBindingKey",
+            "DenyRegistryConditionCheckOutsideApprovedKeys",
+            "DenyRegistryConditionCheckMissingLeadingKeys",
             "DenyRegistryConditionCheckOutsideTransaction",
             "DenyRegistryConditionCheckFailureValues",
         ):
