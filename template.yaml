@@ -31,6 +31,11 @@ Parameters:
     MinValue: 256
     MaxValue: 1024
     Description: Lambda memory in MB. Higher memory gives more CPU for the boto3/DynamoDB cold read path.
+  ServiceBindingRegistryOperatorRoleArn:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^arn:(aws|aws-us-gov|aws-cn):iam::[0-9]{12}:role/zoolanding-thn-registry-test-operator$'
+    Description: Exact TEST operator/OIDC role ARN allowed to invoke only the private registry mutation Lambda.
 
 Globals:
   Function:
@@ -39,6 +44,19 @@ Globals:
     MemorySize:
       Ref: FunctionMemorySize
     Tracing: PassThrough
+
+Conditions:
+  IsTestEnvironment:
+    Fn::Equals:
+      - Ref: EnvironmentName
+      - test
+  HasServiceBindingRegistryOperatorRole:
+    Fn::And:
+      - Condition: IsTestEnvironment
+      - Fn::Not:
+          - Fn::Equals:
+              - Ref: ServiceBindingRegistryOperatorRoleArn
+              - ''
 
 Resources:
   ContentHubApi:
@@ -49,6 +67,233 @@ Resources:
       DefaultRouteSettings:
         ThrottlingBurstLimit: 20
         ThrottlingRateLimit: 10
+
+  ServiceBindingRegistryV2Table:
+    Type: AWS::DynamoDB::Table
+    Condition: IsTestEnvironment
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      TableName: zoolanding-content-hub-test-ServiceBindingRegistryV2
+      DeletionProtectionEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      ResourcePolicy:
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Sid: AllowRegistryMutationFunctionDescribe
+              Effect: Allow
+              Principal:
+                AWS:
+                  Fn::GetAtt:
+                    - ServiceBindingRegistryV2MutationRole
+                    - Arn
+              Action:
+                - dynamodb:DescribeTable
+              Resource:
+                Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-content-hub-test-ServiceBindingRegistryV2
+              Condition:
+                ArnEquals:
+                  aws:PrincipalArn:
+                    Fn::GetAtt:
+                      - ServiceBindingRegistryV2MutationRole
+                      - Arn
+            - Sid: AllowRegistryMutationFunctionExactBinding
+              Effect: Allow
+              Principal:
+                AWS:
+                  Fn::GetAtt:
+                    - ServiceBindingRegistryV2MutationRole
+                    - Arn
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+              Resource:
+                Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-content-hub-test-ServiceBindingRegistryV2
+              Condition:
+                ArnEquals:
+                  aws:PrincipalArn:
+                    Fn::GetAtt:
+                      - ServiceBindingRegistryV2MutationRole
+                      - Arn
+                ForAllValues:StringEquals:
+                  dynamodb:LeadingKeys:
+                    - SERVICE_BINDING#test#thn-journal-test-v2
+            - Sid: DenyRegistryAccessOutsideMutationFunction
+              Effect: Deny
+              Principal: '*'
+              Action:
+                - dynamodb:BatchExecuteStatement
+                - dynamodb:BatchGetItem
+                - dynamodb:BatchWriteItem
+                - dynamodb:DeleteItem
+                - dynamodb:DescribeTable
+                - dynamodb:ExecuteStatement
+                - dynamodb:GetItem
+                - dynamodb:PartiQLDelete
+                - dynamodb:PartiQLInsert
+                - dynamodb:PartiQLSelect
+                - dynamodb:PartiQLUpdate
+                - dynamodb:PutItem
+                - dynamodb:Query
+                - dynamodb:Scan
+                - dynamodb:TransactGetItems
+                - dynamodb:TransactWriteItems
+                - dynamodb:UpdateItem
+              Resource:
+                Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-content-hub-test-ServiceBindingRegistryV2
+              Condition:
+                ArnNotEquals:
+                  aws:PrincipalArn:
+                    Fn::GetAtt:
+                      - ServiceBindingRegistryV2MutationRole
+                      - Arn
+            - Sid: DenyRegistryUnsupportedReads
+              Effect: Deny
+              Principal: '*'
+              Action:
+                - dynamodb:BatchGetItem
+                - dynamodb:PartiQLSelect
+                - dynamodb:Query
+                - dynamodb:Scan
+                - dynamodb:TransactGetItems
+              Resource:
+                Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-content-hub-test-ServiceBindingRegistryV2
+            - Sid: DenyRegistryPutOutsideExactBindingKey
+              Effect: Deny
+              Principal: '*'
+              Action:
+                - dynamodb:PutItem
+              Resource:
+                Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-content-hub-test-ServiceBindingRegistryV2
+              Condition:
+                ForAllValues:StringNotEquals:
+                  dynamodb:LeadingKeys:
+                    - SERVICE_BINDING#test#thn-journal-test-v2
+            - Sid: DenyRegistryUpdateItem
+              Effect: Deny
+              Principal: '*'
+              Action:
+                - dynamodb:UpdateItem
+              Resource:
+                Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-content-hub-test-ServiceBindingRegistryV2
+            - Sid: DenyRegistryPutInsideTransaction
+              Effect: Deny
+              Principal: '*'
+              Action:
+                - dynamodb:PutItem
+              Resource:
+                Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-content-hub-test-ServiceBindingRegistryV2
+              Condition:
+                StringEquals:
+                  dynamodb:EnclosingOperation: TransactWriteItems
+            - Sid: DenyRegistryDeleteAndBatchWrite
+              Effect: Deny
+              Principal: '*'
+              Action:
+                - dynamodb:BatchExecuteStatement
+                - dynamodb:BatchWriteItem
+                - dynamodb:DeleteItem
+                - dynamodb:ExecuteStatement
+                - dynamodb:PartiQLDelete
+                - dynamodb:PartiQLInsert
+                - dynamodb:PartiQLUpdate
+                - dynamodb:TransactWriteItems
+              Resource:
+                Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-content-hub-test-ServiceBindingRegistryV2
+
+  ServiceBindingRegistryV2MutationRole:
+    Type: AWS::IAM::Role
+    Condition: IsTestEnvironment
+    Properties:
+      RoleName: zoolanding-thn-registry-test-mutation
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ExactThnRegistryMutation
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: DescribeExactThnRegistry
+                Effect: Allow
+                Action:
+                  - dynamodb:DescribeTable
+                Resource:
+                  Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-content-hub-test-ServiceBindingRegistryV2
+              - Sid: ReadWriteExactThnBinding
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                Resource:
+                  Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-content-hub-test-ServiceBindingRegistryV2
+                Condition:
+                  ForAllValues:StringEquals:
+                    dynamodb:LeadingKeys:
+                      - SERVICE_BINDING#test#thn-journal-test-v2
+
+  ServiceBindingRegistryV2MutationFunction:
+    Type: AWS::Serverless::Function
+    Condition: IsTestEnvironment
+    Properties:
+      CodeUri: .
+      Handler: service_binding_registry_operator_lambda.lambda_handler
+      FunctionName: zoolanding-content-hub-test-ThnServiceBindingRegistryV2Mutation
+      Description: Private direct-invocation boundary for exact conditional THN registry mutations.
+      Role:
+        Fn::GetAtt:
+          - ServiceBindingRegistryV2MutationRole
+          - Arn
+
+  ServiceBindingRegistryOperatorInvokePolicy:
+    Type: AWS::IAM::Policy
+    Condition: HasServiceBindingRegistryOperatorRole
+    Properties:
+      PolicyName: InvokeExactThnRegistryMutation
+      Roles:
+        - zoolanding-thn-registry-test-operator
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: InvokeExactPrivateRegistryMutation
+            Effect: Allow
+            Action:
+              - lambda:InvokeFunction
+            Resource:
+              Fn::GetAtt:
+                - ServiceBindingRegistryV2MutationFunction
+                - Arn
+
+  ServiceBindingRegistryOperatorInvokePermission:
+    Type: AWS::Lambda::Permission
+    Condition: HasServiceBindingRegistryOperatorRole
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName:
+        Ref: ServiceBindingRegistryV2MutationFunction
+      Principal:
+        Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-thn-registry-test-operator
 
   ContentHubMetadataTable:
     Type: AWS::DynamoDB::Table
