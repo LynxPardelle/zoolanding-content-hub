@@ -36,6 +36,11 @@ Parameters:
     Default: ''
     AllowedPattern: '^$|^arn:(aws|aws-us-gov|aws-cn):iam::[0-9]{12}:role/zoolanding-thn-registry-test-operator$'
     Description: Exact TEST operator/OIDC role ARN allowed to invoke only the private registry mutation Lambda.
+  ApiProxyRegistryV2ReaderRoleArn:
+    Type: String
+    Default: arn:aws:iam::000000000000:role/zoolanding-api-proxy-test-UNCONFIGURED
+    AllowedPattern: '^arn:(aws|aws-us-gov|aws-cn):iam::[0-9]{12}:role/zoolanding-api-proxy-test-[A-Za-z0-9+=,.@_-]{1,64}$'
+    Description: Exact resolved TEST ApiProxyFunctionRole ARN exported by the API Proxy stack.
 
 Globals:
   Function:
@@ -143,7 +148,6 @@ Resources:
                 - dynamodb:DeleteItem
                 - dynamodb:DescribeTable
                 - dynamodb:ExecuteStatement
-                - dynamodb:GetItem
                 - dynamodb:PartiQLDelete
                 - dynamodb:PartiQLInsert
                 - dynamodb:PartiQLSelect
@@ -162,6 +166,29 @@ Resources:
                     Fn::GetAtt:
                       - ServiceBindingRegistryV2MutationRole
                       - Arn
+            - Sid: DenyRegistryGetItemOutsideApprovedConsumers
+              Effect: Deny
+              Principal: '*'
+              Action:
+                - dynamodb:GetItem
+              Resource:
+                Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-content-hub-test-ServiceBindingRegistryV2
+              Condition:
+                ArnNotEquals:
+                  aws:PrincipalArn:
+                    - Fn::GetAtt:
+                        - ServiceBindingRegistryV2MutationRole
+                        - Arn
+                    - Ref: ApiProxyRegistryV2ReaderRoleArn
+                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-auth-admin-test-FunctionRole
+                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-image-upload-test-ThnImageUploadV2Role
+                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-test-ThnContentHubV2AuthoringRole
+                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-test-ThnContentHubV2PrivateAssetCollectorRole
+                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-test-ThnContentHubV2PublisherRole
+                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-test-ThnContentHubV2PublicMediaRole
+                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-test-ThnContentHubV2InvalidationWorkerRole
+                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-test-ThnContentHubV2EmergencyWithdrawRole
+                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-test-ThnContentHubV2PreparedOrphanCollectorRole
             - Sid: DenyRegistryUnsupportedReads
               Effect: Deny
               Principal: '*'
