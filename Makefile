@@ -1,0 +1,28 @@
+.PHONY: build-ServiceBindingRegistryV2MutationFunction build-ThnContentHubV2AuthoringFunction build-ThnContentHubV2PrivateAssetCollectorFunction build-ThnContentHubV2PublisherFunction build-ThnContentHubV2PublicMediaFunction build-ThnContentHubV2InvalidationWorkerFunction build-ThnContentHubV2EmergencyWithdrawFunction build-ThnContentHubV2PreparedOrphanCollectorFunction build-ContentHubFunction
+
+build-ServiceBindingRegistryV2MutationFunction:
+	python tools/build_lambda_artifact.py ServiceBindingRegistryV2MutationFunction "$(ARTIFACTS_DIR)"
+
+build-ThnContentHubV2AuthoringFunction:
+	python tools/build_lambda_artifact.py ThnContentHubV2AuthoringFunction "$(ARTIFACTS_DIR)"
+
+build-ThnContentHubV2PrivateAssetCollectorFunction:
+	python tools/build_lambda_artifact.py ThnContentHubV2PrivateAssetCollectorFunction "$(ARTIFACTS_DIR)"
+
+build-ThnContentHubV2PublisherFunction:
+	python tools/build_lambda_artifact.py ThnContentHubV2PublisherFunction "$(ARTIFACTS_DIR)"
+
+build-ThnContentHubV2PublicMediaFunction:
+	python tools/build_lambda_artifact.py ThnContentHubV2PublicMediaFunction "$(ARTIFACTS_DIR)"
+
+build-ThnContentHubV2InvalidationWorkerFunction:
+	python tools/build_lambda_artifact.py ThnContentHubV2InvalidationWorkerFunction "$(ARTIFACTS_DIR)"
+
+build-ThnContentHubV2EmergencyWithdrawFunction:
+	python tools/build_lambda_artifact.py ThnContentHubV2EmergencyWithdrawFunction "$(ARTIFACTS_DIR)"
+
+build-ThnContentHubV2PreparedOrphanCollectorFunction:
+	python tools/build_lambda_artifact.py ThnContentHubV2PreparedOrphanCollectorFunction "$(ARTIFACTS_DIR)"
+
+build-ContentHubFunction:
+	python tools/build_lambda_artifact.py ContentHubFunction "$(ARTIFACTS_DIR)"

@@ -632,13 +632,13 @@ class ServiceBindingRegistryTemplateTests(unittest.TestCase):
         self.assertIn("ArnNotEquals:", reader_block)
         exact_roles = (
             "zoolanding-image-upload-test-ThnImageUploadV2Role",
-            "zoolanding-content-hub-test-ThnContentHubV2AuthoringRole",
-            "zoolanding-content-hub-test-ThnContentHubV2PrivateAssetCollectorRole",
-            "zoolanding-content-hub-test-ThnContentHubV2PublisherRole",
-            "zoolanding-content-hub-test-ThnContentHubV2PublicMediaRole",
-            "zoolanding-content-hub-test-ThnContentHubV2InvalidationWorkerRole",
-            "zoolanding-content-hub-test-ThnContentHubV2EmergencyWithdrawRole",
-            "zoolanding-content-hub-test-ThnContentHubV2PreparedOrphanCollectorRole",
+            "zlp-thn-ch-test-authoring",
+            "zlp-thn-ch-test-private-asset-gc",
+            "zlp-thn-ch-test-publisher",
+            "zlp-thn-ch-test-public-media",
+            "zlp-thn-ch-test-invalidation",
+            "zlp-thn-ch-test-emergency-withdraw",
+            "zlp-thn-ch-test-prepared-orphan-gc",
         )
         for role_name in exact_roles:
             self.assertIn(f"role/{role_name}", reader_block)
@@ -689,18 +689,18 @@ class ServiceBindingRegistryTemplateTests(unittest.TestCase):
 
         exact_mutation_roles = (
             "zoolanding-image-upload-test-ThnImageUploadV2Role",
-            "zoolanding-content-hub-test-ThnContentHubV2AuthoringRole",
-            "zoolanding-content-hub-test-ThnContentHubV2PrivateAssetCollectorRole",
-            "zoolanding-content-hub-test-ThnContentHubV2PublisherRole",
-            "zoolanding-content-hub-test-ThnContentHubV2InvalidationWorkerRole",
-            "zoolanding-content-hub-test-ThnContentHubV2EmergencyWithdrawRole",
-            "zoolanding-content-hub-test-ThnContentHubV2PreparedOrphanCollectorRole",
+            "zlp-thn-ch-test-authoring",
+            "zlp-thn-ch-test-private-asset-gc",
+            "zlp-thn-ch-test-publisher",
+            "zlp-thn-ch-test-invalidation",
+            "zlp-thn-ch-test-emergency-withdraw",
+            "zlp-thn-ch-test-prepared-orphan-gc",
         )
         for role_name in exact_mutation_roles:
             self.assertIn(f"role/{role_name}", allow_block)
         for read_only_role in (
             "zoolanding-auth-admin-test-FunctionRole",
-            "zoolanding-content-hub-test-ThnContentHubV2PublicMediaRole",
+            "zlp-thn-ch-test-public-media",
             "zoolanding-api-proxy-test-",
         ):
             self.assertNotIn(read_only_role, allow_block)

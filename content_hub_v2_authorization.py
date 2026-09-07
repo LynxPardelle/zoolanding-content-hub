@@ -1,8 +1,7 @@
-"""Dormant fail-closed authorization contract for THN Content Hub v2.
+"""Fail-closed authorization contract for the isolated THN Content Hub v2.
 
-TASK-011 defines purpose and session-version semantics only.  The dedicated
-v2 handler and IAM identities are added by later tasks; the shared v1 handler
-must not import this module.
+The dedicated v2 handler imports this module; the shared v1 handler remains
+independent so its routes and authorization behavior cannot change implicitly.
 """
 
 from __future__ import annotations
@@ -24,8 +23,13 @@ THN_CURRENT_USER_SCOPE = {
     "tenantId": "thehairnarrative-com",
     "hubId": "thehairnarrative-com-journal",
 }
+THN_CURRENT_USER_PARTITION_KEY = "CURRENT_USER#test#thn-journal-test-v2"
+THN_AUTH_PROFILE_ROLE = "journal-owner"
+SESSION_IDLE_SECONDS = 30 * 60
+SESSION_ABSOLUTE_SECONDS = 12 * 60 * 60
 
 _LIST_READ_OPERATIONS = frozenset({"articleList", "assetList"})
+_REFERENCE_READ_OPERATIONS = frozenset({"taxonomyList"})
 _DIRECT_READ_OPERATIONS = frozenset({"articleDetail", "publicBundlePreview"})
 _CREATE_OPERATION = "createArticle"
 _RECORD_MUTATION_OPERATIONS = frozenset(
@@ -44,12 +48,17 @@ class ContentHubV2NotFoundError(ContentHubV2AuthorizationError):
     """A direct private record is invisible to the current actor purpose."""
 
 
+class ContentHubV2WriterDisabledError(ContentHubV2AuthorizationError):
+    """The current registry mode does not permit this actor to mutate state."""
+
+
 @dataclass(frozen=True)
 class AuthorizationContext:
     subject: str
-    scope_key: str
     account_purpose: str
     session_version: int
+    csrf_hash: str
+    roles: tuple[str, ...]
     writer_mode: str
     writer_epoch: int
     environment: str
@@ -76,19 +85,6 @@ def _positive_integer(value: Any) -> int:
     return value
 
 
-def _scope_key(scope: Mapping[str, str]) -> str:
-    return "CURRENT_USER#" + "#".join(
-        (
-            scope["environment"],
-            scope["domain"],
-            scope["serviceBindingId"],
-            scope["authProfileId"],
-            scope["tenantId"],
-            scope["hubId"],
-        )
-    )
-
-
 def _validated_registry_scope(record: Any) -> tuple[dict[str, str], str, int]:
     if not isinstance(record, Mapping):
         _reject()
@@ -112,21 +108,53 @@ def _validate_session(
     value: Any,
     *,
     scope: Mapping[str, str],
-    expected_scope_key: str,
+    expected_session_id_hash: str,
     now_epoch: int,
 ) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         _reject()
-    _require_record_scope(value, scope)
     subject = value.get("subject")
     purpose = value.get("accountPurpose")
+    roles = value.get("roles")
+    timestamps = (
+        value.get("createdAt"),
+        value.get("lastSeenAt"),
+        value.get("idleExpiresAt"),
+        value.get("absoluteExpiresAt"),
+        value.get("expiresAt"),
+    )
     if (
-        value.get("scopeKey") != expected_scope_key
+        value.get("recordType") != "authSessionV2"
+        or value.get("sessionIdHash") != expected_session_id_hash
+        or value.get("scope") != scope
         or not isinstance(subject, str)
         or not _SAFE_SUBJECT_RE.fullmatch(subject)
         or purpose not in ALLOWED_ACCOUNT_PURPOSES
-        or value.get("revoked") is not False
-        or _positive_integer(value.get("expiresAt")) <= now_epoch
+        or value.get("revokedAt") is not None
+        or not isinstance(value.get("csrfHash"), str)
+        or not _HASH_RE.fullmatch(value["csrfHash"])
+        or not isinstance(value.get("accountHash"), str)
+        or not _HASH_RE.fullmatch(value["accountHash"])
+        or not isinstance(roles, list)
+        or roles != [THN_AUTH_PROFILE_ROLE]
+        or not all(type(timestamp) is int for timestamp in timestamps)
+    ):
+        _reject()
+    created_at, last_seen_at, idle_expires_at, absolute_expires_at, expires_at = timestamps
+    if (
+        not 0 <= created_at <= last_seen_at
+        or last_seen_at > idle_expires_at
+        or idle_expires_at > last_seen_at + SESSION_IDLE_SECONDS
+        or idle_expires_at > absolute_expires_at
+        or absolute_expires_at > created_at + SESSION_ABSOLUTE_SECONDS
+        or absolute_expires_at != expires_at
+        or idle_expires_at <= now_epoch
+        or absolute_expires_at <= now_epoch
+    ):
+        _reject()
+    cognito_username = value.get("cognitoUsername")
+    if purpose == "client-owner" and (
+        not isinstance(cognito_username, str) or not cognito_username
     ):
         _reject()
     version = _positive_integer(value.get("sessionVersion"))
@@ -134,6 +162,8 @@ def _validate_session(
         "subject": subject,
         "accountPurpose": purpose,
         "sessionVersion": version,
+        "csrfHash": value["csrfHash"],
+        "roles": tuple(roles),
     }
 
 
@@ -141,17 +171,16 @@ def _validate_current_user(
     value: Any,
     *,
     scope: Mapping[str, str],
-    expected_scope_key: str,
     expected_subject: str,
 ) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         _reject()
-    _require_record_scope(value, scope)
     purpose = value.get("accountPurpose")
     if (
-        value.get("recordType") != "thn-current-user-v2"
-        or value.get("scopeKey") != expected_scope_key
-        or value.get("userKey") != f"USER#{expected_subject}"
+        value.get("pk") != THN_CURRENT_USER_PARTITION_KEY
+        or value.get("sk") != f"SUBJECT#{expected_subject}"
+        or value.get("contractVersion") != 1
+        or value.get("scope") != scope
         or value.get("subject") != expected_subject
         or purpose not in ALLOWED_ACCOUNT_PURPOSES
         or value.get("enabled") is not True
@@ -180,7 +209,6 @@ def load_authorization_context(
     ):
         _reject()
     scope, writer_mode, writer_epoch = _validated_registry_scope(registry_record)
-    expected_scope_key = _scope_key(scope)
     try:
         raw_session = store.get_session(session_id_hash, consistent_read=True)
     except Exception:
@@ -188,13 +216,12 @@ def load_authorization_context(
     session = _validate_session(
         raw_session,
         scope=scope,
-        expected_scope_key=expected_scope_key,
+        expected_session_id_hash=session_id_hash,
         now_epoch=now_epoch,
     )
     try:
         raw_user = store.get_current_user(
-            expected_scope_key,
-            f"USER#{session['subject']}",
+            session["subject"],
             consistent_read=True,
         )
     except Exception:
@@ -202,7 +229,6 @@ def load_authorization_context(
     user = _validate_current_user(
         raw_user,
         scope=scope,
-        expected_scope_key=expected_scope_key,
         expected_subject=session["subject"],
     )
     if (
@@ -213,9 +239,10 @@ def load_authorization_context(
 
     return AuthorizationContext(
         subject=session["subject"],
-        scope_key=expected_scope_key,
         account_purpose=user["accountPurpose"],
         session_version=user["sessionVersion"],
+        csrf_hash=session["csrfHash"],
+        roles=session["roles"],
         writer_mode=writer_mode,
         writer_epoch=writer_epoch,
         environment=scope["environment"],
@@ -325,6 +352,20 @@ def authorize_final_read(
             if purpose == context.account_purpose:
                 visible.append(deepcopy(dict(candidate)))
         return visible
+    if operation in _REFERENCE_READ_OPERATIONS:
+        if (
+            record is not None
+            or record_id is not None
+            or records is None
+            or isinstance(records, (str, bytes, Mapping))
+        ):
+            _reject()
+        references = []
+        for candidate in records:
+            if not isinstance(candidate, Mapping):
+                _reject()
+            references.append(deepcopy(dict(candidate)))
+        return references
     if operation in _DIRECT_READ_OPERATIONS:
         if records is not None or record is None:
             _reject()
@@ -342,6 +383,15 @@ def _writer_mode_allows(context: AuthorizationContext) -> bool:
         context.writer_mode == "client-owner"
         and context.account_purpose == "client-owner"
     )
+
+
+def assert_mutation_actor_enabled(context: AuthorizationContext) -> None:
+    """Reject all user mutations unless purpose and current writer mode agree."""
+
+    if not _writer_mode_allows(context):
+        raise ContentHubV2WriterDisabledError(
+            "authoring mutations are unavailable"
+        ) from None
 
 
 def authorize_mutation(
@@ -364,8 +414,7 @@ def authorize_mutation(
         current_registry_record=current_registry_record,
         now_epoch=now_epoch,
     )
-    if not _writer_mode_allows(context):
-        _reject()
+    assert_mutation_actor_enabled(context)
     if operation == _CREATE_OPERATION:
         if record is not None or record_id is not None:
             _reject()
@@ -407,8 +456,10 @@ __all__ = [
     "AuthorizationContext",
     "ContentHubV2AuthorizationError",
     "ContentHubV2NotFoundError",
+    "ContentHubV2WriterDisabledError",
     "THN_CURRENT_USER_SCOPE",
     "assert_record_purpose_visible",
+    "assert_mutation_actor_enabled",
     "assert_writer_epoch_current",
     "authorize_final_read",
     "authorize_mutation",

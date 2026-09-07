@@ -216,7 +216,7 @@ class RegistryTask012TemplateTests(unittest.TestCase):
         )
         for forbidden_role in (
             "zoolanding-auth-admin-test-FunctionRole",
-            "zoolanding-content-hub-test-ThnContentHubV2PublicMediaRole",
+            "zlp-thn-ch-test-public-media",
             "zoolanding-api-proxy-test-",
         ):
             self.assertNotIn(forbidden_role, mutation_allows)

@@ -89,6 +89,7 @@ class RegistryFenceTests(unittest.TestCase):
             mutation_items=mutation_items or [self.mutation],
             expected_descriptor=self.expected_descriptor,
             expected_writer_mode="client-owner",
+            expected_writer_epoch=7,
             trusted_resource_scope=self.scope,
         )
 
@@ -153,6 +154,16 @@ class RegistryFenceTests(unittest.TestCase):
         self.assertEqual(self.client.applied, [])
         self.assertNotIn("private-transaction-cancel-reason", str(caught.exception))
 
+    def test_epoch_change_before_fence_read_never_starts_a_transaction(self):
+        self.client.record["writerEpoch"] = 8
+        self.client.record["registryRevision"] = 4
+
+        with self.assertRaises(fence.RegistryFenceError):
+            self.execute()
+
+        self.assertEqual(len(self.client.get_calls), 1)
+        self.assertEqual(self.client.transact_calls, [])
+
     def test_disabled_or_wrong_writer_mode_never_starts_a_transaction(self):
         for record_mode, expected_mode in (
             ("disabled", "client-owner"),
@@ -168,6 +179,7 @@ class RegistryFenceTests(unittest.TestCase):
                         mutation_items=[self.mutation],
                         expected_descriptor=self.expected_descriptor,
                         expected_writer_mode=expected_mode,
+                        expected_writer_epoch=7,
                         trusted_resource_scope=self.scope,
                     )
                 self.assertEqual(client.transact_calls, [])
@@ -190,6 +202,7 @@ class RegistryFenceTests(unittest.TestCase):
                         mutation_items=mutation_items,
                         expected_descriptor=self.expected_descriptor,
                         expected_writer_mode="client-owner",
+                        expected_writer_epoch=7,
                         trusted_resource_scope=self.scope,
                     )
                 self.assertEqual(client.get_calls, [])
@@ -204,6 +217,7 @@ class RegistryFenceTests(unittest.TestCase):
                 mutation_items=[{"Put": {"TableName": "another-table", "Item": {}}}],
                 expected_descriptor=self.expected_descriptor,
                 expected_writer_mode="client-owner",
+                expected_writer_epoch=7,
                 trusted_resource_scope=self.scope,
             )
 

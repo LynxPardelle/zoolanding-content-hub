@@ -36,6 +36,123 @@ Parameters:
     Default: ''
     AllowedPattern: '^$|^arn:(aws|aws-us-gov|aws-cn):iam::[0-9]{12}:role/zoolanding-thn-registry-test-operator$'
     Description: Exact TEST operator/OIDC role ARN allowed to invoke only the private registry mutation Lambda.
+  EnableThnContentHubV2:
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'false'
+      - 'true'
+    Description: Fail-closed opt-in for the isolated The Hair Narrative TEST content-hub runtime.
+  ProvisionThnContentHubV2State:
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'false'
+      - 'true'
+    Description: Fail-closed opt-in for retained The Hair Narrative TEST content-hub state.
+  ThnContentHubV2TerminationProtectionGate:
+    Type: String
+    Default: BLOCKED
+    AllowedValues:
+      - BLOCKED
+      - CONFIRMED_ENABLED
+    Description: Blocks v2 activation until deployment preflight confirms stack termination protection.
+  ThnContentHubV2EmergencyOperatorRoleArn:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^arn:(aws|aws-us-gov|aws-cn):iam::[0-9]{12}:role/zoolanding-thn-content-hub-test-operator$'
+    Description: Exact TEST operator role allowed to invoke only the THN emergency-withdraw function.
+  ThnContentHubV2PublicDistributionId:
+    Type: String
+    Default: BLOCKED
+    AllowedPattern: '^(BLOCKED|[A-Z0-9]{8,32})$'
+    Description: Exact TEST CloudFront distribution that receives THN journal invalidations.
+  ThnContentHubV2DescriptorVersionId:
+    Type: String
+    Default: BLOCKED
+    AllowedPattern: '^(BLOCKED|[A-Za-z0-9][A-Za-z0-9._:-]{0,127})$'
+    Description: Immutable S3 version ID of the approved THN journal TEST service descriptor.
+  ThnContentHubV2DescriptorSha256:
+    Type: String
+    Default: '0000000000000000000000000000000000000000000000000000000000000000'
+    AllowedPattern: '^[a-f0-9]{64}$'
+    Description: Lowercase SHA-256 digest of the approved immutable THN journal TEST service descriptor.
+  ThnContentHubV2AuthPolicyVersion:
+    Type: String
+    Default: BLOCKED
+    AllowedPattern: '^(BLOCKED|[A-Za-z0-9][A-Za-z0-9._:-]{0,127})$'
+    Description: Exact approved Auth Admin policy version for the THN journal TEST binding.
+
+Metadata:
+  ThnContentHubV2DeploymentGuards:
+    GateParameter: ThnContentHubV2TerminationProtectionGate
+    Required: true
+    FailureMode: BLOCK
+    DefaultState: BLOCKED
+    Enforcement: The TEST deployment workflow preflight must enable and verify CloudFormation termination protection before creating a change set.
+
+Rules:
+  ThnContentHubV2StateProvisioningRule:
+    RuleCondition:
+      Fn::Equals:
+        - Ref: ProvisionThnContentHubV2State
+        - 'true'
+    Assertions:
+      - Assert:
+          Fn::Equals:
+            - Ref: EnvironmentName
+            - test
+        AssertDescription: THN Content Hub v2 retained state is TEST-only.
+  ThnContentHubV2ActivationRule:
+    RuleCondition:
+      Fn::Equals:
+        - Ref: EnableThnContentHubV2
+        - 'true'
+    Assertions:
+      - Assert:
+          Fn::Equals:
+            - Ref: EnvironmentName
+            - test
+        AssertDescription: THN Content Hub v2 is TEST-only.
+      - Assert:
+          Fn::Equals:
+            - Ref: ProvisionThnContentHubV2State
+            - 'true'
+        AssertDescription: Retained THN Content Hub v2 state must be provisioned before activation.
+      - Assert:
+          Fn::Equals:
+            - Ref: ThnContentHubV2TerminationProtectionGate
+            - CONFIRMED_ENABLED
+        AssertDescription: Stack termination protection must be confirmed before THN Content Hub v2 activation.
+      - Assert:
+          Fn::Equals:
+            - Ref: ThnContentHubV2EmergencyOperatorRoleArn
+            - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-thn-content-hub-test-operator
+        AssertDescription: The exact TEST emergency operator role is required before activation.
+      - Assert:
+          Fn::Not:
+            - Fn::Equals:
+                - Ref: ThnContentHubV2PublicDistributionId
+                - BLOCKED
+        AssertDescription: The exact TEST CloudFront distribution is required before activation.
+      - Assert:
+          Fn::Not:
+            - Fn::Equals:
+                - Ref: ThnContentHubV2DescriptorVersionId
+                - BLOCKED
+        AssertDescription: An immutable THN journal TEST descriptor version is required before activation.
+      - Assert:
+          Fn::Not:
+            - Fn::Equals:
+                - Ref: ThnContentHubV2DescriptorSha256
+                - '0000000000000000000000000000000000000000000000000000000000000000'
+        AssertDescription: The approved THN journal TEST descriptor digest is required before activation.
+      - Assert:
+          Fn::Not:
+            - Fn::Equals:
+                - Ref: ThnContentHubV2AuthPolicyVersion
+                - BLOCKED
+        AssertDescription: The approved THN journal TEST Auth Admin policy version is required before activation.
 
 Globals:
   Function:
@@ -56,6 +173,34 @@ Conditions:
       - Fn::Equals:
           - Ref: ServiceBindingRegistryOperatorRoleArn
           - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-thn-registry-test-operator
+  IsThnContentHubV2StateProvisioned:
+    Fn::And:
+      - Fn::Equals:
+          - Ref: EnvironmentName
+          - test
+      - Fn::Equals:
+          - Ref: ProvisionThnContentHubV2State
+          - 'true'
+  IsThnContentHubV2Enabled:
+    Fn::And:
+      - Fn::Equals:
+          - Ref: EnvironmentName
+          - test
+      - Fn::Equals:
+          - Ref: ProvisionThnContentHubV2State
+          - 'true'
+      - Fn::Equals:
+          - Ref: EnableThnContentHubV2
+          - 'true'
+      - Fn::Equals:
+          - Ref: ThnContentHubV2TerminationProtectionGate
+          - CONFIRMED_ENABLED
+  HasThnContentHubV2EmergencyOperatorRole:
+    Fn::And:
+      - Condition: IsThnContentHubV2Enabled
+      - Fn::Equals:
+          - Ref: ThnContentHubV2EmergencyOperatorRoleArn
+          - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-thn-content-hub-test-operator
 
 Resources:
   ContentHubApi:
@@ -194,12 +339,12 @@ Resources:
                 ArnEquals:
                   aws:PrincipalArn:
                     - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-image-upload-test-ThnImageUploadV2Role
-                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-test-ThnContentHubV2AuthoringRole
-                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-test-ThnContentHubV2PrivateAssetCollectorRole
-                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-test-ThnContentHubV2PublisherRole
-                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-test-ThnContentHubV2InvalidationWorkerRole
-                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-test-ThnContentHubV2EmergencyWithdrawRole
-                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-test-ThnContentHubV2PreparedOrphanCollectorRole
+                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zlp-thn-ch-test-authoring
+                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zlp-thn-ch-test-private-asset-gc
+                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zlp-thn-ch-test-publisher
+                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zlp-thn-ch-test-invalidation
+                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zlp-thn-ch-test-emergency-withdraw
+                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zlp-thn-ch-test-prepared-orphan-gc
                 ForAllValues:StringEquals:
                   dynamodb:LeadingKeys:
                     - SERVICE_BINDING#test#thn-journal-test-v2
@@ -221,12 +366,12 @@ Resources:
                         - ServiceBindingRegistryV2MutationRole
                         - Arn
                     - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-image-upload-test-ThnImageUploadV2Role
-                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-test-ThnContentHubV2AuthoringRole
-                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-test-ThnContentHubV2PrivateAssetCollectorRole
-                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-test-ThnContentHubV2PublisherRole
-                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-test-ThnContentHubV2InvalidationWorkerRole
-                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-test-ThnContentHubV2EmergencyWithdrawRole
-                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-test-ThnContentHubV2PreparedOrphanCollectorRole
+                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zlp-thn-ch-test-authoring
+                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zlp-thn-ch-test-private-asset-gc
+                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zlp-thn-ch-test-publisher
+                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zlp-thn-ch-test-invalidation
+                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zlp-thn-ch-test-emergency-withdraw
+                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zlp-thn-ch-test-prepared-orphan-gc
             - Sid: DenyRegistryConditionCheckOutsideApprovedKeys
               Effect: Deny
               Principal: '*'
@@ -310,13 +455,13 @@ Resources:
                         - ServiceBindingRegistryV2MutationRole
                         - Arn
                     - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-image-upload-test-ThnImageUploadV2Role
-                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-test-ThnContentHubV2AuthoringRole
-                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-test-ThnContentHubV2PrivateAssetCollectorRole
-                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-test-ThnContentHubV2PublisherRole
-                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-test-ThnContentHubV2PublicMediaRole
-                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-test-ThnContentHubV2InvalidationWorkerRole
-                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-test-ThnContentHubV2EmergencyWithdrawRole
-                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-test-ThnContentHubV2PreparedOrphanCollectorRole
+                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zlp-thn-ch-test-authoring
+                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zlp-thn-ch-test-private-asset-gc
+                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zlp-thn-ch-test-publisher
+                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zlp-thn-ch-test-public-media
+                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zlp-thn-ch-test-invalidation
+                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zlp-thn-ch-test-emergency-withdraw
+                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zlp-thn-ch-test-prepared-orphan-gc
             - Sid: DenyRegistryReservationReadOutsideMutationFunction
               Effect: Deny
               Principal: '*'
@@ -490,6 +635,8 @@ Resources:
   ServiceBindingRegistryV2MutationFunction:
     Type: AWS::Serverless::Function
     Condition: IsTestEnvironment
+    Metadata:
+      BuildMethod: makefile
     Properties:
       CodeUri: .
       Handler: service_binding_registry_operator_lambda.lambda_handler
@@ -528,6 +675,899 @@ Resources:
         Ref: ServiceBindingRegistryV2MutationFunction
       Principal:
         Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-thn-registry-test-operator
+
+  ThnContentHubV2MetadataTable:
+    Type: AWS::DynamoDB::Table
+    Condition: IsThnContentHubV2StateProvisioned
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: zoolanding-content-hub-test-ThnContentHubV2Metadata
+      BillingMode: PAY_PER_REQUEST
+      DeletionProtectionEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+
+  ThnContentHubV2AuditTable:
+    Type: AWS::DynamoDB::Table
+    Condition: IsThnContentHubV2StateProvisioned
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: zoolanding-content-hub-test-ThnContentHubV2Audit
+      BillingMode: PAY_PER_REQUEST
+      DeletionProtectionEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+
+  ThnContentHubV2PrivateStore:
+    Type: AWS::S3::Bucket
+    Condition: IsThnContentHubV2StateProvisioned
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName:
+        Fn::Sub: zlp-thn-ch-test-private-${AWS::AccountId}-${AWS::Region}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+
+  ThnContentHubV2AuthoringRole:
+    Type: AWS::IAM::Role
+    Condition: IsThnContentHubV2Enabled
+    Properties:
+      RoleName: zlp-thn-ch-test-authoring
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ExactThnAuthoringBoundary
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadExactThnAuthState
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                Resource:
+                  - Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-auth-admin-test-ThnSessionV2
+                  - Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-auth-admin-test-ThnCurrentUserStateV2
+              - Sid: ReadExactThnServiceBinding
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                Resource:
+                  Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-content-hub-test-ServiceBindingRegistryV2
+                Condition:
+                  ForAllValues:StringEquals:
+                    dynamodb:LeadingKeys:
+                      - SERVICE_BINDING#test#thn-journal-test-v2
+              - Sid: CheckExactThnBindingBeforeAuthoringCommit
+                Effect: Allow
+                Action:
+                  - dynamodb:ConditionCheckItem
+                Resource:
+                  Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-content-hub-test-ServiceBindingRegistryV2
+                Condition:
+                  ForAllValues:StringEquals:
+                    dynamodb:LeadingKeys:
+                      - SERVICE_BINDING#test#thn-journal-test-v2
+                  StringEquals:
+                    dynamodb:EnclosingOperation: TransactWriteItems
+                  StringEqualsIfExists:
+                    dynamodb:ReturnValues: NONE
+              - Sid: MutateExactThnPrivateState
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                Resource:
+                  Fn::GetAtt:
+                    - ThnContentHubV2MetadataTable
+                    - Arn
+                Condition:
+                  ForAllValues:StringLike:
+                    dynamodb:LeadingKeys:
+                      - THN#test#thehairnarrative.com#journal-owner#thehairnarrative-com#thehairnarrative-com-journal#*
+              - Sid: AppendExactThnAudit
+                Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                Resource:
+                  Fn::GetAtt:
+                    - ThnContentHubV2AuditTable
+                    - Arn
+                Condition:
+                  ForAllValues:StringLike:
+                    dynamodb:LeadingKeys:
+                      - AUDIT#test#thehairnarrative.com#thehairnarrative-com-journal#*
+              - Sid: ReadWriteExactThnPrivateObjects
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource:
+                  Fn::Sub: ${ThnContentHubV2PrivateStore.Arn}/private/test/thehairnarrative.com/thehairnarrative-com-journal/*
+              - Sid: InvokeExactThnPublishAndUpload
+                Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - Fn::GetAtt:
+                      - ThnContentHubV2PublisherFunction
+                      - Arn
+                  - Fn::Sub: arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:zoolanding-image-upload-test-ThnImageUploadV2
+
+  ThnContentHubV2AuthoringFunction:
+    Type: AWS::Serverless::Function
+    Condition: IsThnContentHubV2Enabled
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      CodeUri: .
+      Handler: lambda_function.thn_content_hub_v2_handler
+      FunctionName: zoolanding-content-hub-test-ThnContentHubV2Authoring
+      Description: Protected owner-only read and action boundary for the isolated THN journal.
+      AutoPublishAlias: test
+      Role:
+        Fn::GetAtt:
+          - ThnContentHubV2AuthoringRole
+          - Arn
+      Environment:
+        Variables:
+          CONTENT_HUB_ENVIRONMENT: test
+          CONTENT_HUB_DOMAIN: thehairnarrative.com
+          CONTENT_HUB_ID: thehairnarrative-com-journal
+          CONTENT_HUB_OWNER_ID: journal-owner
+          AUTH_SESSION_TABLE_NAME: zoolanding-auth-admin-test-ThnSessionV2
+          AUTH_USER_STATE_TABLE_NAME: zoolanding-auth-admin-test-ThnCurrentUserStateV2
+          SERVICE_BINDING_REGISTRY_TABLE_NAME: zoolanding-content-hub-test-ServiceBindingRegistryV2
+          THN_CONTENT_HUB_DESCRIPTOR_VERSION_ID:
+            Ref: ThnContentHubV2DescriptorVersionId
+          THN_CONTENT_HUB_DESCRIPTOR_SHA256:
+            Ref: ThnContentHubV2DescriptorSha256
+          THN_CONTENT_HUB_AUTH_POLICY_VERSION:
+            Ref: ThnContentHubV2AuthPolicyVersion
+          THN_CONTENT_HUB_METADATA_TABLE_NAME:
+            Ref: ThnContentHubV2MetadataTable
+          THN_CONTENT_HUB_AUDIT_TABLE_NAME:
+            Ref: ThnContentHubV2AuditTable
+          THN_CONTENT_HUB_PRIVATE_BUCKET_NAME:
+            Ref: ThnContentHubV2PrivateStore
+          THN_CONTENT_HUB_PUBLISHER_FUNCTION_NAME:
+            Ref: ThnContentHubV2PublisherFunction
+          LOG_LEVEL:
+            Ref: LogLevel
+      Events:
+        Read:
+          Type: HttpApi
+          Properties:
+            ApiId:
+              Ref: ContentHubApi
+            Method: POST
+            Path: /features/content-hub-v2/read
+        Action:
+          Type: HttpApi
+          Properties:
+            ApiId:
+              Ref: ContentHubApi
+            Method: POST
+            Path: /features/content-hub-v2/action
+
+  ThnContentHubV2PrivateAssetCollectorRole:
+    Type: AWS::IAM::Role
+    Condition: IsThnContentHubV2Enabled
+    Properties:
+      RoleName: zlp-thn-ch-test-private-asset-gc
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ExactThnPrivateAssetCollection
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CollectExpiredExactThnPrivateState
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                Resource:
+                  Fn::GetAtt:
+                    - ThnContentHubV2MetadataTable
+                    - Arn
+                Condition:
+                  ForAllValues:StringLike:
+                    dynamodb:LeadingKeys:
+                      - THN#test#thehairnarrative.com#journal-owner#thehairnarrative-com#thehairnarrative-com-journal#*
+              - Sid: DeleteExpiredExactThnPrivateObjects
+                Effect: Allow
+                Action:
+                  - s3:DeleteObject
+                Resource:
+                  Fn::Sub: ${ThnContentHubV2PrivateStore.Arn}/private/test/thehairnarrative.com/thehairnarrative-com-journal/*
+              - Sid: CheckExactThnBindingBeforeCollection
+                Effect: Allow
+                Action:
+                  - dynamodb:ConditionCheckItem
+                Resource:
+                  Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-content-hub-test-ServiceBindingRegistryV2
+                Condition:
+                  ForAllValues:StringEquals:
+                    dynamodb:LeadingKeys:
+                      - SERVICE_BINDING#test#thn-journal-test-v2
+                  StringEquals:
+                    dynamodb:EnclosingOperation: TransactWriteItems
+                  StringEqualsIfExists:
+                    dynamodb:ReturnValues: NONE
+
+  ThnContentHubV2PrivateAssetCollectorFunction:
+    Type: AWS::Serverless::Function
+    Condition: IsThnContentHubV2Enabled
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      CodeUri: .
+      Handler: content_hub_v2_private_asset_gc.lambda_handler
+      FunctionName: zoolanding-content-hub-test-ThnV2PrivateAssetCollector
+      Description: Dormant exact-scope collector for expired THN private assets.
+      AutoPublishAlias: test
+      Role:
+        Fn::GetAtt:
+          - ThnContentHubV2PrivateAssetCollectorRole
+          - Arn
+      Environment:
+        Variables:
+          THN_CONTENT_HUB_METADATA_TABLE_NAME:
+            Ref: ThnContentHubV2MetadataTable
+          THN_CONTENT_HUB_PRIVATE_BUCKET_NAME:
+            Ref: ThnContentHubV2PrivateStore
+          SERVICE_BINDING_REGISTRY_TABLE_NAME: zoolanding-content-hub-test-ServiceBindingRegistryV2
+          LOG_LEVEL:
+            Ref: LogLevel
+      Events:
+        CollectionSchedule:
+          Type: Schedule
+          Properties:
+            Schedule: rate(1 day)
+            Enabled: false
+
+  ThnContentHubV2PublisherRole:
+    Type: AWS::IAM::Role
+    Condition: IsThnContentHubV2Enabled
+    Properties:
+      RoleName: zlp-thn-ch-test-publisher
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ExactThnPublicationBoundary
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadExactThnPrivatePublication
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                Resource:
+                  Fn::GetAtt:
+                    - ThnContentHubV2MetadataTable
+                    - Arn
+                Condition:
+                  ForAllValues:StringLike:
+                    dynamodb:LeadingKeys:
+                      - THN#test#thehairnarrative.com#journal-owner#thehairnarrative-com#thehairnarrative-com-journal#*
+              - Sid: RecordExactThnProjectionManifest
+                Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                Resource:
+                  Fn::GetAtt:
+                    - ThnContentHubV2MetadataTable
+                    - Arn
+                Condition:
+                  ForAllValues:StringEquals:
+                    dynamodb:LeadingKeys:
+                      - THN#test#thehairnarrative.com#journal-owner#thehairnarrative-com#thehairnarrative-com-journal#PROJECTION
+                  StringEquals:
+                    dynamodb:EnclosingOperation: TransactWriteItems
+                  StringEqualsIfExists:
+                    dynamodb:ReturnValues: NONE
+              - Sid: ReadExactThnPrivatePackage
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource:
+                  Fn::Sub: ${ThnContentHubV2PrivateStore.Arn}/private/test/thehairnarrative.com/thehairnarrative-com-journal/immutable-revisions/*/*/*/package.json
+              - Sid: ReadExactThnPublishedProjection
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                Resource:
+                  Fn::GetAtt:
+                    - ContentHubMetadataTable
+                    - Arn
+                Condition:
+                  ForAllValues:StringLike:
+                    dynamodb:LeadingKeys:
+                      - HUB#thehairnarrative-com-journal
+                      - LIVE_MEDIA#test#thehairnarrative.com#thehairnarrative-com-journal#*
+                      - SLUG#test#thehairnarrative.com#en
+                      - SLUG#test#thehairnarrative.com#es
+              - Sid: FinalizeExactThnProjection
+                Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                Resource:
+                  Fn::GetAtt:
+                    - ContentHubMetadataTable
+                    - Arn
+                Condition:
+                  ForAllValues:StringLike:
+                    dynamodb:LeadingKeys:
+                      - HUB#thehairnarrative-com-journal
+                      - LIVE_MEDIA#test#thehairnarrative.com#thehairnarrative-com-journal#*
+                      - SLUG#test#thehairnarrative.com#en
+                      - SLUG#test#thehairnarrative.com#es
+                  StringEquals:
+                    dynamodb:EnclosingOperation: TransactWriteItems
+                  StringEqualsIfExists:
+                    dynamodb:ReturnValues: NONE
+              - Sid: WriteExactThnPublishedObjects
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource:
+                  - Fn::Sub: ${ContentHubPackagesBucket.Arn}/content-hubs/test/thehairnarrative-com-journal/published/*
+                  - Fn::Sub: ${ContentHubPackagesBucket.Arn}/content-hubs/test/thehairnarrative-com-journal/prepared-media/*
+                  - Fn::Sub: ${ContentHubPackagesBucket.Arn}/content-hubs/test/thehairnarrative-com-journal/delivery-manifest/*
+              - Sid: CheckExactThnBindingBeforePublish
+                Effect: Allow
+                Action:
+                  - dynamodb:ConditionCheckItem
+                Resource:
+                  Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-content-hub-test-ServiceBindingRegistryV2
+                Condition:
+                  ForAllValues:StringEquals:
+                    dynamodb:LeadingKeys:
+                      - SERVICE_BINDING#test#thn-journal-test-v2
+                  StringEquals:
+                    dynamodb:EnclosingOperation: TransactWriteItems
+                  StringEqualsIfExists:
+                    dynamodb:ReturnValues: NONE
+              - Sid: AppendExactThnPublishAudit
+                Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                Resource:
+                  Fn::GetAtt:
+                    - ThnContentHubV2AuditTable
+                    - Arn
+                Condition:
+                  ForAllValues:StringLike:
+                    dynamodb:LeadingKeys:
+                      - AUDIT#test#thehairnarrative.com#thehairnarrative-com-journal#*
+
+  ThnContentHubV2PublisherFunction:
+    Type: AWS::Serverless::Function
+    Condition: IsThnContentHubV2Enabled
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      CodeUri: .
+      Handler: publisher_lambda.lambda_handler
+      FunctionName: zoolanding-content-hub-test-ThnV2Publisher
+      Description: Sole finalizer for the public THN journal projection.
+      AutoPublishAlias: test
+      Role:
+        Fn::GetAtt:
+          - ThnContentHubV2PublisherRole
+          - Arn
+      Environment:
+        Variables:
+          CONTENT_HUB_ENVIRONMENT: test
+          CONTENT_HUB_DOMAIN: thehairnarrative.com
+          CONTENT_HUB_ID: thehairnarrative-com-journal
+          THN_CONTENT_HUB_METADATA_TABLE_NAME:
+            Ref: ThnContentHubV2MetadataTable
+          THN_CONTENT_HUB_AUDIT_TABLE_NAME:
+            Ref: ThnContentHubV2AuditTable
+          THN_CONTENT_HUB_PRIVATE_BUCKET_NAME:
+            Ref: ThnContentHubV2PrivateStore
+          CONTENT_HUB_METADATA_TABLE_NAME:
+            Ref: ContentHubMetadataTable
+          CONTENT_HUB_PACKAGES_BUCKET_NAME:
+            Ref: ContentHubPackagesBucket
+          SERVICE_BINDING_REGISTRY_TABLE_NAME: zoolanding-content-hub-test-ServiceBindingRegistryV2
+          LOG_LEVEL:
+            Ref: LogLevel
+
+  ThnContentHubV2PublicMediaRole:
+    Type: AWS::IAM::Role
+    Condition: IsThnContentHubV2Enabled
+    Properties:
+      RoleName: zlp-thn-ch-test-public-media
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ExactThnPublicMediaRead
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadExactThnLiveManifest
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                Resource:
+                  Fn::GetAtt:
+                    - ContentHubMetadataTable
+                    - Arn
+                Condition:
+                  ForAllValues:StringLike:
+                    dynamodb:LeadingKeys:
+                      - LIVE_MEDIA#test#thehairnarrative.com#thehairnarrative-com-journal#*
+              - Sid: ReadExactThnImmutableVariant
+                Effect: Allow
+                Action:
+                  - s3:GetObjectVersion
+                Resource:
+                  Fn::Sub: ${ContentHubPackagesBucket.Arn}/content-hubs/test/thehairnarrative-com-journal/published/thehairnarrative.com/*/*/*/media/*/*
+
+  ThnContentHubV2PublicMediaFunction:
+    Type: AWS::Serverless::Function
+    Condition: IsThnContentHubV2Enabled
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      CodeUri: .
+      Handler: public_media_lambda.lambda_handler
+      FunctionName: zoolanding-content-hub-test-ThnV2PublicMedia
+      Description: Public exact-manifest reader for immutable THN journal media variants.
+      AutoPublishAlias: test
+      Role:
+        Fn::GetAtt:
+          - ThnContentHubV2PublicMediaRole
+          - Arn
+      Environment:
+        Variables:
+          CONTENT_HUB_ENVIRONMENT: test
+          CONTENT_HUB_DOMAIN: thehairnarrative.com
+          CONTENT_HUB_ID: thehairnarrative-com-journal
+          CONTENT_HUB_METADATA_TABLE_NAME:
+            Ref: ContentHubMetadataTable
+          CONTENT_HUB_PACKAGES_BUCKET_NAME:
+            Ref: ContentHubPackagesBucket
+          SERVICE_BINDING_REGISTRY_TABLE_NAME: zoolanding-content-hub-test-ServiceBindingRegistryV2
+          LOG_LEVEL:
+            Ref: LogLevel
+      Events:
+        PublicMedia:
+          Type: HttpApi
+          Properties:
+            ApiId:
+              Ref: ContentHubApi
+            Method: GET
+            Path: /features/content-hub-v2/public-media/{articleId}/{locale}/{revisionId}/{assetId}/{variantId}
+
+  ThnContentHubV2InvalidationWorkerRole:
+    Type: AWS::IAM::Role
+    Condition: IsThnContentHubV2Enabled
+    Properties:
+      RoleName: zlp-thn-ch-test-invalidation
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ExactThnInvalidationBoundary
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ConsumeExactThnInvalidationOutbox
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:UpdateItem
+                Resource:
+                  Fn::GetAtt:
+                    - ThnContentHubV2MetadataTable
+                    - Arn
+                Condition:
+                  ForAllValues:StringLike:
+                    dynamodb:LeadingKeys:
+                      - OUTBOX#test#thehairnarrative.com#thehairnarrative-com-journal#*
+              - Sid: InvalidateExactThnDistribution
+                Effect: Allow
+                Action:
+                  - cloudfront:CreateInvalidation
+                Resource:
+                  Fn::Sub: arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${ThnContentHubV2PublicDistributionId}
+
+  ThnContentHubV2InvalidationWorkerFunction:
+    Type: AWS::Serverless::Function
+    Condition: IsThnContentHubV2Enabled
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      CodeUri: .
+      Handler: invalidation_worker_lambda.lambda_handler
+      FunctionName: zoolanding-content-hub-test-ThnV2Invalidation
+      Description: Dormant exact-outbox worker for THN journal cache invalidation.
+      AutoPublishAlias: test
+      Role:
+        Fn::GetAtt:
+          - ThnContentHubV2InvalidationWorkerRole
+          - Arn
+      Environment:
+        Variables:
+          THN_CONTENT_HUB_METADATA_TABLE_NAME:
+            Ref: ThnContentHubV2MetadataTable
+          THN_CONTENT_HUB_PUBLIC_DISTRIBUTION_ID:
+            Ref: ThnContentHubV2PublicDistributionId
+          LOG_LEVEL:
+            Ref: LogLevel
+      Events:
+        InvalidationSchedule:
+          Type: Schedule
+          Properties:
+            Schedule: rate(1 minute)
+            Enabled: false
+
+  ThnContentHubV2EmergencyWithdrawRole:
+    Type: AWS::IAM::Role
+    Condition: IsThnContentHubV2Enabled
+    Properties:
+      RoleName: zlp-thn-ch-test-emergency-withdraw
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ExactThnEmergencyWithdrawal
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadExactThnProjectionManifest
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                Resource:
+                  Fn::GetAtt:
+                    - ThnContentHubV2MetadataTable
+                    - Arn
+                Condition:
+                  ForAllValues:StringEquals:
+                    dynamodb:LeadingKeys:
+                      - THN#test#thehairnarrative.com#journal-owner#thehairnarrative-com#thehairnarrative-com-journal#PROJECTION
+              - Sid: CheckpointExactThnProjectionManifest
+                Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                Resource:
+                  Fn::GetAtt:
+                    - ThnContentHubV2MetadataTable
+                    - Arn
+                Condition:
+                  ForAllValues:StringEquals:
+                    dynamodb:LeadingKeys:
+                      - THN#test#thehairnarrative.com#journal-owner#thehairnarrative-com#thehairnarrative-com-journal#PROJECTION
+                  StringEquals:
+                    dynamodb:EnclosingOperation: TransactWriteItems
+                  StringEqualsIfExists:
+                    dynamodb:ReturnValues: NONE
+              - Sid: WithdrawExactThnProjection
+                Effect: Allow
+                Action:
+                  - dynamodb:DeleteItem
+                Resource:
+                  Fn::GetAtt:
+                    - ContentHubMetadataTable
+                    - Arn
+                Condition:
+                  ForAllValues:StringLike:
+                    dynamodb:LeadingKeys:
+                      - HUB#thehairnarrative-com-journal
+                      - LIVE_MEDIA#test#thehairnarrative.com#thehairnarrative-com-journal#*
+                      - SLUG#test#thehairnarrative.com#en
+                      - SLUG#test#thehairnarrative.com#es
+                  StringEquals:
+                    dynamodb:EnclosingOperation: TransactWriteItems
+                  StringEqualsIfExists:
+                    dynamodb:ReturnValues: NONE
+              - Sid: EnqueueExactThnWithdrawalInvalidations
+                Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                Resource:
+                  Fn::GetAtt:
+                    - ThnContentHubV2MetadataTable
+                    - Arn
+                Condition:
+                  ForAllValues:StringLike:
+                    dynamodb:LeadingKeys:
+                      - OUTBOX#test#thehairnarrative.com#thehairnarrative-com-journal#*
+                  StringEquals:
+                    dynamodb:EnclosingOperation: TransactWriteItems
+                  StringEqualsIfExists:
+                    dynamodb:ReturnValues: NONE
+              - Sid: AppendExactThnWithdrawalAudit
+                Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                Resource:
+                  Fn::GetAtt:
+                    - ThnContentHubV2AuditTable
+                    - Arn
+                Condition:
+                  ForAllValues:StringLike:
+                    dynamodb:LeadingKeys:
+                      - AUDIT#test#thehairnarrative.com#thehairnarrative-com-journal#*
+                  StringEquals:
+                    dynamodb:EnclosingOperation: TransactWriteItems
+                  StringEqualsIfExists:
+                    dynamodb:ReturnValues: NONE
+              - Sid: CheckExactThnBindingBeforeWithdrawal
+                Effect: Allow
+                Action:
+                  - dynamodb:ConditionCheckItem
+                Resource:
+                  Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-content-hub-test-ServiceBindingRegistryV2
+                Condition:
+                  ForAllValues:StringEquals:
+                    dynamodb:LeadingKeys:
+                      - SERVICE_BINDING#test#thn-journal-test-v2
+                  StringEquals:
+                    dynamodb:EnclosingOperation: TransactWriteItems
+                  StringEqualsIfExists:
+                    dynamodb:ReturnValues: NONE
+
+  ThnContentHubV2EmergencyWithdrawFunction:
+    Type: AWS::Serverless::Function
+    Condition: IsThnContentHubV2Enabled
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      CodeUri: .
+      Handler: emergency_withdraw_lambda.lambda_handler
+      FunctionName: zoolanding-content-hub-test-ThnV2EmergencyWithdraw
+      Description: Operator-only bounded emergency withdrawal for the THN journal projection.
+      AutoPublishAlias: test
+      Role:
+        Fn::GetAtt:
+          - ThnContentHubV2EmergencyWithdrawRole
+          - Arn
+      Environment:
+        Variables:
+          CONTENT_HUB_ENVIRONMENT: test
+          CONTENT_HUB_DOMAIN: thehairnarrative.com
+          CONTENT_HUB_ID: thehairnarrative-com-journal
+          THN_CONTENT_HUB_METADATA_TABLE_NAME:
+            Ref: ThnContentHubV2MetadataTable
+          THN_CONTENT_HUB_AUDIT_TABLE_NAME:
+            Ref: ThnContentHubV2AuditTable
+          CONTENT_HUB_METADATA_TABLE_NAME:
+            Ref: ContentHubMetadataTable
+          SERVICE_BINDING_REGISTRY_TABLE_NAME: zoolanding-content-hub-test-ServiceBindingRegistryV2
+          THN_CONTENT_HUB_DESCRIPTOR_VERSION_ID:
+            Ref: ThnContentHubV2DescriptorVersionId
+          THN_CONTENT_HUB_DESCRIPTOR_SHA256:
+            Ref: ThnContentHubV2DescriptorSha256
+          THN_CONTENT_HUB_AUTH_POLICY_VERSION:
+            Ref: ThnContentHubV2AuthPolicyVersion
+          THN_CONTENT_HUB_AWS_PARTITION:
+            Ref: AWS::Partition
+          THN_CONTENT_HUB_AWS_ACCOUNT_ID:
+            Ref: AWS::AccountId
+          THN_CONTENT_HUB_AWS_REGION:
+            Ref: AWS::Region
+          LOG_LEVEL:
+            Ref: LogLevel
+
+  ThnContentHubV2EmergencyWithdrawInvokePolicy:
+    Type: AWS::IAM::Policy
+    Condition: HasThnContentHubV2EmergencyOperatorRole
+    Properties:
+      PolicyName: InvokeExactThnEmergencyWithdraw
+      Roles:
+        - zoolanding-thn-content-hub-test-operator
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: InvokeExactThnEmergencyWithdraw
+            Effect: Allow
+            Action:
+              - lambda:InvokeFunction
+            Resource:
+              Ref: ThnContentHubV2EmergencyWithdrawFunction.Alias
+
+  ThnContentHubV2EmergencyWithdrawInvokePermission:
+    Type: AWS::Lambda::Permission
+    Condition: HasThnContentHubV2EmergencyOperatorRole
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName:
+        Ref: ThnContentHubV2EmergencyWithdrawFunction.Alias
+      Principal:
+        Ref: ThnContentHubV2EmergencyOperatorRoleArn
+
+  ThnContentHubV2PreparedOrphanCollectorRole:
+    Type: AWS::IAM::Role
+    Condition: IsThnContentHubV2Enabled
+    Properties:
+      RoleName: zlp-thn-ch-test-prepared-orphan-gc
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ExactThnPreparedOrphanCollection
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CollectExactThnPreparedCandidates
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                Resource:
+                  Fn::GetAtt:
+                    - ThnContentHubV2MetadataTable
+                    - Arn
+                Condition:
+                  ForAllValues:StringLike:
+                    dynamodb:LeadingKeys:
+                      - THN#test#thehairnarrative.com#journal-owner#thehairnarrative-com#thehairnarrative-com-journal#*
+              - Sid: ProveExactThnPreparedObjectIsNotLive
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                Resource:
+                  Fn::GetAtt:
+                    - ContentHubMetadataTable
+                    - Arn
+                Condition:
+                  ForAllValues:StringEquals:
+                    dynamodb:LeadingKeys:
+                      - HUB#thehairnarrative-com-journal
+              - Sid: DeleteExactThnPreparedObjects
+                Effect: Allow
+                Action:
+                  - s3:DeleteObject
+                Resource:
+                  - Fn::Sub: ${ContentHubPackagesBucket.Arn}/content-hubs/test/thehairnarrative-com-journal/prepared-media/*
+                  - Fn::Sub: ${ContentHubPackagesBucket.Arn}/content-hubs/test/thehairnarrative-com-journal/delivery-manifest/prepared/*
+              - Sid: CheckExactThnBindingBeforePreparedCollection
+                Effect: Allow
+                Action:
+                  - dynamodb:ConditionCheckItem
+                Resource:
+                  Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-content-hub-test-ServiceBindingRegistryV2
+                Condition:
+                  ForAllValues:StringEquals:
+                    dynamodb:LeadingKeys:
+                      - SERVICE_BINDING#test#thn-journal-test-v2
+                  StringEquals:
+                    dynamodb:EnclosingOperation: TransactWriteItems
+                  StringEqualsIfExists:
+                    dynamodb:ReturnValues: NONE
+
+  ThnContentHubV2PreparedOrphanCollectorFunction:
+    Type: AWS::Serverless::Function
+    Condition: IsThnContentHubV2Enabled
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      CodeUri: .
+      Handler: prepared_orphan_collector_lambda.lambda_handler
+      FunctionName: zoolanding-content-hub-test-ThnV2PreparedOrphanCollector
+      Description: Dormant exact-key collector for unreferenced THN prepared public objects.
+      AutoPublishAlias: test
+      Role:
+        Fn::GetAtt:
+          - ThnContentHubV2PreparedOrphanCollectorRole
+          - Arn
+      Environment:
+        Variables:
+          THN_CONTENT_HUB_METADATA_TABLE_NAME:
+            Ref: ThnContentHubV2MetadataTable
+          CONTENT_HUB_METADATA_TABLE_NAME:
+            Ref: ContentHubMetadataTable
+          CONTENT_HUB_PACKAGES_BUCKET_NAME:
+            Ref: ContentHubPackagesBucket
+          SERVICE_BINDING_REGISTRY_TABLE_NAME: zoolanding-content-hub-test-ServiceBindingRegistryV2
+          LOG_LEVEL:
+            Ref: LogLevel
+      Events:
+        CollectionSchedule:
+          Type: Schedule
+          Properties:
+            Schedule: rate(1 day)
+            Enabled: false
 
   ContentHubMetadataTable:
     Type: AWS::DynamoDB::Table
@@ -677,6 +1717,8 @@ Resources:
 
   ContentHubFunction:
     Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
     Properties:
       CodeUri: .
       Handler: lambda_function.lambda_handler
@@ -809,3 +1851,48 @@ Outputs:
     Description: Content hub package bucket name.
     Value:
       Ref: ContentHubPackagesBucket
+  ThnContentHubV2MetadataTableArn:
+    Condition: IsThnContentHubV2StateProvisioned
+    Description: Exact retained THN Content Hub v2 private metadata table ARN.
+    Value:
+      Fn::GetAtt:
+        - ThnContentHubV2MetadataTable
+        - Arn
+  ThnContentHubV2AuditTableName:
+    Condition: IsThnContentHubV2StateProvisioned
+    Description: Exact retained THN Content Hub v2 audit table name.
+    Value:
+      Ref: ThnContentHubV2AuditTable
+  ThnContentHubV2PrivateStoreName:
+    Condition: IsThnContentHubV2StateProvisioned
+    Description: Exact retained THN Content Hub v2 private object-store name.
+    Value:
+      Ref: ThnContentHubV2PrivateStore
+  ThnContentHubV2AuthoringFunctionArn:
+    Condition: IsThnContentHubV2Enabled
+    Description: Protected owner-only THN Content Hub v2 authoring function ARN.
+    Value:
+      Fn::GetAtt:
+        - ThnContentHubV2AuthoringFunction
+        - Arn
+  ThnContentHubV2PublisherFunctionArn:
+    Condition: IsThnContentHubV2Enabled
+    Description: Sole THN Content Hub v2 public-projection publisher ARN.
+    Value:
+      Fn::GetAtt:
+        - ThnContentHubV2PublisherFunction
+        - Arn
+  ThnContentHubV2PublicMediaFunctionArn:
+    Condition: IsThnContentHubV2Enabled
+    Description: Read-only THN Content Hub v2 public-media origin ARN.
+    Value:
+      Fn::GetAtt:
+        - ThnContentHubV2PublicMediaFunction
+        - Arn
+  ThnContentHubV2EmergencyWithdrawFunctionArn:
+    Condition: IsThnContentHubV2Enabled
+    Description: Operator-only THN Content Hub v2 emergency-withdraw function ARN.
+    Value:
+      Fn::GetAtt:
+        - ThnContentHubV2EmergencyWithdrawFunction
+        - Arn

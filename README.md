@@ -36,6 +36,84 @@ It supports draft-configurable blog/content workflows without putting storage, p
 - `OPTIONS /features/content-hub/action`
 - `OPTIONS /features/content-hub/public-action`
 
+## The Hair Narrative v2 Boundary (Build-only)
+
+`template.yaml` also contains a separate, TEST-only Content Hub v2 scaffold for
+The Hair Narrative. It is fail-closed: both `EnableThnContentHubV2` and
+`ProvisionThnContentHubV2State` default to `false`, and activation additionally
+requires the termination-protection gate, the exact emergency operator role,
+the exact TEST CloudFront distribution, and immutable descriptor, digest, and
+Auth Admin policy coordinates.
+
+The isolated boundary reserves only these routes:
+
+- `POST /features/content-hub-v2/read`
+- `POST /features/content-hub-v2/action`
+- `GET /features/content-hub-v2/public-media/{articleId}/{locale}/{revisionId}/{assetId}/{variantId}`
+
+Seven functions have seven separate short, deployable IAM role names: authoring,
+private-asset collection, publication, public media, invalidation, emergency
+withdrawal, and prepared-orphan collection. Authoring can read only the exact
+THN auth rows and mutate private THN state; only the publisher can finalize the
+public THN projection; public media is read-only; emergency withdrawal has no
+API route and is invokable only by the named TEST operator. Worker schedules are
+present but explicitly disabled.
+
+The dedicated metadata and audit tables are retained, encrypted, deletion
+protected, and PITR-enabled. The private bucket is retained, encrypted,
+versioned, and blocks all public access. These state resources use their own
+provisioning condition so creating them never implicitly enables the runtime.
+
+This infrastructure change does not activate or deploy the boundary. The v2
+authoring entrypoint now rejects unknown operations before private access,
+validates the exact THN scope and immutable server configuration, strongly reads
+the namespaced session and current-user state, requires stored-hash-bound CSRF
+proof for mutations, and exposes an atomic registry writer-epoch fence for final
+writes. `writerMode=disabled` rejects every mutation. The business read/write
+operations are intentionally not implemented yet, so an otherwise authorized
+request returns a controlled no-store `feature_not_ready` response.
+
+The public-media module is now an implemented, physically isolated, read-only
+origin. It accepts only the exact public TEST host and immutable media route,
+strongly reads one `LIVE_MEDIA` manifest for the requested THN article, locale,
+and revision, and fetches only the versioned S3 object named by that manifest.
+Only `published`/`public`/`live` manifests and canonical JPEG, PNG, or WebP
+variants can produce an immutable response; malformed, draft, working, orphan,
+withdrawn, cross-scope, Zoosite, or direct-storage requests return a generic
+no-store response. The public-media role cannot list, write, delete, read
+unversioned objects, read authoring state, or inspect the registry.
+
+The forwarded-host check is a transport precondition, not the data-authorization
+control: the public front door owns header provenance, while the exclusive live
+manifest and versioned object reference decide whether bytes are public. The
+route exposes no private or authoring record even if a caller reaches the shared
+API endpoint directly.
+
+The emergency-withdrawal module is now implemented as an operator-only direct
+invocation of the exact `test` alias. It has no HTTP, Function URL, schedule, or
+event source. After the registry has already disabled writers and advanced the
+writer epoch, it strongly reads the sealed THN projection manifest and removes
+one page of at most 19 recorded article, locale-path, category, or public-media
+pointers in a maximum-25-item conditional transaction. The same transaction
+advances the manifest and page, checkpoints progress, and appends targeted
+invalidation plus audit records, so retries resume safely without touching
+private authoring data or another draft.
+
+The four remaining internal non-authoring modules stay physically isolated and
+dormant until their separately reviewed behavior is added. Their entrypoints
+fail before data access. Both v2 switches remain at their fail-closed defaults.
+
+The consolidated architecture gate also pins the publisher's only private
+object read to immutable revision packages at
+`immutable-revisions/{articleId}/{locale}/{revisionId}/package.json`. It cannot
+read working bodies, draft objects, sessions, another hub, or another tenant.
+The publisher implementation remains a later Workstream C task.
+
+Every SAM function, including the legacy Content Hub and registry mutation
+function, uses an exact custom artifact allowlist. This prevents v2 handlers,
+tests, documentation, workflows, and unrelated repository files from entering a
+legacy or cross-function Lambda package.
+
 The browser sends:
 
 - `X-ZLP-Domain`
@@ -136,6 +214,12 @@ The Lambda defaults to 512 MB through the `FunctionMemorySize` SAM parameter. Th
 
 ```powershell
 python -m unittest discover -s tests -p "test_*.py"
+sam build --no-cached
+python tools/check_lambda_artifacts.py
 sam validate
 pip-audit -r requirements.txt
 ```
+
+On Windows, Python's `zoneinfo` tests require an IANA timezone database. Set
+`PYTHONTZPATH` to a trusted local zoneinfo directory (for example Git for
+Windows' `mingw64/share/zoneinfo`) when the `tzdata` package is not installed.

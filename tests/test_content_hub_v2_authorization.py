@@ -1,3 +1,4 @@
+import ast
 import copy
 import pathlib
 import traceback
@@ -23,27 +24,35 @@ REGISTRY = {
 }
 
 
-def scope_key():
-    return (
-        "CURRENT_USER#test#thehairnarrative.com#thn-journal-test-v2#journal-owner#"
-        "thehairnarrative-com#thehairnarrative-com-journal"
-    )
+def auth_scope():
+    return {
+        "environment": "test",
+        "domain": "thehairnarrative.com",
+        "tenantId": "thehairnarrative-com",
+        "hubId": "thehairnarrative-com-journal",
+        "authProfileId": "journal-owner",
+        "serviceBindingId": "thn-journal-test-v2",
+    }
 
 
 def session(*, purpose="client-owner", version=4, **overrides):
     value = {
-        "scopeKey": scope_key(),
+        "recordType": "authSessionV2",
+        "sessionIdHash": "a" * 64,
+        "csrfHash": "b" * 64,
+        "scope": auth_scope(),
         "subject": "owner-subject",
+        "accountHash": "c" * 64,
         "accountPurpose": purpose,
         "sessionVersion": version,
-        "environment": "test",
-        "domain": "thehairnarrative.com",
-        "serviceBindingId": "thn-journal-test-v2",
-        "authProfileId": "journal-owner",
-        "tenantId": "thehairnarrative-com",
-        "hubId": "thehairnarrative-com-journal",
+        "roles": ["journal-owner"],
+        "cognitoUsername": "owner@example.test",
+        "createdAt": 900,
+        "lastSeenAt": 950,
+        "idleExpiresAt": 1_500,
+        "absoluteExpiresAt": 2_000,
         "expiresAt": 2_000,
-        "revoked": False,
+        "revokedAt": None,
     }
     value.update(overrides)
     return value
@@ -51,18 +60,13 @@ def session(*, purpose="client-owner", version=4, **overrides):
 
 def current_user(*, purpose="client-owner", version=4, **overrides):
     value = {
-        "scopeKey": scope_key(),
-        "userKey": "USER#owner-subject",
-        "recordType": "thn-current-user-v2",
+        "pk": "CURRENT_USER#test#thn-journal-test-v2",
+        "sk": "SUBJECT#owner-subject",
+        "contractVersion": 1,
+        "scope": auth_scope(),
         "subject": "owner-subject",
         "accountPurpose": purpose,
         "sessionVersion": version,
-        "environment": "test",
-        "domain": "thehairnarrative.com",
-        "serviceBindingId": "thn-journal-test-v2",
-        "authProfileId": "journal-owner",
-        "tenantId": "thehairnarrative-com",
-        "hubId": "thehairnarrative-com-journal",
         "enabled": True,
     }
     value.update(overrides)
@@ -89,10 +93,8 @@ class FakeAuthorizationStore:
         self.calls.append(("session", session_id_hash, consistent_read))
         return copy.deepcopy(self.session_record)
 
-    def get_current_user(self, requested_scope_key, user_key, *, consistent_read):
-        self.calls.append(
-            ("current-user", requested_scope_key, user_key, consistent_read)
-        )
+    def get_current_user(self, subject, *, consistent_read):
+        self.calls.append(("current-user", subject, consistent_read))
         return copy.deepcopy(self.user_record)
 
 
@@ -137,7 +139,7 @@ class ContentHubV2AuthorizationTests(unittest.TestCase):
             store.calls,
             [
                 ("session", "a" * 64, True),
-                ("current-user", scope_key(), "USER#owner-subject", True),
+                ("current-user", "owner-subject", True),
             ],
         )
 
@@ -201,12 +203,18 @@ class ContentHubV2AuthorizationTests(unittest.TestCase):
 
     def test_missing_mismatched_or_expired_session_fields_fail_closed(self):
         invalid_sessions = [
+            session(recordType="legacySession"),
+            session(sessionIdHash="d" * 64),
             session(accountPurpose=None),
             session(purpose="qa"),
-            session(scopeKey="CURRENT_USER#other"),
+            session(scope={**auth_scope(), "tenantId": "other-tenant"}),
+            session(createdAt=951),
+            session(idleExpiresAt=2_751),
+            session(absoluteExpiresAt=44_101, expiresAt=44_101),
             session(expiresAt=1_000),
-            session(revoked=True),
+            session(revokedAt=999),
             session(sessionVersion=True),
+            session(roles=[]),
         ]
         for invalid in invalid_sessions:
             with self.subTest(invalid=invalid):
@@ -221,6 +229,10 @@ class ContentHubV2AuthorizationTests(unittest.TestCase):
 
     def test_disabled_or_mismatched_current_user_fails_closed(self):
         invalid_users = [
+            current_user(pk="CURRENT_USER#test#another-binding"),
+            current_user(sk="SUBJECT#other"),
+            current_user(contractVersion=2),
+            current_user(scope={**auth_scope(), "hubId": "another-hub"}),
             current_user(enabled=False),
             current_user(accountPurpose=None),
             current_user(purpose="qa"),
@@ -318,6 +330,17 @@ class ContentHubV2AuthorizationTests(unittest.TestCase):
                 context,
                 operation="articleList",
                 records=[scoped_record(recordPurpose=None)],
+                **self.final_kwargs(store, registry),
+            )
+
+    def test_taxonomy_reference_read_rejects_a_non_record_candidate(self):
+        context, store, registry = self.context(writer_mode="disabled")
+
+        with self.assertRaises(authorization.ContentHubV2AuthorizationError):
+            authorization.authorize_final_read(
+                context,
+                operation="taxonomyList",
+                records=[{"taxonomyId": "category"}, "invalid"],
                 **self.final_kwargs(store, registry),
             )
 
@@ -444,11 +467,22 @@ class ContentHubV2AuthorizationTests(unittest.TestCase):
     def test_v1_dispatch_does_not_import_or_reference_v2_authorization(self):
         root = pathlib.Path(__file__).resolve().parents[1]
         handler = (root / "lambda_function.py").read_text(encoding="utf-8")
+        tree = ast.parse(handler)
+        legacy_handler = next(
+            node
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == "lambda_handler"
+        )
+        legacy_source = ast.unparse(legacy_handler)
         template = (root / "template.yaml").read_text(encoding="utf-8")
+        legacy_function = template.split("  ContentHubFunction:\n", 1)[1].split(
+            "\n  DueSchedulesRule:", 1
+        )[0]
 
-        self.assertNotIn("content_hub_v2_authorization", handler)
+        self.assertNotIn("content_hub_v2", legacy_source)
         self.assertNotIn("content_hub_v2_authorization", template)
-        self.assertNotIn("Path: /features/content-hub-v2", template)
+        self.assertNotIn("Path: /features/content-hub-v2", legacy_function)
 
 
 if __name__ == "__main__":

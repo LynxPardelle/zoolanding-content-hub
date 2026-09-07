@@ -123,6 +123,7 @@ def execute_registry_fenced_transaction(
     mutation_items: Sequence[Mapping[str, Any]],
     expected_descriptor: Mapping[str, Any],
     expected_writer_mode: str,
+    expected_writer_epoch: int,
     trusted_resource_scope: Mapping[str, Any],
 ) -> Mapping[str, Any]:
     """Commit up to 99 non-registry mutations behind the current exact epoch.
@@ -134,7 +135,11 @@ def execute_registry_fenced_transaction(
     """
 
     items = _validated_mutation_items(mutation_items)
-    if expected_writer_mode not in _ALLOWED_WRITER_MODES:
+    if (
+        expected_writer_mode not in _ALLOWED_WRITER_MODES
+        or type(expected_writer_epoch) is not int
+        or expected_writer_epoch < 1
+    ):
         _reject_binding()
     try:
         record = load_active_service_binding(
@@ -145,7 +150,10 @@ def execute_registry_fenced_transaction(
     except RegistryConsumerError:
         _reject_binding()
 
-    if record.get("writerMode") != expected_writer_mode:
+    if (
+        record.get("writerMode") != expected_writer_mode
+        or record.get("writerEpoch") != expected_writer_epoch
+    ):
         _reject_binding()
     _assert_mutations_target_bound_table(items, record)
 
