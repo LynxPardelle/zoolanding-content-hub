@@ -207,6 +207,9 @@ def _validate_runtime_config() -> None:
 
 
 def main() -> int:
+    if sys.argv[1:] == ["--thn-selection-contract"]:
+        print("thn-test-selection/v1")
+        return 0
     if sys.argv[1:] == ["--verify-cloud-guards"]:
         verify_cloud_guards(os.environ)
         return 0

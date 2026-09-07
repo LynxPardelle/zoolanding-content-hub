@@ -17,6 +17,10 @@ Existing rollback artifacts lacking this new selector/preflight are not
 compatible merely because their old source tests passed. Recovery selection,
 business CRUD/publishing, owner onboarding, and full TEST activation remain
 separate completion requirements.
+A supplied selection now requires a packaged-tool capability check before
+credentials; a legacy artifact is rejected instead of silently ignoring it.
+Disabling an existing conditional runtime remains blocked by the unchanged
+no-removal guard and requires a separately reviewed recovery transition.
 
 Verification is recorded in the ignored hub workspace evidence rather than
 copying operational values here. No claim of live activation is made.

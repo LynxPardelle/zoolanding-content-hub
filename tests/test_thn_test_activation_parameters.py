@@ -32,6 +32,15 @@ def environment(parameters=None, **envelope_overrides):
 
 
 class ThnTestActivationParametersTests(unittest.TestCase):
+    def test_selection_contract_is_reported_without_cloud_or_parameter_files(self):
+        with mock.patch.dict("os.environ", {}, clear=True), \
+                mock.patch("sys.argv", ["prepare_test_parameters.py", "--thn-selection-contract"]), \
+                mock.patch("builtins.print") as output, \
+                mock.patch.object(subject, "verify_cloud_guards", side_effect=AssertionError("No cloud")), \
+                mock.patch.object(subject, "build_parameters", side_effect=AssertionError("No files")):
+            self.assertEqual(subject.main(), 0)
+            output.assert_called_once_with("thn-test-selection/v1")
+
     def test_exact_selection_is_not_silently_disabled(self):
         parameters, sensitive = subject.build_parameters(environment())
         for key, value in V2.items():

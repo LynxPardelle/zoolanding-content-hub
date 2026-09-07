@@ -68,6 +68,12 @@ class TestDeliveryWorkflowContractTests(unittest.TestCase):
                 workflow = self.workflow(name)
                 self.assertEqual(workflow.count("THN_V2_TEST_PARAMETERS_JSON: ${{ vars.THN_V2_TEST_PARAMETERS_JSON }}"), 2)
                 self.assertIn("prepare_test_parameters.py --verify-cloud-guards", workflow)
+                self.assertIn("if: ${{ vars.THN_V2_TEST_PARAMETERS_JSON != '' }}", workflow)
+                self.assertIn('if [ -n "${THN_V2_TEST_PARAMETERS_JSON:-}" ]; then', workflow)
+                self.assertIn('"thn-test-selection/v1"', workflow)
+                self.assertIn('thn_test_selection_contract_missing', workflow)
+                self.assertLess(workflow.index("prepare_test_parameters.py --thn-selection-contract"),
+                                workflow.index("uses: aws-actions/configure-aws-credentials@"))
                 credentials = workflow.index("uses: aws-actions/configure-aws-credentials@")
                 guard = workflow.index("prepare_test_parameters.py --verify-cloud-guards")
                 execute = workflow.index("run: bash .aws-sam/build/release-tools/run_test_change_set.sh")

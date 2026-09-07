@@ -221,13 +221,19 @@ read the actual AWS account and TEST stack termination-protection state before
 creating a change set. Enabling or provisioning v2 state requires an existing,
 stable TEST stack with termination protection already enabled. The checker does
 not enable protection itself. Runtime disable and retained-state provisioning
-are independent, so an approved rollback can retain private state. The existing
-change-set guard continues to reject all removal/replacement operations.
+are independent parameters, not a verified recovery transition. Disabling an
+already-enabled runtime removes conditional resources and is blocked by the
+unchanged no-removal change-set guard. Such a transition needs a separately
+reviewed recovery path; this tool does not establish it or weaken that guard.
 
 This is delivery plumbing, not evidence that the private editor, publisher,
 owner onboarding, or TEST activation is complete. A prior rollback artifact
 must include this parameter contract; an older artifact cannot be silently
 treated as compatible.
+For a supplied THN selection, the workflows require the packaged tool to report
+`thn-test-selection/v1` before credentials. A legacy tool without that capability
+fails the release instead of silently ignoring the selection. With no THN
+selection, the compatibility check is skipped and the prior path is unchanged.
 
 The Lambda defaults to 512 MB through the `FunctionMemorySize` SAM parameter. This gives more CPU to the cold read path that loads AWS SDK/DynamoDB clients while keeping the runtime configurable per environment.
 
