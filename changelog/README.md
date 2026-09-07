@@ -11,5 +11,6 @@ Chronological implementation, QA, and release evidence lives here so routine tas
 - [2026-09-04 THN Content Hub v2 emergency withdrawal](2026-09-04-thn-content-hub-v2-emergency-withdrawal.md)
 - [2026-09-04 THN Content Hub v2 architecture security gate](2026-09-04-thn-content-hub-v2-architecture-security-gate.md)
 - [2026-09-04 TEST delivery and immutable rollback hardening](2026-09-04-test-delivery-hardening.md)
+- [2026-09-07 THN TEST parameter selection](2026-09-07-thn-test-selection.md)
 
 Use [../README.md](../README.md) for the current service contract and [../AGENTS.md](../AGENTS.md) for task routing.

@@ -62,6 +62,18 @@ class TestDeliveryWorkflowContractTests(unittest.TestCase):
             self.assertIn(value, workflow)
         self.assert_release_boundary(workflow)
 
+    def test_both_workflows_forward_selection_and_verify_cloud_before_changes(self):
+        for name in ("deploy-test.yml", "rollback-test.yml"):
+            with self.subTest(name=name):
+                workflow = self.workflow(name)
+                self.assertEqual(workflow.count("THN_V2_TEST_PARAMETERS_JSON: ${{ vars.THN_V2_TEST_PARAMETERS_JSON }}"), 2)
+                self.assertIn("prepare_test_parameters.py --verify-cloud-guards", workflow)
+                credentials = workflow.index("uses: aws-actions/configure-aws-credentials@")
+                guard = workflow.index("prepare_test_parameters.py --verify-cloud-guards")
+                execute = workflow.index("run: bash .aws-sam/build/release-tools/run_test_change_set.sh")
+                self.assertLess(credentials, guard)
+                self.assertLess(guard, execute)
+
 
 if __name__ == "__main__":
     unittest.main()

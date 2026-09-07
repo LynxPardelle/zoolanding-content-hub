@@ -134,6 +134,8 @@ jobs:
           CONTENT_HUB_CONFIG_JSON_BASE64: ${{ secrets.CONTENT_HUB_CONFIG_JSON_BASE64 }}
           AUTH_SESSION_TABLE_NAME: ${{ vars.AUTH_SESSION_TABLE_NAME }}
           AUTH_USER_STATE_TABLE_NAME: ${{ vars.AUTH_USER_STATE_TABLE_NAME }}
+          AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+          THN_V2_TEST_PARAMETERS_JSON: ${{ vars.THN_V2_TEST_PARAMETERS_JSON }}
         run: |
           set -euo pipefail
           test -n "$ARTIFACTS_BUCKET" || { echo "sam_artifacts_bucket_required"; exit 1; }
@@ -142,6 +144,12 @@ jobs:
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+      - name: Verify live THN TEST account and retained-state protection
+        shell: bash
+        env:
+          AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+          THN_V2_TEST_PARAMETERS_JSON: ${{ vars.THN_V2_TEST_PARAMETERS_JSON }}
+        run: python3 .aws-sam/build/release-tools/prepare_test_parameters.py --verify-cloud-guards
       - name: Create, describe, review, and execute rollback change set
         shell: bash
         env:
@@ -161,4 +169,3 @@ jobs:
         env:
           STACK_NAME: zoolanding-content-hub-test
         run: bash .aws-sam/build/release-tools/smoke_test_stack.sh
-

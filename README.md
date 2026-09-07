@@ -208,6 +208,27 @@ Required GitHub environment inputs:
 - `AWS_ROLE_ARN` variable.
 - `AWS_REGION` variable, default `us-east-1`.
 
+Optional THN-only TEST selection uses `THN_V2_TEST_PARAMETERS_JSON`. Omission
+keeps the existing disabled foundation defaults. When supplied, it must be a
+closed object with exactly `schemaVersion: 1`, `environment: "test"`, and
+`parameters` containing every key returned by `_thn_defaults()` in
+`tools/prepare_test_parameters.py`. Partial selections and v1/shared parameter
+overrides are rejected; no registry, account, writer mode, or epoch is changed.
+Never place credentials or account contact information in this selection.
+
+Deploy and rollback both validate the selection before credentials and then
+read the actual AWS account and TEST stack termination-protection state before
+creating a change set. Enabling or provisioning v2 state requires an existing,
+stable TEST stack with termination protection already enabled. The checker does
+not enable protection itself. Runtime disable and retained-state provisioning
+are independent, so an approved rollback can retain private state. The existing
+change-set guard continues to reject all removal/replacement operations.
+
+This is delivery plumbing, not evidence that the private editor, publisher,
+owner onboarding, or TEST activation is complete. A prior rollback artifact
+must include this parameter contract; an older artifact cannot be silently
+treated as compatible.
+
 The Lambda defaults to 512 MB through the `FunctionMemorySize` SAM parameter. This gives more CPU to the cold read path that loads AWS SDK/DynamoDB clients while keeping the runtime configurable per environment.
 
 ## Local Tests
