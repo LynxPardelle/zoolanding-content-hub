@@ -32,7 +32,7 @@ This repository owns the generic serverless BFF for protected Zoolanding content
 - `public-action` is limited to sanitized interaction writes. Fail closed unless origin, published/public article, published bundle, event policy, and rate limit all pass. Public comments/forms are not authorized by this surface.
 - Preserve `draft|unpublished -> review -> approved -> published -> unpublished` transitions. Schedules pin immutable revisions; unpublish/archive keep bundle and revision history.
 - Browser responses expose only allowlisted projections. Never return secrets, config values, table/bucket/object keys, signed URLs, actor identifiers, raw interaction/comment/form data, private contact data, or parser/internal error details.
-- Keep release order `feature -> dev -> test -> main`. Pushes to `dev`, `test`, or `main` deploy, so do not merge or deploy without explicit authorization.
+- Keep release order `feature -> dev -> test -> main`. TEST source promotion validates only and does not deploy AWS. Private THN execution uses the separate reviewed TEST lifecycle workflow; historical rollback accepts only compatible release artifacts, never validation artifacts. Do not merge, deploy, or activate without explicit authorization.
 
 ## Verification and records
 

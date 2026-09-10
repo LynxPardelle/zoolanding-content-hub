@@ -199,11 +199,32 @@ This is an operational audit trail using the existing versioned S3 bucket. It is
 
 This repo follows the Zoolanding promotion graph:
 
-- `dev` deploys development.
-- `test` deploys testing, only from a merge from `dev`.
-- `main` deploys production, only from a merge from `test`.
+- `dev` validates reviewed source changes.
+- `test` validates source only, from the exact two-parent merge of the current `dev` tip with an identical source tree. It does not deploy AWS.
+- `main` remains the production branch, only from a merge from `test`; this TEST change does not deploy or promote production.
 
-Required GitHub environment inputs:
+The existing `deploy-test.yml` path is named **Validate Test promotion (no
+deploy)**. Its two jobs have only `contents: read`, no GitHub Environment, no
+OIDC, and no deployment variables or secrets. Both test suites, the SAM build,
+exact package allowlists and independent artifact verification remain required.
+
+Its artifact name contains `test-validation`; metadata uses
+`zoolanding-test-validation/v1`, `purpose: validation-only` and boolean
+`deployable: false`. It binds the full source SHA, service, run and attempt. The
+transported inventory and hashes are checked after download by immutable ID.
+It contains no release tools and cannot be used as a deployment or rollback
+artifact. A green source promotion is not evidence of private access activation.
+
+New THN AWS provisioning and activation must use the reviewed
+[retained TEST lifecycle](docs/thn-test-release.md), starting with its exact
+five-resource `registry-provision` operation against the unchanged shared
+baseline. Do not use the former full-template automatic deployment as bootstrap:
+default parameters would introduce only three of those registry resources and
+invalidate the dedicated bootstrap baseline. Historical rollback remains a
+separate privileged path for compatible prior release artifacts; it is not
+disabled by this change and must not be used to bootstrap private activation.
+
+Historical release/rollback inputs (not read by source validation):
 
 - `CONTENT_HUB_CONFIG_JSON_BASE64` secret: server-only compact JSON policy. It must not contain credentials or secret references, and its value must never be copied or logged.
 - `AUTH_SESSION_TABLE_NAME` variable.
@@ -211,15 +232,16 @@ Required GitHub environment inputs:
 - `AWS_ROLE_ARN` variable.
 - `AWS_REGION` variable, default `us-east-1`.
 
-Optional THN-only TEST selection uses `THN_V2_TEST_PARAMETERS_JSON`. Omission
-keeps the existing disabled foundation defaults. When supplied, it must be a
+The retained legacy rollback parameter contract uses
+`THN_V2_TEST_PARAMETERS_JSON`. Omission selects its historical defaults; it is
+not a private bootstrap or activation path. When supplied, it must be a
 closed object with exactly `schemaVersion: 1`, `environment: "test"`, and
 `parameters` containing every key returned by `_thn_defaults()` in
 `tools/prepare_test_parameters.py`. Partial selections and v1/shared parameter
 overrides are rejected; no registry, account, writer mode, or epoch is changed.
 Never place credentials or account contact information in this selection.
 
-Deploy and rollback both validate the selection before credentials and then
+The unchanged historical rollback validates the selection before credentials and then
 read the actual AWS account and TEST stack termination-protection state before
 creating a change set. Enabling or provisioning v2 state requires an existing,
 stable TEST stack with termination protection already enabled. The checker does
@@ -233,7 +255,7 @@ This is delivery plumbing, not evidence that the private editor, publisher,
 owner onboarding, or TEST activation is complete. A prior rollback artifact
 must include this parameter contract; an older artifact cannot be silently
 treated as compatible.
-For a supplied THN selection, the workflows require the packaged tool to report
+For a supplied THN selection, historical rollback requires the packaged tool to report
 `thn-test-selection/v1` before credentials. A legacy tool without that capability
 fails the release instead of silently ignoring the selection. With no THN
 selection, the compatibility check is skipped and the prior path is unchanged.

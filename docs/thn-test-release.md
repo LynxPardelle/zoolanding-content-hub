@@ -1,6 +1,26 @@
 # Retained THN TEST lifecycle
 
-This is local A–C reconciliation, not evidence of a deployment or a completed D gate. Production, v1 behavior, other drafts, and the ordinary deploy/rollback no-removal guard are unchanged. The dedicated [workflow](../.github/workflows/deploy-thn-test.yml) owns the operations below; do not bypass it with `sam deploy`.
+Source preparation is not evidence of a deployment or a completed D gate. Production, v1 behavior, other drafts, and the historical rollback no-removal guard are unchanged. The dedicated [workflow](../.github/workflows/deploy-thn-test.yml) owns the operations below; do not bypass it with `sam deploy`.
+
+## Source validation is separate from AWS execution
+
+The existing [TEST promotion workflow](../.github/workflows/deploy-test.yml)
+now validates only. It preserves the exact dev merge/tree gate, runs both suites
+and package checks, and verifies the transported artifact by immutable ID and
+full inventory digest. Neither job selects an Environment, requests OIDC, reads
+deployment vars/secrets or executes AWS. It cannot create a partial registry.
+
+The validation artifact has schema `zoolanding-test-validation/v1`, purpose
+`validation-only`, and boolean `deployable: false`. Its distinct name includes
+`test-validation`; it contains no release tools. It is not a deployment or
+rollback artifact. Historical rollback still requires its original
+`zoolanding-test-release/v1` metadata and rejects validation metadata before
+credentials. Its existing compatibility and no-removal checks remain mandatory.
+
+Only the private workflow produces `zoolanding-thn-test-release/v1` artifacts
+for the operations below. Its source, identity, immutable transport, dependency,
+retention and exact live-baseline checks are unchanged. Source promotion does
+not authorize skipping those checks or establish that the client can sign in.
 
 ## Verified baseline and operation boundaries
 

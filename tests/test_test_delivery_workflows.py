@@ -40,12 +40,19 @@ class TestDeliveryWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("pull_request_target", workflow)
         self.assert_actions_are_commit_pinned(workflow)
 
-    def test_deploy_uses_exact_test_artifact_and_reviewed_change_set(self):
+    def test_promotion_validates_exact_test_artifact_without_deployment(self):
         workflow = self.workflow("deploy-test.yml")
         self.assertIn("branches: [test]", workflow)
         self.assertIn("${{ github.sha }}", workflow)
         self.assertRegex(workflow, r"\^\[a-f0-9\]\{40\}\$")
-        self.assert_release_boundary(workflow)
+        for marker in ("artifact-ids:", "manifest_digest", "sha256sum",
+                       "recomputed-build-manifest.sha256", "cmp --silent",
+                       "zoolanding-test-validation/v1", '"deployable": False'):
+            self.assertIn(marker, workflow)
+        for forbidden in ("environment: test", "id-token: write", "execute-change-set",
+                          "configure-aws-credentials@", "THN_V2_TEST_PARAMETERS_JSON"):
+            self.assertNotIn(forbidden, workflow)
+        self.assert_actions_are_commit_pinned(workflow)
 
     def test_rollback_selects_one_recorded_immutable_release(self):
         workflow = self.workflow("rollback-test.yml")
@@ -62,23 +69,21 @@ class TestDeliveryWorkflowContractTests(unittest.TestCase):
             self.assertIn(value, workflow)
         self.assert_release_boundary(workflow)
 
-    def test_both_workflows_forward_selection_and_verify_cloud_before_changes(self):
-        for name in ("deploy-test.yml", "rollback-test.yml"):
-            with self.subTest(name=name):
-                workflow = self.workflow(name)
-                self.assertEqual(workflow.count("THN_V2_TEST_PARAMETERS_JSON: ${{ vars.THN_V2_TEST_PARAMETERS_JSON }}"), 2)
-                self.assertIn("prepare_test_parameters.py --verify-cloud-guards", workflow)
-                self.assertIn("if: ${{ vars.THN_V2_TEST_PARAMETERS_JSON != '' }}", workflow)
-                self.assertIn('if [ -n "${THN_V2_TEST_PARAMETERS_JSON:-}" ]; then', workflow)
-                self.assertIn('"thn-test-selection/v1"', workflow)
-                self.assertIn('thn_test_selection_contract_missing', workflow)
-                self.assertLess(workflow.index("prepare_test_parameters.py --thn-selection-contract"),
-                                workflow.index("uses: aws-actions/configure-aws-credentials@"))
-                credentials = workflow.index("uses: aws-actions/configure-aws-credentials@")
-                guard = workflow.index("prepare_test_parameters.py --verify-cloud-guards")
-                execute = workflow.index("run: bash .aws-sam/build/release-tools/run_test_change_set.sh")
-                self.assertLess(credentials, guard)
-                self.assertLess(guard, execute)
+    def test_historical_rollback_preserves_selection_and_cloud_guards(self):
+        workflow = self.workflow("rollback-test.yml")
+        self.assertEqual(workflow.count("THN_V2_TEST_PARAMETERS_JSON: ${{ vars.THN_V2_TEST_PARAMETERS_JSON }}"), 2)
+        self.assertIn("prepare_test_parameters.py --verify-cloud-guards", workflow)
+        self.assertIn("if: ${{ vars.THN_V2_TEST_PARAMETERS_JSON != '' }}", workflow)
+        self.assertIn('if [ -n "${THN_V2_TEST_PARAMETERS_JSON:-}" ]; then', workflow)
+        self.assertIn('"thn-test-selection/v1"', workflow)
+        self.assertIn('thn_test_selection_contract_missing', workflow)
+        self.assertLess(workflow.index("prepare_test_parameters.py --thn-selection-contract"),
+                        workflow.index("uses: aws-actions/configure-aws-credentials@"))
+        credentials = workflow.index("uses: aws-actions/configure-aws-credentials@")
+        guard = workflow.index("prepare_test_parameters.py --verify-cloud-guards")
+        execute = workflow.index("run: bash .aws-sam/build/release-tools/run_test_change_set.sh")
+        self.assertLess(credentials, guard)
+        self.assertLess(guard, execute)
 
 
 if __name__ == "__main__":
