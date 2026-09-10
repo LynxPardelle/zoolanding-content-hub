@@ -168,6 +168,16 @@ class RegistryProvisionRunnerTests(unittest.TestCase):
             with self.subTest(variant=variant), self.assertRaises(release.ReleaseBlocked):
                 self.run_bootstrap()
 
+    def test_processed_diagnostic_keeps_rejection_and_own_changeset_cleanup(self):
+        self.session.bad_processed = True
+        with self.assertRaises(release.ReleaseBlocked) as raised:
+            self.run_bootstrap()
+        self.assertIn('"differences"', str(raised.exception))
+        self.assertNotIn("other.example.test", str(raised.exception))
+        self.assertFalse(self.session.executed)
+        deleted = [value for name, value in self.session.calls if name == "delete_change_set"]
+        self.assertEqual(deleted, [{"StackName": self.session.stack_id, "ChangeSetName": self.session.change_id}])
+
     def test_retry_after_bootstrap_cannot_recreate_or_modify_the_registry(self):
         self.run_bootstrap()
         self.session.calls.clear()

@@ -2,6 +2,8 @@
 
 Chronological implementation, QA, and release evidence lives here so routine tasks do not load it.
 
+- [2026-09-10 THN processed-template drift diagnostics](2026-09-10-thn-processed-drift-diagnostics.md)
+
 - [2026-06-22 to 2026-07-01 Codex history migration](2026-06-22-to-2026-07-01-codex-history-migration.md)
 - [2026-08-31 THN registry global reservation and audit](2026-08-31-thn-registry-global-reservation-audit.md)
 - [2026-09-04 THN Content Hub v2 isolated infrastructure](2026-09-04-thn-content-hub-v2-isolated-infrastructure.md)
