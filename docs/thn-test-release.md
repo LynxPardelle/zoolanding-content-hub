@@ -37,6 +37,17 @@ logged. Depth and output bounds apply, and the same rejection and unexecuted
 change-set cleanup remain mandatory. A diagnostic is not permission to normalize
 or ignore an unexplained difference.
 
+The SDK decodes JSON `GetTemplate` bodies as nested `OrderedDict` objects,
+whose equality depends on insertion order. The THN release loader recursively
+copies those mappings into ordinary dictionaries before comparing templates.
+JSON object key order is not configuration; array order, keys, values and scalar
+types remain untouched. No field is filtered, no difference is suppressed and
+all existing change-set and post-execution checks still run. Text/YAML decoding
+is unchanged. This fixes an order-only rejection that produced an empty
+structural-difference report; it is not a general drift-normalization rule.
+See [Python mapping equality](https://docs.python.org/3/library/collections.html#collections.OrderedDict)
+and [JSON object/array semantics](https://www.rfc-editor.org/rfc/rfc8259#section-1).
+
 The 2026-09-08 read-only TEST observation found a protected, stable Hub stack with **17 existing shared resources**, no THN seven-pair runtime, and none of the five mediated-registry resources. The exact registry-operator parameter and human role were also missing. These are observations, not assumptions inferred from the candidate template. Recheck them at execution. Image TEST was absent; its separate private-only CREATE path does not create v1 resources.
 
 | Operation | Allowed effect | Required before it runs |
