@@ -111,6 +111,51 @@ def compose(candidate: dict, live: dict, live_processed: dict, inventory: dict) 
     return result
 
 
+def _processed_drift(live: dict, candidate: dict) -> str:
+    """Bounded structure only: fixed schema names, anonymous indexes, no values."""
+    names = frozenset("Resources Properties Parameters Outputs Metadata Mappings Conditions Globals Transform Description "
+        "AWSTemplateFormatVersion Default Type Value Ref Fn::GetAtt Fn::Sub Fn::Join Fn::If DependsOn DeletionPolicy "
+        "UpdateReplacePolicy Version Statement Effect Action Resource Principal PolicyDocument Role Code S3Bucket S3Key "
+        "Environment Variables NoEcho Timeout MemorySize Runtime Handler Body DefinitionBody DefinitionUri Tags Condition "
+        "AllowedValues AllowedPattern MinValue MaxValue MinLength MaxLength".split())
+    missing = object()
+    report = {"differences": [], "truncated": False}
+
+    def kind(value):
+        if value is missing:
+            return "missing"
+        for datatype, label in ((type(None), "null"), (bool, "boolean"), (dict, "object"),
+                                (list, "array"), (str, "string"), (int, "number"), (float, "number")):
+            if isinstance(value, datatype):
+                return label
+        return "other"
+
+    def walk(before, after, path):
+        if before == after:
+            return
+        if len(report["differences"]) >= 16:
+            report["truncated"] = True
+            return
+        if len(path) < 24 and isinstance(before, dict) and isinstance(after, dict):
+            for index, key in enumerate(sorted(set(before) | set(after))):
+                walk(before.get(key, missing), after.get(key, missing),
+                     path + [key if key in names else f"[{index}]"])
+                if report["truncated"]:
+                    break
+        elif len(path) < 24 and isinstance(before, list) and isinstance(after, list):
+            for index in range(max(len(before), len(after))):
+                walk(before[index] if index < len(before) else missing,
+                     after[index] if index < len(after) else missing, path + [f"[{index}]"])
+                if report["truncated"]:
+                    break
+        else:
+            report["differences"].append({"path": "/" + "/".join(path), "before": kind(before), "after": kind(after)})
+            report["truncated"] = report["truncated"] or len(path) >= 24
+
+    walk(live, candidate, [])
+    return "registry_bootstrap_shared_processed_drift " + json.dumps(report, separators=(",", ":"))
+
+
 def verify_processed(live: dict, candidate: dict, inventory: dict) -> None:
     _baseline(live, live, inventory)
     _validate_slice(candidate, processed=True)
@@ -126,7 +171,7 @@ def verify_processed(live: dict, candidate: dict, inventory: dict) -> None:
     if not stripped["Conditions"] and "Conditions" not in live:
         stripped.pop("Conditions")
     if stripped != live:
-        raise release.ReleaseBlocked("registry_bootstrap_shared_processed_drift")
+        raise release.ReleaseBlocked(_processed_drift(live, stripped))
 
 
 def review_changes(changes: list) -> None:

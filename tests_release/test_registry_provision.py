@@ -3,6 +3,7 @@
 from copy import deepcopy
 import importlib
 import importlib.util
+import json
 from pathlib import Path
 import unittest
 import yaml
@@ -136,6 +137,42 @@ class RegistryProvisionTests(unittest.TestCase):
         for changed in mutations:
             with self.subTest(changed=changed), self.assertRaises(release.ReleaseBlocked):
                 self.subject.review_changes(changed)
+
+    def drift_report(self, candidate):
+        with self.assertRaises(release.ReleaseBlocked) as raised:
+            self.subject.verify_processed(self.processed, candidate, self.inventory)
+        message = str(raised.exception)
+        prefix = "registry_bootstrap_shared_processed_drift "
+        self.assertTrue(message.startswith(prefix), "Missing safe structural drift diagnostic")
+        return message, json.loads(message[len(prefix):])
+
+    def test_processed_drift_reports_only_schema_path_and_node_types(self):
+        candidate = processed_candidate(self.compose())
+        candidate["Parameters"]["FunctionMemorySize"]["Default"] = "512"
+        _, report = self.drift_report(candidate)
+        self.assertEqual(report["differences"], [{"path": "/Parameters/[1]/Default", "before": "number", "after": "string"}])
+        self.assertFalse(report["truncated"])
+
+    def test_processed_drift_never_prints_private_keys_or_values(self):
+        candidate = processed_candidate(self.compose())
+        marker_key, marker_value = "private-key-marker", "private-value-marker"
+        candidate["Metadata"] = {marker_key: marker_value}
+        candidate["Parameters"]["SharedSecret"]["Default"] = marker_value
+        candidate["Resources"]["ContentHubApi"]["Properties"][marker_key] = marker_value
+        message, report = self.drift_report(candidate)
+        for forbidden in (marker_key, marker_value, "SharedSecret", "ContentHubApi"):
+            self.assertNotIn(forbidden, message)
+        self.assertEqual(len(report["differences"]), 3)
+        self.assertTrue(all(set(item) == {"path", "before", "after"} for item in report["differences"]))
+
+    def test_processed_drift_diagnostic_is_bounded(self):
+        self.processed["Metadata"] = {f"private-key-{i:02}": "old-private-value" for i in range(40)}
+        candidate = processed_candidate(self.compose())
+        candidate["Metadata"] = {key: "new-private-value" for key in self.processed["Metadata"]}
+        message, report = self.drift_report(candidate)
+        self.assertEqual(len(report["differences"]), 16)
+        self.assertTrue(report["truncated"])
+        self.assertNotIn("private", message)
 
     def test_packaging_projection_contains_only_registry_code_and_legal_dependencies(self):
         projected = self.subject.packaging_source(self.candidate)
