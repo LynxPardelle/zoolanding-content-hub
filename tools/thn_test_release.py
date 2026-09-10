@@ -310,9 +310,18 @@ def review_change_set(description: dict, arn: str, name: str, parameters: list[d
         raise ReleaseBlocked("change_set_review_failed") from None
 
 
+def _plain_template_value(value: Any) -> Any:
+    """Copy SDK maps with JSON object semantics; preserve arrays and scalar types."""
+    if isinstance(value, dict):
+        return {key: _plain_template_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_plain_template_value(item) for item in value]
+    return deepcopy(value)
+
+
 def _load_template(body: Any) -> dict:
     if isinstance(body, dict):
-        return deepcopy(body)
+        return _plain_template_value(body)
     import yaml
     try:
         result = yaml.safe_load(body)
