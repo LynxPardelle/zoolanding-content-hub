@@ -211,6 +211,11 @@ def _verify_state(session, inventory: dict, account: str) -> None:
         raise release.ReleaseBlocked("registry_bootstrap_runtime_unverified")
 
 
+def _change_set_payload(response: dict) -> dict:
+    """Exclude only top-level SDK transport metadata, without mutating the response."""
+    return {key: value for key, value in response.items() if key != "ResponseMetadata"}
+
+
 def run(session, env: dict, build) -> dict:
     """Provision only the missing registry, never its rows or THN consumers."""
     release.validate_context(env)
@@ -279,7 +284,8 @@ def run(session, env: dict, build) -> dict:
                 or release._parameters(current) != release._parameters(before) or release._inventory(cfn, stack_id) != inventory
                 or release._load_template(cfn.get_template(StackName=stack_id, TemplateStage="Original")["TemplateBody"]) != original
                 or release._load_template(cfn.get_template(StackName=stack_id, TemplateStage="Processed")["TemplateBody"]) != processed
-                or cfn.describe_change_set(StackName=stack_id, ChangeSetName=change_id) != description
+                or _change_set_payload(cfn.describe_change_set(StackName=stack_id, ChangeSetName=change_id))
+                    != _change_set_payload(description)
                 or release._load_template(cfn.get_template(StackName=stack_id, ChangeSetName=change_id, TemplateStage="Original")["TemplateBody"]) != composed
                 or release._load_template(cfn.get_template(StackName=stack_id, ChangeSetName=change_id, TemplateStage="Processed")["TemplateBody"]) != candidate_processed):
             raise release.ReleaseBlocked("registry_bootstrap_changed_during_review")

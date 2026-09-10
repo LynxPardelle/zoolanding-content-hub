@@ -169,6 +169,74 @@ class RegistryProvisionRunnerTests(unittest.TestCase):
         self.assertFalse(any(name in {"get_item", "invoke", "delete_stack", "update_termination_protection"}
                              for name, _ in self.session.calls))
 
+    def test_request_metadata_changes_do_not_block_the_unchanged_registry_payload(self):
+        describe = self.session.describe_change_set
+        responses = []
+        snapshots = []
+        def sdk_describe(**kwargs):
+            response = describe(**kwargs)
+            index = len(responses) + 1
+            response["ResponseMetadata"] = {"RequestId": f"synthetic-request-{index}",
+                "HTTPStatusCode": 200, "RetryAttempts": index - 1,
+                "HTTPHeaders": {"date": f"synthetic-date-{index}"}}
+            response["AdditionalResult"] = {"ResponseMetadata": {"Value": "stable"}}
+            responses.append(response)
+            snapshots.append(deepcopy(response))
+            return response
+        with patch.object(self.session, "describe_change_set", side_effect=sdk_describe):
+            outcome = None
+            try:
+                outcome = self.run_bootstrap()
+            except release.ReleaseBlocked:
+                pass
+            self.assertIsNotNone(outcome, "Request-only SDK metadata must not block an unchanged change set")
+        self.assertEqual((outcome["preserved_resource_count"], outcome["new_resource_count"]), (17, 5))
+        self.assertEqual(len(responses), 2)
+        self.assertEqual(responses, snapshots, "Comparisons must not mutate the SDK responses")
+        self.assertEqual(sum(name == "describe_table" for name, _ in self.session.calls), 2)
+        self.assertFalse(any(name in {"get_item", "invoke", "delete_stack", "update_termination_protection"}
+                             for name, _ in self.session.calls))
+
+    def test_second_read_payload_drift_still_blocks_execution_and_cleans_own_change_set(self):
+        mutations = [
+            (("ChangeSetId",), "different-change-set"),
+            (("ChangeSetName",), "different-name"),
+            (("StackId",), "different-stack"),
+            (("StackName",), "different-stack-name"),
+            (("Status",), "FAILED"),
+            (("ExecutionStatus",), "UNAVAILABLE"),
+            (("Parameters", 0, "ParameterValue"), "different-value"),
+            (("Changes", 0, "ResourceChange", "Action"), "Modify"),
+            (("Changes", 0, "ResourceChange", "Replacement"), "True"),
+            (("Changes",), []),
+            (("AdditionalResult", "ResponseMetadata", "Value"), "different-nested-value"),
+            (("UnknownField",), "new-payload-field"),
+        ]
+        for path, value in mutations:
+            with self.subTest(path=path):
+                self.session = Services()
+                describe = self.session.describe_change_set
+                reads = 0
+                def sdk_describe(**kwargs):
+                    nonlocal reads
+                    reads += 1
+                    response = describe(**kwargs)
+                    response["ResponseMetadata"] = {"RequestId": f"synthetic-request-{reads}"}
+                    response["AdditionalResult"] = {"ResponseMetadata": {"Value": "stable"}}
+                    if reads == 2:
+                        target = response
+                        for key in path[:-1]:
+                            target = target[key]
+                        target[path[-1]] = value
+                    return response
+                with patch.object(self.session, "describe_change_set", side_effect=sdk_describe), \
+                        self.assertRaisesRegex(release.ReleaseBlocked, "^registry_bootstrap_changed_during_review$"):
+                    self.run_bootstrap()
+                self.assertEqual(reads, 2)
+                self.assertFalse(self.session.executed)
+                self.assertEqual([value for name, value in self.session.calls if name == "delete_change_set"],
+                    [{"StackName": self.session.stack_id, "ChangeSetName": self.session.change_id}])
+
     def test_missing_human_operator_stops_before_packaging_or_changeset(self):
         self.session.bad_operator = True
         with self.assertRaises(release.ReleaseBlocked):
