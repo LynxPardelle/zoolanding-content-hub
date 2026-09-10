@@ -1,3 +1,4 @@
+import json
 import re
 import unittest
 from pathlib import Path
@@ -87,6 +88,26 @@ def _parameter(text: str, name: str) -> str:
     return _mapping_block(_mapping_block(text, "Parameters", 0), name, 2)
 
 
+def _thn_routes(text: str) -> set[tuple[str, str, str]]:
+    # The explicit Body is a JSON-compatible YAML mapping; no runtime parser dependency.
+    match = re.search(r"(?m)^      DefinitionBody: (\{.+\})$", _resource(text, "ContentHubApi"))
+    if match is None:
+        raise AssertionError("Missing explicit THN API body")
+    paths = json.loads(match.group(1))["paths"]
+    result = set()
+    for path, value in paths.items():
+        condition, methods, disabled = value["Fn::If"]
+        if condition != "IsThnContentHubV2Enabled" or disabled != {"Ref": "AWS::NoValue"}:
+            raise AssertionError("THN route is not fail-closed")
+        for method, definition in methods.items():
+            uri = definition["x-amazon-apigateway-integration"]["uri"]["Fn::Sub"]
+            target = re.search(r"/functions/\$\{(ThnContentHubV2\w+Function)Aliastest\}/invocations$", uri)
+            if target is None:
+                raise AssertionError("Unexpected THN integration target")
+            result.add((target.group(1), method.upper(), path))
+    return result
+
+
 def _statement(block: str, sid: str) -> str:
     match = re.search(rf"(?ms)- Sid: {re.escape(sid)}.*?(?=\n\s+- Sid:|\Z)", block)
     if match is None:
@@ -113,7 +134,7 @@ class ThnContentHubV2Task019TemplateTests(unittest.TestCase):
                 function = _resource(template, function_id)
                 role = _resource(template, role_id)
                 self.assertIn("Type: AWS::Serverless::Function", function)
-                self.assertIn("Condition: IsThnContentHubV2Enabled", function)
+                self.assertIn("Condition: IsThnContentHubV2StateProvisioned", function)
                 self.assertIn(f"Handler: {handler}", function)
                 self.assertIn("AutoPublishAlias: test", function)
                 self.assertRegex(
@@ -121,7 +142,7 @@ class ThnContentHubV2Task019TemplateTests(unittest.TestCase):
                     rf"(?ms)Role:\s*\n\s+Fn::GetAtt:\s*\n\s+- {re.escape(role_id)}\s*\n\s+- Arn",
                 )
                 self.assertIn("Type: AWS::IAM::Role", role)
-                self.assertIn("Condition: IsThnContentHubV2Enabled", role)
+                self.assertIn("Condition: IsThnContentHubV2StateProvisioned", role)
                 self.assertIn(f"RoleName: {role_name}", role)
                 self.assertLessEqual(len(role_name), 64)
                 self.assertIn("Service: lambda.amazonaws.com", role)
@@ -261,12 +282,8 @@ class ThnContentHubV2Task019TemplateTests(unittest.TestCase):
         template = _template()
         authoring = _resource(template, "ThnContentHubV2AuthoringFunction")
         public_media = _resource(template, "ThnContentHubV2PublicMediaFunction")
-        authoring_routes = set(
-            re.findall(
-                r"(?ms)Method: ([A-Z]+)\s+Path: (/features/content-hub-v2/[^\s]+)",
-                authoring,
-            )
-        )
+        routes = _thn_routes(template)
+        authoring_routes = {(method, path) for function, method, path in routes if function == "ThnContentHubV2AuthoringFunction"}
         self.assertEqual(
             authoring_routes,
             {
@@ -274,11 +291,10 @@ class ThnContentHubV2Task019TemplateTests(unittest.TestCase):
                 ("POST", "/features/content-hub-v2/action"),
             },
         )
-        self.assertIn("Method: GET", public_media)
-        self.assertIn(
-            "Path: /features/content-hub-v2/public-media/{articleId}/{locale}/{revisionId}/{assetId}/{variantId}",
-            public_media,
-        )
+        self.assertEqual({(method, path) for function, method, path in routes if function == "ThnContentHubV2PublicMediaFunction"},
+            {("GET", "/features/content-hub-v2/public-media/{articleId}/{locale}/{revisionId}/{assetId}/{variantId}")})
+        self.assertNotIn("Events:", authoring)
+        self.assertNotIn("Events:", public_media)
 
         for function_id in set(FUNCTIONS) - {
             "ThnContentHubV2AuthoringFunction",
@@ -340,7 +356,13 @@ class ThnContentHubV2Task019TemplateTests(unittest.TestCase):
         self.assertIn("HUB#thehairnarrative-com-journal", publisher)
         self.assertIn("SLUG#test#thehairnarrative.com#en", publisher)
         self.assertIn("SLUG#test#thehairnarrative.com#es", publisher)
-        self.assertNotIn("zoolanding-auth-admin-test-ThnSessionV2", publisher)
+        # Approved local amendment: condition-only final session validation.
+        # The dedicated role still cannot read or return session data.
+        session_check = _statement(publisher, "CheckExactThnPublishingSession")
+        self.assertIn("dynamodb:ConditionCheckItem", session_check)
+        self.assertNotIn("dynamodb:GetItem", session_check)
+        self.assertIn("dynamodb:EnclosingOperation: TransactWriteItems", session_check)
+        self.assertIn("dynamodb:ReturnValues: NONE", session_check)
 
         self.assertIn("dynamodb:GetItem", public_media)
         self.assertIn("s3:GetObjectVersion", public_media)

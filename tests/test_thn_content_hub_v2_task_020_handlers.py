@@ -44,6 +44,15 @@ ALL_ARTIFACTS = {
     "ThnContentHubV2AuthoringFunction": {
         "lambda_function.py",
         "content_hub_v2_authoring_handler.py",
+        "content_hub_v2_actor_fence.py",
+        "content_hub_v2_editor_model.py",
+        "content_hub_v2_editor_service.py",
+        "content_hub_v2_editor_store.py",
+        "content_hub_v2_state_keys.py",
+        "content_hub_v2_publication_contract.py",
+        "content_hub_v2_publication_gateway.py",
+        "content_hub_v2_private_upload.py",
+        "content_hub_v2_media_store.py",
         "content_hub_v2_authorization.py",
         "content_hub_v2_registry_fence.py",
         "service_binding_registry_consumer_v2.py",
@@ -51,11 +60,38 @@ ALL_ARTIFACTS = {
         "service_binding_registry_v2.py",
     },
     "ThnContentHubV2PrivateAssetCollectorFunction": {
-        "content_hub_v2_private_asset_gc.py"
+        "content_hub_v2_private_asset_gc.py",
+        "content_hub_v2_registry_fence.py",
+        "service_binding_registry_consumer_v2.py",
+        "service_binding_registry_operator_lambda.py",
+        "service_binding_registry_v2.py",
     },
-    "ThnContentHubV2PublisherFunction": {"publisher_lambda.py"},
+    "ThnContentHubV2PublisherFunction": {
+        "publisher_lambda.py",
+        "content_hub_v2_publication_contract.py",
+        "content_hub_v2_finalization.py",
+        "content_hub_v2_manifest_update.py",
+        "content_hub_v2_projection_manifest.py",
+        "content_hub_v2_projection_delta.py",
+        "content_hub_v2_projection.py",
+        "content_hub_v2_projection_store.py",
+        "content_hub_v2_preparation.py",
+        "content_hub_v2_state_keys.py",
+        "content_hub_v2_editor_model.py",
+        "content_hub_v2_authorization.py",
+        "content_hub_v2_actor_fence.py",
+        "content_hub_v2_registry_fence.py",
+        "service_binding_registry_consumer_v2.py",
+        "service_binding_registry_operator_lambda.py",
+        "service_binding_registry_v2.py",
+    },
     "ThnContentHubV2PublicMediaFunction": {"public_media_lambda.py"},
-    "ThnContentHubV2InvalidationWorkerFunction": {"invalidation_worker_lambda.py"},
+    "ThnContentHubV2InvalidationWorkerFunction": {
+        "invalidation_worker_lambda.py",
+        "service_binding_registry_consumer_v2.py",
+        "service_binding_registry_operator_lambda.py",
+        "service_binding_registry_v2.py",
+    },
     "ThnContentHubV2EmergencyWithdrawFunction": {
         "emergency_withdraw_lambda.py",
         "content_hub_v2_projection_manifest.py",
@@ -64,7 +100,19 @@ ALL_ARTIFACTS = {
         "service_binding_registry_v2.py",
     },
     "ThnContentHubV2PreparedOrphanCollectorFunction": {
-        "prepared_orphan_collector_lambda.py"
+        "prepared_orphan_collector_lambda.py",
+        "content_hub_v2_projection_store.py",
+        "content_hub_v2_projection.py",
+        "content_hub_v2_preparation.py",
+        "content_hub_v2_editor_model.py",
+        "content_hub_v2_authorization.py",
+        "content_hub_v2_actor_fence.py",
+        "content_hub_v2_registry_fence.py",
+        "content_hub_v2_state_keys.py",
+        "content_hub_v2_projection_manifest.py",
+        "service_binding_registry_consumer_v2.py",
+        "service_binding_registry_operator_lambda.py",
+        "service_binding_registry_v2.py",
     },
     "ContentHubFunction": {"lambda_function.py"},
 }
@@ -130,7 +178,9 @@ class ThnContentHubV2Task020HandlerTests(unittest.TestCase):
                 source = (PROJECT_ROOT / f"{module_name}.py").read_text(
                     encoding="utf-8"
                 )
-                self.assertNotIn("import boto3", source)
+                with mock.patch("boto3.client") as client, self.assertRaises(module.HandlerNotActiveError):
+                    module.lambda_handler({"unexpected": "input"}, object())
+                client.assert_not_called()
                 for other_module in internal_modules - {module_name}:
                     self.assertNotIn(f"import {other_module}", source)
 
@@ -233,8 +283,12 @@ class ThnContentHubV2Task020HandlerTests(unittest.TestCase):
         from tools import build_lambda_artifact as builder
 
         expected = {
+            "ThnContentHubV2InvalidationWorkerFunction",
+            "ThnContentHubV2PreparedOrphanCollectorFunction",
             "ServiceBindingRegistryV2MutationFunction",
             "ThnContentHubV2AuthoringFunction",
+            "ThnContentHubV2PublisherFunction",
+            "ThnContentHubV2PrivateAssetCollectorFunction",
             "ThnContentHubV2PublicMediaFunction",
             "ThnContentHubV2EmergencyWithdrawFunction",
             "ContentHubFunction",

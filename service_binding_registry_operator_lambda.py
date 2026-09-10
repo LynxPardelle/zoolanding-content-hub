@@ -1,4 +1,4 @@
-"""Private, non-HTTP mutation boundary for the exact THN TEST v2 registry."""
+"""Private, non-HTTP mutation and read-only inspection of the exact TEST registry."""
 
 from __future__ import annotations
 
@@ -417,6 +417,38 @@ def _validate_envelope(event: Any) -> tuple[str, Mapping[str, Any], int | None, 
     raise RegistryMutationInputError("registry operation is invalid")
 
 
+def _inspect_registry(event: Mapping[str, Any], store: DynamoDbRegistryStore) -> dict[str, Any]:
+    """Return a nonce-bound safe proof without repairing rows or writing audits.
+
+    IAM authorization still covers this whole existing Lambda, not a payload
+    operation. Inspection does not grant a caller an inspect-only IAM capability.
+    """
+    if (set(event) != {"operation", "nonce"} or not isinstance(event.get("nonce"), str)
+            or re.fullmatch(r"[a-f0-9]{32}", event["nonce"]) is None):
+        raise RegistryMutationInputError("inspection request fields are invalid")
+    trusted_scope = store.get_trusted_resource_scope()
+    key = {"pk": APPROVED_PARTITION_KEY, "sk": APPROVED_SORT_KEY}
+    record = store.get_binding(key)
+    if not isinstance(record, Mapping):
+        raise RegistryMutationInputError("inspection registry is unavailable")
+    definition = {field: record.get(field) for field in registry.DEFINITION_FIELDS}
+    validated = registry.build_registry_record(definition, trusted_resource_scope=trusted_scope)
+    if record != validated:
+        raise RegistryMutationInputError("inspection registry is invalid")
+    reservation = store.get_global_reservation(registry.global_reservation_key(validated))
+    if reservation != registry.build_global_hub_reservation(validated):
+        raise RegistryMutationInputError("inspection reservation is invalid")
+    # A mutation between the two strong reads cannot yield a successful proof.
+    if store.get_binding(key) != validated:
+        raise RegistryMutationInputError("inspection registry changed")
+    digest = hashlib.sha256(json.dumps({"binding": validated, "reservation": reservation},
+        sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")).hexdigest()
+    return {"ok": True, "operation": "inspect", "schemaVersion": 1, "nonce": event["nonce"],
+            "scopeVerified": True, "bindingsVerified": True, "registrySha256": digest,
+            **{field: validated[field] for field in ("descriptorVersionId", "descriptorSha256", "authPolicyVersion",
+                "activationStatus", "writerMode", "writerEpoch", "registryRevision")}}
+
+
 def handle_registry_request(
     event: Any,
     dynamodb_client: Any,
@@ -426,6 +458,8 @@ def handle_registry_request(
     """Validate one closed request and execute the reviewed conditional operation."""
 
     try:
+        if isinstance(event, Mapping) and event.get("operation") == "inspect":
+            return _inspect_registry(event, DynamoDbRegistryStore(dynamodb_client))
         operation, definition, expected_revision, expected_epoch = _validate_envelope(event)
         store = DynamoDbRegistryStore(dynamodb_client)
         if operation == "reserve":

@@ -22,6 +22,8 @@ from content_hub_v2_registry_fence import (
     RegistryFenceError,
     execute_registry_fenced_transaction,
 )
+from content_hub_v2_editor_model import EditorValidationError
+from content_hub_v2_editor_service import EditorService, EditorConflict, EditorNotFound
 from service_binding_registry_consumer_v2 import (
     APPROVED_TABLE_NAME as REGISTRY_TABLE_NAME,
     RegistryConsumerError,
@@ -279,6 +281,18 @@ class AwsAuthoringRuntime:
     def now_epoch() -> int:
         return int(time.time())
 
+    def get_editor_store(self, context: Any, authorization_context: Any, session_hash: str) -> Any:
+        from content_hub_v2_editor_store import AwsEditorStore
+        return AwsEditorStore(self, context, authorization_context, session_hash)
+
+    def get_publisher(self, context: Any, authorization_context: Any, session_hash: str) -> Any:
+        binding = os.environ.get("THN_CONTENT_HUB_PUBLISHER_ARN", "")
+        if not binding:
+            return None
+        from content_hub_v2_publication_gateway import PublicationGateway
+        return PublicationGateway(authorization_context, session_hash, self._trusted_resource_scope(context),
+                                  binding, clock=self.now_epoch)
+
 
 def _request_id(event: Mapping[str, Any]) -> str:
     request_context = event.get("requestContext")
@@ -306,6 +320,19 @@ def _path(event: Mapping[str, Any]) -> str:
     return str(value).strip()
 
 
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, entry in pairs:
+        if key in value:
+            raise ValueError("duplicate key")
+        value[key] = entry
+    return value
+
+
+def _reject_json_constant(_: str) -> Any:
+    raise ValueError("non-finite number")
+
+
 def _payload(event: Mapping[str, Any]) -> dict[str, Any]:
     try:
         raw: Any = event.get("body")
@@ -313,7 +340,9 @@ def _payload(event: Mapping[str, Any]) -> dict[str, Any]:
             raw = base64.b64decode(raw, validate=True).decode("utf-8")
         if raw in {None, ""}:
             raise ValueError("body required")
-        value = json.loads(str(raw))
+        if not isinstance(raw, str) or len(raw.encode("utf-8")) > 5_750_000:
+            raise ValueError("body too large")
+        value = json.loads(raw, object_pairs_hook=_unique_json_object, parse_constant=_reject_json_constant)
         if not isinstance(value, dict):
             raise ValueError("object required")
         return value
@@ -477,11 +506,41 @@ def handle_request(
             _require_csrf(event, authorization_context)
             assert_mutation_actor_enabled(authorization_context)
             assert_writer_epoch_current(authorization_context, registry_record)
-        raise AuthoringRequestError(
-            503,
-            "feature_not_ready",
-            "Content hub service is temporarily unavailable",
-        )
+        if not callable(getattr(private_runtime, "get_editor_store", None)):
+            raise AuthoringRequestError(503, "feature_not_ready", "Content hub service is temporarily unavailable")
+
+        def reauthorize() -> None:
+            fresh_registry = private_runtime.load_registry(context)
+            fresh = load_authorization_context(private_runtime, session_id_hash=_sha256(session_value),
+                registry_record=fresh_registry, now_epoch=private_runtime.now_epoch())
+            if fresh != authorization_context:
+                raise ContentHubV2AuthorizationError()
+            if operation_key == "action":
+                assert_mutation_actor_enabled(fresh)
+
+        store = private_runtime.get_editor_store(context, authorization_context, _sha256(session_value))
+        publisher = (private_runtime.get_publisher(context, authorization_context, _sha256(session_value))
+                     if callable(getattr(private_runtime, "get_publisher", None)) else None)
+        service = EditorService(store, purpose=authorization_context.account_purpose, authorize=reauthorize, publisher=publisher,
+                                uploader=getattr(store, "upload_asset", None))
+        binding = payload["input"]["contentHub"]
+        if set(binding) - {"read", "action", "hubId", "data"}:
+            raise EditorValidationError("invalid_request")
+        result = service.run(operation, binding.get("data", {}))
+        if operation in {"articleDetail", "createArticle", "updatePackage"}:
+            available = publisher is not None and authorization_context.writer_mode == {
+                "qa": "qa-only", "client-owner": "client-owner"}[authorization_context.account_purpose]
+            result = {**result, "publicationAvailable": available}
+        return _response(200, {"ok": True, "data": result, "requestId": request_id})
+    except EditorConflict:
+        return _error_response(AuthoringRequestError(409, "edit_conflict", "The article changed; reload before saving"), request_id)
+    except EditorNotFound:
+        return _error_response(AuthoringRequestError(404, "not_found", "Article not found"), request_id)
+    except EditorValidationError as error:
+        # A publisher may have committed before losing its response. Keep this
+        # retryable so the client retains the original idempotency key.
+        status = 503 if error.code in {"feature_not_ready", "publication_unavailable"} else 400
+        return _error_response(AuthoringRequestError(status, error.code, "Content hub request could not be completed"), request_id)
     except AuthoringRequestError as error:
         return _error_response(error, request_id)
     except ContentHubV2WriterDisabledError:

@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 import re
+import secrets
 import sys
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -187,10 +188,51 @@ def execute_operation(
     return _safe_result(_read_lambda_payload(response))
 
 
+def execute_inspection(session: Any, *, nonce: str | None = None) -> dict[str, Any]:
+    """Inspect using the existing operator authority, never a deployment role.
+
+    This is not an IAM inspect-only capability: the existing operator also has
+    permission to invoke this function's reviewed reserve/update operations.
+    """
+    nonce = secrets.token_hex(16) if nonce is None else nonce
+    if not isinstance(nonce, str) or re.fullmatch(r"[a-f0-9]{32}", nonce) is None:
+        raise OperatorInputError("inspection nonce is invalid")
+    identity = session.client("sts").get_caller_identity()
+    if not isinstance(identity, Mapping):
+        raise OperatorAuthorizationError("active AWS principal identity is invalid")
+    require_named_operator(str(identity.get("Arn") or ""), str(identity.get("Account") or ""))
+    try:
+        response = session.client("lambda").invoke(FunctionName=APPROVED_FUNCTION_NAME,
+            InvocationType="RequestResponse", Payload=json.dumps({"operation": "inspect", "nonce": nonce}).encode("utf-8"))
+        payload = _read_lambda_payload(response)
+        fields = {"ok", "operation", "schemaVersion", "nonce", "scopeVerified", "bindingsVerified",
+                  "descriptorVersionId", "descriptorSha256", "authPolicyVersion", "activationStatus", "writerMode",
+                  "writerEpoch", "registryRevision", "registrySha256"}
+        if (set(payload) != fields or payload["operation"] != "inspect" or payload["nonce"] != nonce
+                or type(payload["schemaVersion"]) is not int or payload["schemaVersion"] != 1
+                or payload["scopeVerified"] is not True or payload["bindingsVerified"] is not True
+                or payload["activationStatus"] not in {"inactive", "active"}
+                or payload["writerMode"] not in {"disabled", "qa-only", "client-owner"}):
+            raise ValueError()
+        for field in ("writerEpoch", "registryRevision"):
+            if type(payload[field]) is not int or payload[field] < 1:
+                raise ValueError()
+        for field in ("descriptorSha256", "registrySha256"):
+            if not isinstance(payload[field], str) or re.fullmatch(r"[a-f0-9]{64}", payload[field]) is None:
+                raise ValueError()
+        for field in ("descriptorVersionId", "authPolicyVersion"):
+            if not isinstance(payload[field], str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", payload[field]) is None:
+                raise ValueError()
+    except Exception:
+        raise OperatorServiceError("registry inspection failed") from None
+    return dict(payload)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Operate the private THN v2 service-binding registry.")
     parser.add_argument("--region", default=os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION"))
     subparsers = parser.add_subparsers(dest="operation", required=True)
+    subparsers.add_parser("inspect", help="Inspect the fixed binding without mutations or resource selectors.")
     reserve = subparsers.add_parser("reserve", help="Conditionally reserve the approved TASK-008 binding.")
     reserve.add_argument("--record-file", required=True)
     update = subparsers.add_parser("update", help="Conditionally replace the approved TASK-008 binding.")
@@ -203,17 +245,20 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        definition = load_definition(args.record_file)
         import boto3
 
         session = boto3.Session(region_name=args.region)
-        summary = execute_operation(
-            session,
-            operation=args.operation,
-            definition=definition,
-            expected_registry_revision=getattr(args, "expected_registry_revision", None),
-            expected_writer_epoch=getattr(args, "expected_writer_epoch", None),
-        )
+        if args.operation == "inspect":
+            summary = execute_inspection(session)
+        else:
+            definition = load_definition(args.record_file)
+            summary = execute_operation(
+                session,
+                operation=args.operation,
+                definition=definition,
+                expected_registry_revision=getattr(args, "expected_registry_revision", None),
+                expected_writer_epoch=getattr(args, "expected_writer_epoch", None),
+            )
         print(json.dumps(summary, sort_keys=True, separators=(",", ":")))
         return 0
     except (OperatorAuthorizationError, OperatorInputError, OperatorServiceError) as error:

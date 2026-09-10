@@ -243,6 +243,7 @@ class EmergencyWithdrawalContractTests(unittest.TestCase):
         self.assertEqual(batch.manifest_after["state"], "withdrawing")
         self.assertEqual(batch.page_after["state"], "consumed")
         self.assertEqual(batch.checkpoint_after["status"], "in_progress")
+        self.assertIn("/", batch.invalidation_paths)
         self.assertIn("/the-journal", batch.invalidation_paths)
         self.assertIn("/content-hub-search.json", batch.invalidation_paths)
         self.assertIn("/sitemap.xml", batch.invalidation_paths)
