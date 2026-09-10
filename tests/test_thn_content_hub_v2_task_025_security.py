@@ -8,6 +8,7 @@ from tests.test_thn_content_hub_v2_task_019_template import (
     _resource,
     _statement,
     _template,
+    _thn_routes,
 )
 
 
@@ -38,11 +39,7 @@ class ThnContentHubV2Task025SecurityTests(unittest.TestCase):
 
     def test_only_authoring_and_public_media_have_http_routes(self):
         template = _template()
-        routed = set()
-        for function_id in FUNCTIONS:
-            function = _resource(template, function_id)
-            if "Type: HttpApi" in function:
-                routed.add(function_id)
+        routed = {function for function, _, _ in _thn_routes(template)}
 
         self.assertEqual(
             routed,
@@ -80,17 +77,33 @@ class ThnContentHubV2Task025SecurityTests(unittest.TestCase):
         self.assertNotIn("SLUG#test#thehairnarrative.com", role)
         self.assertNotIn("LIVE_MEDIA#", role)
 
-    def test_publisher_scope_excludes_auth_and_other_tenants(self):
+    def test_publisher_scope_excludes_session_reads_and_other_tenants(self):
         role = _resource(_template(), "ThnContentHubV2PublisherRole")
         private_read = _statement(role, "ReadExactThnPrivatePublication")
         private_package = _statement(role, "ReadExactThnPrivatePackage")
         public_write = _statement(role, "FinalizeExactThnProjection")
 
         self.assertIn("ThnContentHubV2MetadataTable", private_read)
-        self.assertNotIn("zoolanding-auth-admin", role)
-        self.assertNotIn("ThnSessionV2", role)
-        self.assertNotIn("ThnCurrentUserStateV2", role)
-        self.assertEqual(private_package.count("s3:GetObject"), 1)
+        session_check = _statement(role, "CheckExactThnPublishingSession")
+        actor_read = _statement(role, "ReadExactThnPublicationActor")
+        actor_check = _statement(role, "CheckExactThnPublicationActor")
+        self.assertNotIn("zoolanding-auth-admin", role.replace(session_check, "").replace(actor_read, "").replace(actor_check, ""))
+        # C SEC-001/TASK-007 requires a fresh purpose/version check. Session
+        # access remains condition-only under the separately approved amendment.
+        self.assertIn("ThnCurrentUserStateV2", actor_read)
+        self.assertIn("dynamodb:GetItem", actor_read)
+        self.assertIn("CURRENT_USER#test#thn-journal-test-v2", actor_read)
+        self.assertIn("dynamodb:ConditionCheckItem", actor_check)
+        self.assertIn("dynamodb:EnclosingOperation: TransactWriteItems", actor_check)
+        self.assertNotIn("dynamodb:PutItem", actor_read + actor_check)
+        self.assertNotIn("dynamodb:Query", actor_read + actor_check)
+        self.assertNotIn("dynamodb:Scan", actor_read + actor_check)
+        self.assertIn("ThnSessionV2", session_check)
+        self.assertIn("dynamodb:ConditionCheckItem", session_check)
+        self.assertNotIn("dynamodb:GetItem", session_check)
+        self.assertIn("dynamodb:EnclosingOperation: TransactWriteItems", session_check)
+        self.assertIn("dynamodb:ReturnValues: NONE", session_check)
+        self.assertEqual(private_package.count("s3:GetObjectVersion"), 1)
         self.assertIn(
             "${ThnContentHubV2PrivateStore.Arn}/private/test/"
             "thehairnarrative.com/thehairnarrative-com-journal/"

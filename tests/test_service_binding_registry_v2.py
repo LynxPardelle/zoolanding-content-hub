@@ -631,6 +631,7 @@ class ServiceBindingRegistryTemplateTests(unittest.TestCase):
         self.assertIn("- dynamodb:GetItem", reader_block)
         self.assertIn("ArnNotEquals:", reader_block)
         exact_roles = (
+            "zoolanding-auth-admin-test-ThnAuthAdminV2FunctionRole",
             "zoolanding-image-upload-test-ThnImageUploadV2Role",
             "zlp-thn-ch-test-authoring",
             "zlp-thn-ch-test-private-asset-gc",

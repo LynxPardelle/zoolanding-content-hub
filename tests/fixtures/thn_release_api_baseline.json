@@ -1,0 +1,302 @@
+{
+  "api": {
+    "Type": "AWS::ApiGatewayV2::Api",
+    "Properties": {
+      "Body": {
+        "info": {
+          "version": "1.0",
+          "title": {
+            "Ref": "AWS::StackName"
+          }
+        },
+        "paths": {
+          "/features/content-hub-v2/public-media/{articleId}/{locale}/{revisionId}/{assetId}/{variantId}": {
+            "Fn::If": [
+              "IsThnContentHubV2Enabled",
+              {
+                "get": {
+                  "Fn::If": [
+                    "IsThnContentHubV2Enabled",
+                    {
+                      "x-amazon-apigateway-integration": {
+                        "httpMethod": "POST",
+                        "type": "aws_proxy",
+                        "uri": {
+                          "Fn::If": [
+                            "IsThnContentHubV2Enabled",
+                            {
+                              "Fn::Sub": "arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ThnContentHubV2PublicMediaFunctionAliastest}/invocations"
+                            },
+                            {
+                              "Ref": "AWS::NoValue"
+                            }
+                          ]
+                        },
+                        "payloadFormatVersion": "2.0"
+                      },
+                      "responses": {},
+                      "parameters": [
+                        {
+                          "required": true,
+                          "name": "articleId",
+                          "in": "path"
+                        },
+                        {
+                          "required": true,
+                          "name": "locale",
+                          "in": "path"
+                        },
+                        {
+                          "required": true,
+                          "name": "revisionId",
+                          "in": "path"
+                        },
+                        {
+                          "required": true,
+                          "name": "assetId",
+                          "in": "path"
+                        },
+                        {
+                          "required": true,
+                          "name": "variantId",
+                          "in": "path"
+                        }
+                      ]
+                    },
+                    {
+                      "Ref": "AWS::NoValue"
+                    }
+                  ]
+                }
+              },
+              {
+                "Ref": "AWS::NoValue"
+              }
+            ]
+          },
+          "/features/content-hub-v2/read": {
+            "Fn::If": [
+              "IsThnContentHubV2Enabled",
+              {
+                "post": {
+                  "Fn::If": [
+                    "IsThnContentHubV2Enabled",
+                    {
+                      "x-amazon-apigateway-integration": {
+                        "httpMethod": "POST",
+                        "type": "aws_proxy",
+                        "uri": {
+                          "Fn::If": [
+                            "IsThnContentHubV2Enabled",
+                            {
+                              "Fn::Sub": "arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ThnContentHubV2AuthoringFunctionAliastest}/invocations"
+                            },
+                            {
+                              "Ref": "AWS::NoValue"
+                            }
+                          ]
+                        },
+                        "payloadFormatVersion": "2.0"
+                      },
+                      "responses": {}
+                    },
+                    {
+                      "Ref": "AWS::NoValue"
+                    }
+                  ]
+                }
+              },
+              {
+                "Ref": "AWS::NoValue"
+              }
+            ]
+          },
+          "/features/content-hub/action": {
+            "post": {
+              "x-amazon-apigateway-integration": {
+                "httpMethod": "POST",
+                "type": "aws_proxy",
+                "uri": {
+                  "Fn::Sub": "arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ContentHubFunction.Arn}/invocations"
+                },
+                "payloadFormatVersion": "2.0"
+              },
+              "responses": {}
+            },
+            "options": {
+              "x-amazon-apigateway-integration": {
+                "httpMethod": "POST",
+                "type": "aws_proxy",
+                "uri": {
+                  "Fn::Sub": "arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ContentHubFunction.Arn}/invocations"
+                },
+                "payloadFormatVersion": "2.0"
+              },
+              "responses": {}
+            }
+          },
+          "/features/content-hub/read": {
+            "post": {
+              "x-amazon-apigateway-integration": {
+                "httpMethod": "POST",
+                "type": "aws_proxy",
+                "uri": {
+                  "Fn::Sub": "arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ContentHubFunction.Arn}/invocations"
+                },
+                "payloadFormatVersion": "2.0"
+              },
+              "responses": {}
+            },
+            "options": {
+              "x-amazon-apigateway-integration": {
+                "httpMethod": "POST",
+                "type": "aws_proxy",
+                "uri": {
+                  "Fn::Sub": "arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ContentHubFunction.Arn}/invocations"
+                },
+                "payloadFormatVersion": "2.0"
+              },
+              "responses": {}
+            }
+          },
+          "/features/content-hub/public-action": {
+            "post": {
+              "x-amazon-apigateway-integration": {
+                "httpMethod": "POST",
+                "type": "aws_proxy",
+                "uri": {
+                  "Fn::Sub": "arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ContentHubFunction.Arn}/invocations"
+                },
+                "payloadFormatVersion": "2.0"
+              },
+              "responses": {}
+            },
+            "options": {
+              "x-amazon-apigateway-integration": {
+                "httpMethod": "POST",
+                "type": "aws_proxy",
+                "uri": {
+                  "Fn::Sub": "arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ContentHubFunction.Arn}/invocations"
+                },
+                "payloadFormatVersion": "2.0"
+              },
+              "responses": {}
+            }
+          },
+          "/features/content-hub-v2/action": {
+            "Fn::If": [
+              "IsThnContentHubV2Enabled",
+              {
+                "post": {
+                  "Fn::If": [
+                    "IsThnContentHubV2Enabled",
+                    {
+                      "x-amazon-apigateway-integration": {
+                        "httpMethod": "POST",
+                        "type": "aws_proxy",
+                        "uri": {
+                          "Fn::If": [
+                            "IsThnContentHubV2Enabled",
+                            {
+                              "Fn::Sub": "arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ThnContentHubV2AuthoringFunctionAliastest}/invocations"
+                            },
+                            {
+                              "Ref": "AWS::NoValue"
+                            }
+                          ]
+                        },
+                        "payloadFormatVersion": "2.0"
+                      },
+                      "responses": {}
+                    },
+                    {
+                      "Ref": "AWS::NoValue"
+                    }
+                  ]
+                }
+              },
+              {
+                "Ref": "AWS::NoValue"
+              }
+            ]
+          }
+        },
+        "openapi": "3.0.1",
+        "tags": [
+          {
+            "name": "httpapi:createdBy",
+            "x-amazon-apigateway-tag-value": "SAM"
+          }
+        ]
+      }
+    }
+  },
+  "permissions": {
+    "ThnContentHubV2AuthoringFunctionActionPermission": {
+      "Type": "AWS::Lambda::Permission",
+      "Condition": "IsThnContentHubV2Enabled",
+      "Properties": {
+        "Action": "lambda:InvokeFunction",
+        "FunctionName": {
+          "Ref": "ThnContentHubV2AuthoringFunctionAliastest"
+        },
+        "Principal": "apigateway.amazonaws.com",
+        "SourceArn": {
+          "Fn::Sub": [
+            "arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${__ApiId__}/${__Stage__}/POST/features/content-hub-v2/action",
+            {
+              "__ApiId__": {
+                "Ref": "ContentHubApi"
+              },
+              "__Stage__": "*"
+            }
+          ]
+        }
+      }
+    },
+    "ThnContentHubV2AuthoringFunctionReadPermission": {
+      "Type": "AWS::Lambda::Permission",
+      "Condition": "IsThnContentHubV2Enabled",
+      "Properties": {
+        "Action": "lambda:InvokeFunction",
+        "FunctionName": {
+          "Ref": "ThnContentHubV2AuthoringFunctionAliastest"
+        },
+        "Principal": "apigateway.amazonaws.com",
+        "SourceArn": {
+          "Fn::Sub": [
+            "arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${__ApiId__}/${__Stage__}/POST/features/content-hub-v2/read",
+            {
+              "__ApiId__": {
+                "Ref": "ContentHubApi"
+              },
+              "__Stage__": "*"
+            }
+          ]
+        }
+      }
+    },
+    "ThnContentHubV2PublicMediaFunctionPublicMediaPermission": {
+      "Type": "AWS::Lambda::Permission",
+      "Condition": "IsThnContentHubV2Enabled",
+      "Properties": {
+        "Action": "lambda:InvokeFunction",
+        "FunctionName": {
+          "Ref": "ThnContentHubV2PublicMediaFunctionAliastest"
+        },
+        "Principal": "apigateway.amazonaws.com",
+        "SourceArn": {
+          "Fn::Sub": [
+            "arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${__ApiId__}/${__Stage__}/GET/features/content-hub-v2/public-media/*/*/*/*/*",
+            {
+              "__ApiId__": {
+                "Ref": "ContentHubApi"
+              },
+              "__Stage__": "*"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

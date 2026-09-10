@@ -25,6 +25,7 @@ MAX_MEDIA_INVALIDATION_PATHS = 84
 MAX_MANIFEST_PAGES = 100_000
 MAX_PAGE_SERIALIZED_BYTES = 300_000
 GLOBAL_INVALIDATION_PATHS = (
+    "/",
     "/the-journal",
     "/content-hub-search.json",
     "/sitemap.xml",

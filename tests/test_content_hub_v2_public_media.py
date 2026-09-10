@@ -451,12 +451,10 @@ class PublicMediaTemplateTests(unittest.TestCase):
             role,
         )
         self.assertNotIn("published/*", role)
-        self.assertIn(
-            "Path: /features/content-hub-v2/public-media/"
-            "{articleId}/{locale}/{revisionId}/{assetId}/{variantId}",
-            function,
-        )
-        self.assertIn("Method: GET", function)
+        from tests.test_thn_content_hub_v2_task_019_template import _thn_routes
+        self.assertIn(("ThnContentHubV2PublicMediaFunction", "GET",
+            "/features/content-hub-v2/public-media/{articleId}/{locale}/{revisionId}/{assetId}/{variantId}"), _thn_routes(template))
+        self.assertNotIn("Events:", function)
 
 
 if __name__ == "__main__":
