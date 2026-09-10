@@ -30,6 +30,13 @@ review failures print their static rejection code and exit nonzero. Unknown or
 provider exceptions keep the generic message; no raw SDK response is logged.
 This diagnostic distinction does not relax any review or deployment guard.
 
+Processed-template drift includes at most 16 structural locations and closed
+node-type labels. Only fixed CloudFormation schema names are emitted; other
+dictionary keys use anonymous indexes in sorted key order. Values are never
+logged. Depth and output bounds apply, and the same rejection and unexecuted
+change-set cleanup remain mandatory. A diagnostic is not permission to normalize
+or ignore an unexplained difference.
+
 The 2026-09-08 read-only TEST observation found a protected, stable Hub stack with **17 existing shared resources**, no THN seven-pair runtime, and none of the five mediated-registry resources. The exact registry-operator parameter and human role were also missing. These are observations, not assumptions inferred from the candidate template. Recheck them at execution. Image TEST was absent; its separate private-only CREATE path does not create v1 resources.
 
 | Operation | Allowed effect | Required before it runs |
