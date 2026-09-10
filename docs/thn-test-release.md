@@ -48,6 +48,16 @@ structural-difference report; it is not a general drift-normalization rule.
 See [Python mapping equality](https://docs.python.org/3/library/collections.html#collections.OrderedDict)
 and [JSON object/array semantics](https://www.rfc-editor.org/rfc/rfc8259#section-1).
 
+The registry bootstrap compares the initial and final `DescribeChangeSet`
+payloads without their top-level `ResponseMetadata`. Request IDs, HTTP headers
+and retry counts describe individual SDK requests, not change-set configuration.
+Both responses remain unmodified. Every other returned field is compared,
+including unknown fields, nested fields named `ResponseMetadata`, identities,
+status, parameters and resource changes. Real payload drift still stops execution
+and deletes only the runner's own unexecuted change set. All independent template,
+inventory, parameter, status, retention and post-execution checks remain required.
+This exception applies only to SDK transport metadata at this comparison boundary.
+
 The 2026-09-08 read-only TEST observation found a protected, stable Hub stack with **17 existing shared resources**, no THN seven-pair runtime, and none of the five mediated-registry resources. The exact registry-operator parameter and human role were also missing. These are observations, not assumptions inferred from the candidate template. Recheck them at execution. Image TEST was absent; its separate private-only CREATE path does not create v1 resources.
 
 | Operation | Allowed effect | Required before it runs |
