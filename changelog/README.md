@@ -2,6 +2,8 @@
 
 Chronological implementation, QA, and release evidence lives here so routine tasks do not load it.
 
+- [2026-09-10 THN registry IAM action correction](2026-09-10-thn-registry-iam-actions.md)
+
 - [2026-09-10 THN change-set response metadata](2026-09-10-thn-change-set-response-metadata.md)
 
 - [2026-09-10 THN SDK template mapping semantics](2026-09-10-thn-sdk-template-maps.md)
