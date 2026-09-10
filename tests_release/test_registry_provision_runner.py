@@ -1,5 +1,6 @@
 """SDK boundary tests for the separately reviewed exact registry bootstrap."""
 
+from collections import OrderedDict
 from copy import deepcopy
 import hashlib
 import json
@@ -146,6 +147,27 @@ class RegistryProvisionRunnerTests(unittest.TestCase):
         self.assertEqual([entry["ParameterKey"] for entry in request["Parameters"] if "ParameterValue" in entry], [subject.PARAMETER])
         self.assertEqual(sum(name == "describe_table" for name, _ in self.session.calls), 2)
         self.assertFalse(any(name in {"get_item", "invoke", "delete_stack", "update_termination_protection"} for name, _ in self.session.calls))
+
+    def test_sdk_processed_map_order_allows_only_the_reviewed_five_additions(self):
+        original_get_template = self.session.get_template
+        def sdk_get_template(**kwargs):
+            response = original_get_template(**kwargs)
+            if kwargs["TemplateStage"] == "Processed":
+                reverse = bool(kwargs.get("ChangeSetName") or self.session.executed)
+                response["TemplateBody"] = json.loads(json.dumps(response["TemplateBody"]),
+                    object_pairs_hook=lambda pairs: OrderedDict(reversed(pairs) if reverse else pairs))
+            return response
+        with patch.object(self.session, "get_template", side_effect=sdk_get_template):
+            outcome = None
+            try:
+                outcome = self.run_bootstrap()
+            except release.ReleaseBlocked:
+                pass
+            self.assertIsNotNone(outcome, "Order-only SDK output must pass unchanged-content checks")
+        self.assertEqual((outcome["preserved_resource_count"], outcome["new_resource_count"]), (17, 5))
+        self.assertEqual(sum(name == "describe_table" for name, _ in self.session.calls), 2)
+        self.assertFalse(any(name in {"get_item", "invoke", "delete_stack", "update_termination_protection"}
+                             for name, _ in self.session.calls))
 
     def test_missing_human_operator_stops_before_packaging_or_changeset(self):
         self.session.bad_operator = True

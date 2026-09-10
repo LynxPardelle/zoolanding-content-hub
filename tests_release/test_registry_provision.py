@@ -1,5 +1,6 @@
 """Registry bootstrap is an exact five-resource extension, not THN activation."""
 
+from collections import OrderedDict
 from copy import deepcopy
 import importlib
 import importlib.util
@@ -59,6 +60,55 @@ class RegistryProvisionTests(unittest.TestCase):
 
     def compose(self):
         return self.subject.compose(self.candidate, self.live, self.processed, self.inventory)
+
+    def test_loader_copies_sdk_maps_as_plain_maps_at_every_depth(self):
+        body = OrderedDict([("Metadata", OrderedDict([
+            ("second", [OrderedDict([("z", "text"), ("a", 7)])]),
+            ("first", {"enabled": True, "empty": None})]))])
+        loaded = release._load_template(body)
+        self.assertIs(type(loaded), dict)
+        self.assertIs(type(loaded["Metadata"]), dict)
+        self.assertIs(type(loaded["Metadata"]["second"][0]), dict)
+        self.assertEqual(loaded, body)
+        loaded["Metadata"]["second"][0]["a"] = 9
+        self.assertEqual(body["Metadata"]["second"][0]["a"], 7)
+
+    def test_loader_preserves_list_order_and_exact_scalar_types(self):
+        values = ["512", 512, False, None, 1.5, ["second", "first"]]
+        loaded = release._load_template(OrderedDict([("Metadata", values)]))["Metadata"]
+        self.assertEqual(loaded, values)
+        self.assertEqual([type(value) for value in loaded], [type(value) for value in values])
+        self.assertNotEqual(loaded, list(reversed(values)))
+
+    def test_loaded_sdk_maps_ignore_key_order_but_reject_real_drift(self):
+        self.live["Metadata"] = self.processed["Metadata"] = {"ordered": ["first", "second"]}
+        live = json.loads(json.dumps(self.processed), object_pairs_hook=OrderedDict)
+        candidate = processed_candidate(self.compose())
+        def load_reordered(value):
+            return release._load_template(json.loads(json.dumps(value),
+                object_pairs_hook=lambda pairs: OrderedDict(reversed(pairs))))
+        live = release._load_template(live)
+        outcome = None
+        try:
+            self.subject.verify_processed(live, load_reordered(candidate), self.inventory)
+            outcome = "accepted"
+        except release.ReleaseBlocked:
+            pass
+        self.assertEqual(outcome, "accepted", "SDK key order must not count as a template change")
+        for mutation in ("array", "scalar-type", "removed-key", "added-key", "api"):
+            altered = deepcopy(candidate)
+            if mutation == "array":
+                altered["Metadata"]["ordered"].reverse()
+            elif mutation == "scalar-type":
+                altered["Parameters"]["FunctionMemorySize"]["Default"] = "512"
+            elif mutation == "removed-key":
+                altered["Parameters"]["SharedSecret"].pop("NoEcho")
+            elif mutation == "added-key":
+                altered["Metadata"]["extra"] = None
+            else:
+                altered["Resources"]["ContentHubApi"]["Properties"]["Body"]["paths"] = {}
+            with self.subTest(mutation=mutation), self.assertRaises(release.ReleaseBlocked):
+                self.subject.verify_processed(live, load_reordered(altered), self.inventory)
 
     def test_composer_preserves_every_live_resource_and_adds_exact_five_with_no_runtime(self):
         result = self.compose()
