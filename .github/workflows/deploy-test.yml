@@ -1,4 +1,4 @@
-name: Deploy Test
+name: Validate Test promotion (no deploy)
 
 on:
   push:
@@ -63,29 +63,27 @@ jobs:
           python -m pip install --disable-pip-version-check -r requirements.txt -r requirements-release.txt
           python -m pip check
           python -m unittest discover -s tests -p "test_*.py"
+          python -m unittest discover -s tests_release -p "test_*.py"
           python -m venv "$RUNNER_TEMP/thn-cfn-lint"
           "$RUNNER_TEMP/thn-cfn-lint/bin/python" -m pip install --disable-pip-version-check cfn-lint==1.56.0
           "$RUNNER_TEMP/thn-cfn-lint/bin/cfn-lint" -t template.yaml -r us-east-1
           sam build --no-cached
           python tools/check_lambda_artifacts.py
-      - name: Assemble immutable release artifact
+      - name: Assemble immutable validation artifact
         shell: bash
         env:
           RELEASE_SHA: ${{ github.sha }}
           SERVICE_ID: zoolanding-content-hub
         run: |
           set -euo pipefail
-          mkdir -p .aws-sam/build/release-tools
-          cp tools/review_test_change_set.py .aws-sam/build/release-tools/
-          cp tools/prepare_test_parameters.py .aws-sam/build/release-tools/
-          cp tools/run_test_change_set.sh .aws-sam/build/release-tools/
-          cp tools/smoke_test_stack.sh .aws-sam/build/release-tools/
           python3 - <<'PY'
           import json
           import os
           from pathlib import Path
           payload = {
-              "schema": "zoolanding-test-release/v1",
+              "schema": "zoolanding-test-validation/v1",
+              "purpose": "validation-only",
+              "deployable": False,
               "service": os.environ["SERVICE_ID"],
               "source_sha": os.environ["RELEASE_SHA"],
               "run_id": os.environ["GITHUB_RUN_ID"],
@@ -97,7 +95,7 @@ jobs:
           )
           PY
           (cd .aws-sam/build && LC_ALL=C find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) > .aws-sam/build-manifest.sha256
-      - name: Compute release identity
+      - name: Compute validation identity
         id: manifest
         shell: bash
         run: |
@@ -109,7 +107,7 @@ jobs:
         id: identity
         shell: bash
         env:
-          ARTIFACT_NAME: zoolanding-content-hub-test-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          ARTIFACT_NAME: zoolanding-content-hub-test-validation-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
         run: printf 'name=%s\n' "$ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
       - name: Upload exact validated artifact
         id: upload
@@ -123,13 +121,11 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-  deploy:
+  verify-artifact:
     runs-on: ubuntu-latest
     needs: validate
-    environment: test
     permissions:
       contents: read
-      id-token: write
     steps:
       - name: Validate immutable artifact coordinates
         shell: bash
@@ -162,71 +158,23 @@ jobs:
           cmp --silent .aws-sam/build-manifest.sha256 "$RUNNER_TEMP/recomputed-build-manifest.sha256"
           printf '%s  %s\n' "$EXPECTED_MANIFEST_DIGEST" .aws-sam/build-manifest.sha256 | sha256sum --check --strict -
           (cd .aws-sam/build && sha256sum --check --strict ../build-manifest.sha256)
-          python3 - "$EXPECTED_SHA" "$EXPECTED_SERVICE" <<'PY'
+          python3 - "$EXPECTED_SHA" "$EXPECTED_SERVICE" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" <<'PY'
           import json
           from pathlib import Path
           import sys
           payload = json.loads(Path(".aws-sam/build/release-metadata.json").read_text(encoding="utf-8"))
           if (
-              payload.get("schema") != "zoolanding-test-release/v1"
+              payload.get("schema") != "zoolanding-test-validation/v1"
+              or payload.get("purpose") != "validation-only"
+              or payload.get("deployable") is not False
               or payload.get("source_sha") != sys.argv[1]
               or payload.get("service") != sys.argv[2]
+              or payload.get("run_id") != sys.argv[3]
+              or payload.get("run_attempt") != sys.argv[4]
           ):
-              raise SystemExit("release_metadata_invalid")
+              raise SystemExit("validation_metadata_invalid")
           PY
-      - uses: aws-actions/setup-sam@89ddb14d60e682855e3fea4be85b3c56485de310 # v3
-        with:
-          version: 1.163.0
-          use-installer: true
-          token: ${{ github.token }}
-      - name: Prepare exact TEST parameters without AWS credentials
-        shell: bash
-        env:
-          ARTIFACTS_BUCKET: ${{ vars.SAM_ARTIFACTS_BUCKET }}
-          CONTENT_HUB_CONFIG_READY: ${{ vars.CONTENT_HUB_CONFIG_READY }}
-          CONTENT_HUB_CONFIG_JSON_BASE64: ${{ secrets.CONTENT_HUB_CONFIG_JSON_BASE64 }}
-          AUTH_SESSION_TABLE_NAME: ${{ vars.AUTH_SESSION_TABLE_NAME }}
-          AUTH_USER_STATE_TABLE_NAME: ${{ vars.AUTH_USER_STATE_TABLE_NAME }}
-          AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
-          THN_V2_TEST_PARAMETERS_JSON: ${{ vars.THN_V2_TEST_PARAMETERS_JSON }}
-        run: |
-          set -euo pipefail
-          test -n "$ARTIFACTS_BUCKET" || { echo "sam_artifacts_bucket_required"; exit 1; }
-          if [ -n "${THN_V2_TEST_PARAMETERS_JSON:-}" ]; then
-            test "$(python3 .aws-sam/build/release-tools/prepare_test_parameters.py --thn-selection-contract)" = "thn-test-selection/v1" || { echo "thn_test_selection_contract_missing"; exit 1; }
-          fi
-          python3 .aws-sam/build/release-tools/prepare_test_parameters.py
-      - uses: aws-actions/configure-aws-credentials@517a711dbcd0e402f90c77e7e2f81e849156e31d # v6
-        with:
-          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
-      - name: Verify live THN TEST account and retained-state protection
-        if: ${{ vars.THN_V2_TEST_PARAMETERS_JSON != '' }}
-        shell: bash
-        env:
-          AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
-          THN_V2_TEST_PARAMETERS_JSON: ${{ vars.THN_V2_TEST_PARAMETERS_JSON }}
-        run: python3 .aws-sam/build/release-tools/prepare_test_parameters.py --verify-cloud-guards
-      - name: Create, describe, review, and execute exact change set
-        shell: bash
-        env:
-          STACK_NAME: zoolanding-content-hub-test
-          CHANGE_SET_NAME: release-${{ github.run_id }}-${{ github.run_attempt }}
-          RELEASE_SHA: ${{ github.sha }}
-          ARTIFACTS_BUCKET: ${{ vars.SAM_ARTIFACTS_BUCKET }}
-          PARAMETER_FILE: ${{ runner.temp }}/test-release-parameters/parameters.json
-          EXPECTED_PARAMETER_FILE: ${{ runner.temp }}/test-release-parameters/expected-parameters.txt
-          REQUIRED_PARAMETER_FILE: ${{ runner.temp }}/test-release-parameters/required-parameters.txt
-          AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
-          CHANGE_SET_COMMANDS: create-change-set describe-change-set execute-change-set
-          STATEFUL_RESOURCE_GUARD: stateful_resource_change_forbidden
-        run: bash .aws-sam/build/release-tools/run_test_change_set.sh
-      - name: Post-deploy smoke
-        shell: bash
-        env:
-          STACK_NAME: zoolanding-content-hub-test
-        run: bash .aws-sam/build/release-tools/smoke_test_stack.sh
-      - name: Record immutable release coordinates
+      - name: Record validation-only artifact coordinates
         shell: bash
         env:
           ARTIFACT_ID: ${{ needs.validate.outputs.artifact_id }}
@@ -234,9 +182,10 @@ jobs:
           RELEASE_SHA: ${{ github.sha }}
         run: |
           {
-            echo "### TEST release"
+            echo "### TEST source validation only"
             echo "- source_run_id: $GITHUB_RUN_ID"
             echo "- source_artifact_id: $ARTIFACT_ID"
             echo "- source_sha: $RELEASE_SHA"
             echo "- source_manifest_sha256: $MANIFEST_DIGEST"
+            echo "- This is not a deployment or rollback artifact; no AWS operation ran."
           } >> "$GITHUB_STEP_SUMMARY"
