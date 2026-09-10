@@ -24,6 +24,12 @@ not authorize skipping those checks or establish that the client can sign in.
 
 ## Verified baseline and operation boundaries
 
+The file entrypoint delegates to the package entrypoint so registry helpers and
+the CLI use the same safe exception class. Known release-boundary and change-set
+review failures print their static rejection code and exit nonzero. Unknown or
+provider exceptions keep the generic message; no raw SDK response is logged.
+This diagnostic distinction does not relax any review or deployment guard.
+
 The 2026-09-08 read-only TEST observation found a protected, stable Hub stack with **17 existing shared resources**, no THN seven-pair runtime, and none of the five mediated-registry resources. The exact registry-operator parameter and human role were also missing. These are observations, not assumptions inferred from the candidate template. Recheck them at execution. Image TEST was absent; its separate private-only CREATE path does not create v1 resources.
 
 | Operation | Allowed effect | Required before it runs |

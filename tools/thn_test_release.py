@@ -696,7 +696,7 @@ def main() -> int:
     try:
         import boto3
         result = run_release(boto3.Session(region_name=REGION), dict(os.environ), args.build, args.operation)
-    except ReleaseBlocked as error:
+    except (ReleaseBlocked, ordinary_review.ChangeSetReviewError) as error:
         print(str(error), file=sys.stderr)
         return 1
     except Exception:
@@ -708,4 +708,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # Registry helpers import this module by its package name. Use that same
+    # module at the file entrypoint so its safe exception class is not duplicated.
+    from tools.thn_test_release import main as package_main
+    raise SystemExit(package_main())
