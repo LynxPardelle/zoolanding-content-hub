@@ -92,6 +92,18 @@ Methods, payload format 2.0, authorizer behavior, integration timeout and alias-
 
 ## Registry readers and inspection
 
+The registry policy uses IAM action names rather than DynamoDB API-operation
+names. `BatchExecuteStatement` and `ExecuteStatement` are covered by the existing
+unconditional `PartiQLSelect/Insert/Update/Delete` denials. `TransactGetItems`
+is denied as `dynamodb:GetItem` with `StringEquals` on
+`dynamodb:EnclosingOperation: TransactGetItems`, for every principal. That
+condition does not match an ordinary GetItem with no enclosing operation;
+all existing consumer/partition restrictions still apply. Do not remove the
+transaction deny or use an `IfExists` condition that also blocks ordinary reads.
+No approved allow, principal list, partition or mutation-role grant changed.
+See the [API-to-IAM mapping](https://docs.aws.amazon.com/service-authorization/latest/reference/list_dynamodb.html)
+and [transaction IAM conditions](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/transaction-apis-iam.html).
+
 Auth's exact intended runtime role is an approved GetItem consumer. Deployment callers H and I have a table ResourcePolicy GetItem allow on one exact binding partition, with `Null=false` and explicit missing/outside-partition denies. The tools strongly read only PK `SERVICE_BINDING#test#thn-journal-test-v2`, SK `REGISTRY#V2`; they never reserve or update it. IAM restricts the partition, **not the sort key**: another SK in that partition is not excluded by this IAM grant. Reservation/audit partitions, Query, Scan, other listing and writes remain denied. A separate DescribeTable deny permits only the mediator and H; no such exception is added for I or the human.
 
 The human's `tools/service_binding_registry_operator.py inspect` invokes the same private mediator with a fresh nonce. Its fixed handler performs strong binding/reservation/binding reads, validates exact canonical records and returns only a closed sanitized proof. It performs no write, audit append, repair or implicit reservation. The human still has the pre-existing reserve/update-capable invocation authority; `inspect` is not an IAM inspect-only role. There is no dual OIDC trust or deployment use of that human authority.

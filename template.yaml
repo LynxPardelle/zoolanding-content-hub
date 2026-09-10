@@ -419,11 +419,9 @@ Resources:
               Effect: Deny
               Principal: '*'
               Action:
-                - dynamodb:BatchExecuteStatement
                 - dynamodb:BatchGetItem
                 - dynamodb:BatchWriteItem
                 - dynamodb:DeleteItem
-                - dynamodb:ExecuteStatement
                 - dynamodb:PartiQLDelete
                 - dynamodb:PartiQLInsert
                 - dynamodb:PartiQLSelect
@@ -431,7 +429,6 @@ Resources:
                 - dynamodb:PutItem
                 - dynamodb:Query
                 - dynamodb:Scan
-                - dynamodb:TransactGetItems
                 - dynamodb:UpdateItem
               Resource:
                 Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-content-hub-test-ServiceBindingRegistryV2
@@ -557,9 +554,18 @@ Resources:
                 - dynamodb:PartiQLSelect
                 - dynamodb:Query
                 - dynamodb:Scan
-                - dynamodb:TransactGetItems
               Resource:
                 Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-content-hub-test-ServiceBindingRegistryV2
+            - Sid: DenyRegistryTransactionalReads
+              Effect: Deny
+              Principal: '*'
+              Action:
+                - dynamodb:GetItem
+              Resource:
+                Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-content-hub-test-ServiceBindingRegistryV2
+              Condition:
+                StringEquals:
+                  dynamodb:EnclosingOperation: TransactGetItems
             - Sid: DenyRegistryPutOutsideApprovedKeys
               Effect: Deny
               Principal: '*'
@@ -614,10 +620,8 @@ Resources:
               Effect: Deny
               Principal: '*'
               Action:
-                - dynamodb:BatchExecuteStatement
                 - dynamodb:BatchWriteItem
                 - dynamodb:DeleteItem
-                - dynamodb:ExecuteStatement
                 - dynamodb:PartiQLDelete
                 - dynamodb:PartiQLInsert
                 - dynamodb:PartiQLUpdate

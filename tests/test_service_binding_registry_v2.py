@@ -542,9 +542,11 @@ class ServiceBindingRegistryTemplateTests(unittest.TestCase):
             "dynamodb:Query",
             "dynamodb:Scan",
             "dynamodb:PartiQLSelect",
-            "dynamodb:TransactGetItems",
         ):
             self.assertIn(denied_read, table_block)
+        self.assertNotIn("dynamodb:TransactGetItems", table_block)
+        self.assertIn("Sid: DenyRegistryTransactionalReads", table_block)
+        self.assertIn("dynamodb:EnclosingOperation: TransactGetItems", table_block)
         deny_key_match = re.search(
             r"(?ms)Sid: DenyRegistryPutOutsideApprovedKeys.*?(?=\n\s+- Sid:)",
             self.template,
