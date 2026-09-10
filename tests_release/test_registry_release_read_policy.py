@@ -54,7 +54,12 @@ class RegistryReleaseReadPolicyTests(unittest.TestCase):
                     self.assertNotIn(reader, json.dumps(statement), sid)
         unsupported = self.statements["DenyRegistryUnsupportedReads"]
         self.assertEqual(unsupported["Effect"], "Deny")
-        self.assertTrue({"dynamodb:Query", "dynamodb:Scan", "dynamodb:TransactGetItems"}.issubset(unsupported["Action"]))
+        self.assertTrue({"dynamodb:Query", "dynamodb:Scan", "dynamodb:PartiQLSelect"}.issubset(unsupported["Action"]))
+        self.assertEqual(self.statement("DenyRegistryTransactionalReads"), {
+            "Sid": "DenyRegistryTransactionalReads", "Effect": "Deny", "Principal": "*",
+            "Action": ["dynamodb:GetItem"], "Resource": TABLE,
+            "Condition": {"StringEquals": {"dynamodb:EnclosingOperation": "TransactGetItems"}},
+        })
         for sid in ("DenyRegistryReservationReadOutsideMutationFunction", "DenyRegistryAuditRead",
                     "DenyRegistryDeleteAndBatchWrite", "DenyRegistryUpdateItem", "DenyRegistryPutOutsideTransaction"):
             self.assertEqual(self.statements[sid]["Effect"], "Deny")
@@ -79,9 +84,9 @@ class RegistryReleaseReadPolicyTests(unittest.TestCase):
             "Condition": {"ArnNotEquals": {"aws:PrincipalArn": approved}}})
         common = self.statements["DenyRegistryAccessOutsideMutationFunction"]
         self.assertEqual(common["Action"], ["dynamodb:" + action for action in (
-            "BatchExecuteStatement", "BatchGetItem", "BatchWriteItem", "DeleteItem", "ExecuteStatement",
+            "BatchGetItem", "BatchWriteItem", "DeleteItem",
             "PartiQLDelete", "PartiQLInsert", "PartiQLSelect", "PartiQLUpdate", "PutItem", "Query", "Scan",
-            "TransactGetItems", "UpdateItem")])
+            "UpdateItem")])
         self.assertEqual(common["Condition"], {"ArnNotEquals": {"aws:PrincipalArn": approved[0]}})
         # These exact principals already need an identity DescribeTable grant. This
         # proves only the resource-policy explicit-deny boundary, not SCP/session IAM.
