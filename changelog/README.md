@@ -2,6 +2,8 @@
 
 Chronological implementation, QA, and release evidence lives here so routine tasks do not load it.
 
+- [2026-09-10 THN exact live API SAM annotation](2026-09-10-thn-live-api-sam-annotation.md)
+
 - [2026-09-10 THN registry IAM action correction](2026-09-10-thn-registry-iam-actions.md)
 
 - [2026-09-10 THN change-set response metadata](2026-09-10-thn-change-set-response-metadata.md)

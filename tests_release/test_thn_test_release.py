@@ -79,6 +79,53 @@ class HubReleaseTests(unittest.TestCase):
         with self.assertRaises(self.tool.ReleaseBlocked):
             self.tool.compose_template(candidate, self.template, "provision", self.processed)
 
+    def test_composer_preserves_the_exact_live_sam_api_annotation_when_source_omits_it(self):
+        previous = deepcopy(self.template)
+        previous["Resources"]["ContentHubApi"]["Metadata"] = {"SamResourceId": "ContentHubApi"}
+        candidate = deepcopy(self.template)
+        snapshots = (deepcopy(previous), deepcopy(candidate))
+        try:
+            result = self.tool.compose_template(candidate, previous, "provision", self.processed)
+        except self.tool.ReleaseBlocked:
+            self.fail("The exact live SAM annotation must be retained when absent from source")
+        self.assertEqual(result["Resources"]["ContentHubApi"]["Metadata"], {"SamResourceId": "ContentHubApi"})
+        self.assertEqual((previous, candidate), snapshots, "Composer must not mutate either input")
+
+    def test_sam_annotation_equivalence_rejects_other_live_or_candidate_metadata(self):
+        invalid = ({"SamResourceId": "AnotherApi"}, {"SamResourceId": "ContentHubApi", "Other": "value"},
+                   {"Other": "value"}, {}, None)
+        for metadata in invalid:
+            with self.subTest(side="live", metadata=metadata):
+                previous = deepcopy(self.template)
+                previous["Resources"]["ContentHubApi"]["Metadata"] = metadata
+                with self.assertRaises(self.tool.ReleaseBlocked):
+                    self.tool.compose_template(self.template, previous, "provision", self.processed)
+            with self.subTest(side="candidate", metadata=metadata):
+                previous = deepcopy(self.template)
+                previous["Resources"]["ContentHubApi"]["Metadata"] = {"SamResourceId": "ContentHubApi"}
+                candidate = deepcopy(self.template)
+                candidate["Resources"]["ContentHubApi"]["Metadata"] = metadata
+                with self.assertRaises(self.tool.ReleaseBlocked):
+                    self.tool.compose_template(candidate, previous, "provision", self.processed)
+
+    def test_exact_sam_annotation_does_not_admit_api_properties_globals_or_body_drift(self):
+        for field in ("StageName", "CorsConfiguration", "Globals", "DefinitionBody"):
+            with self.subTest(field=field):
+                previous = deepcopy(self.template)
+                previous["Resources"]["ContentHubApi"]["Metadata"] = {"SamResourceId": "ContentHubApi"}
+                candidate = deepcopy(self.template)
+                properties = candidate["Resources"]["ContentHubApi"]["Properties"]
+                if field == "StageName":
+                    properties[field] = "another-stage"
+                elif field == "CorsConfiguration":
+                    properties[field] = {"AllowOrigins": ["*"]}
+                elif field == "Globals":
+                    candidate["Globals"]["Function"]["Timeout"] = 999
+                else:
+                    properties[field]["paths"]["/unreviewed"] = {"get": {}}
+                with self.assertRaises(self.tool.ReleaseBlocked):
+                    self.tool.compose_template(candidate, previous, "provision", self.processed)
+
     def test_processed_snapshot_validator_is_mandatory_before_execute(self):
         self.assertTrue(hasattr(self.tool, "verify_processed"), "Processed-template validation is missing")
         for live, candidate in ((None, self.processed), (self.processed, None)):
