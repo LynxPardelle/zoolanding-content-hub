@@ -97,7 +97,10 @@ def verify_route_permissions(template):
             "Principal": "apigateway.amazonaws.com", "SourceArn": {"Fn::Sub": [
                 "arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${__ApiId__}/${__Stage__}/" + ("GET" if public else "POST") + source_path,
                 {"__ApiId__": {"Ref": API}, "__Stage__": "*"}]}}}
-        if resources.get(logical) != expected:
+        # SAM package annotates these explicit permissions with their own ID.
+        # Accept that exact representation, never arbitrary metadata or drift.
+        packaged = {**expected, "Metadata": {"SamResourceId": logical}}
+        if resources.get(logical) not in (expected, packaged):
             raise ApiBoundaryError("exact_thn_http_permission_mismatch")
 
 

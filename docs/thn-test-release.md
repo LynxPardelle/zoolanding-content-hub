@@ -142,6 +142,17 @@ for this THN template. See [supported Rule functions](https://docs.aws.amazon.co
 
 ## API and rollback boundary
 
+The three explicit THN HTTP invoke permissions accept either their exact native
+contract without metadata or that identical contract with only
+`Metadata: {SamResourceId: <its own exact permission logical ID>}`. SAM packaging
+adds this annotation before CloudFormation translation. Foreign IDs, extra or
+malformed metadata, altered actions, principals, source ARNs, target aliases,
+conditions and other resource fields remain errors. The validator does not
+mutate or filter either template, and no IAM grant or API exception is widened.
+Packaging-aware regression fixtures exercise this representation through the
+real lifecycle runner and postchecks; validation of a pre-package template alone
+does not establish parity with the final packaged artifact.
+
 The HTTP API remains the existing `ContentHubApi`. The composer copies its verified live processed Body and replaces only these exact subtrees:
 
 - `POST /features/content-hub-v2/read`
