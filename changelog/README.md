@@ -1,5 +1,7 @@
 # Changelog
 
+- [2026-09-13 THN permission packaging metadata](2026-09-13-thn-permission-package-metadata.md)
+
 Chronological implementation, QA, and release evidence lives here so routine tasks do not load it.
 
 - [2026-09-13 THN lifecycle preflight](2026-09-13-thn-lifecycle-preflight.md)

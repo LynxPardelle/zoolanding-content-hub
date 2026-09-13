@@ -49,6 +49,27 @@ class ApiFailureDiagnosticTests(unittest.TestCase):
     def test_actual_api_drift_has_fixed_reason_and_never_executes(self):
         self.assert_rejected(ApiFailureCloud("api"), "shared_api_nonbody_field_changed")
 
+    def test_packaged_self_metadata_survives_real_runner_and_postchecks(self):
+        cloud = ApiFailureCloud("none")
+        # SAM package annotates source resources before compose/native translation.
+        for logical, resource in cloud.source["Resources"].items():
+            resource.setdefault("Metadata", {})["SamResourceId"] = logical
+        # The deployed shared API already carries this same SAM annotation.
+        for template in (cloud.original, cloud.processed):
+            template["Resources"]["ContentHubApi"]["Metadata"] = {"SamResourceId": "ContentHubApi"}
+        try:
+            result = self.run_cloud(cloud)
+        except release.ReleaseBlocked as error:
+            self.fail(f"Packaged metadata rejected by lifecycle runner: {error}")
+        self.assertEqual(result["decision"], "executed")
+        self.assertEqual(cloud.alias_reads, 14)
+        self.assertEqual(cloud.retention_reads, 4)
+        self.assertTrue(cloud.executed)
+        for logical in ("ThnContentHubV2AuthoringFunctionReadPermission",
+                        "ThnContentHubV2AuthoringFunctionActionPermission",
+                        "ThnContentHubV2PublicMediaFunctionPublicMediaPermission"):
+            self.assertEqual(cloud.processed["Resources"][logical]["Metadata"], {"SamResourceId": logical})
+
     def test_actual_permission_drift_has_fixed_reason_without_private_fields(self):
         self.assert_rejected(ApiFailureCloud("permission"), "exact_thn_http_permission_mismatch")
 
