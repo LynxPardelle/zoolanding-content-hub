@@ -202,6 +202,9 @@ def compose_template(candidate: dict, previous: dict, operation: str = "enable",
         old_api = deepcopy(previous["Resources"]["ContentHubApi"])
         new_api["Properties"].pop("DefinitionBody", None)
         old_api["Properties"].pop("DefinitionBody", None)
+        # Retain the exact live SAM annotation when the source omits it.
+        if "Metadata" not in new_api and old_api.get("Metadata") == {"SamResourceId": "ContentHubApi"}:
+            new_api["Metadata"] = deepcopy(old_api["Metadata"])
         if new_api != old_api:
             raise ReleaseBlocked("shared_api_nonbody_source_drift")
         body = thn_api_boundary.compose_body(candidate, live_processed)

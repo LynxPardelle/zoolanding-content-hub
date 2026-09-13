@@ -88,6 +88,15 @@ The HTTP API remains the existing `ContentHubApi`. The composer copies its verif
 
 Methods, payload format 2.0, authorizer behavior, integration timeout and alias-qualified source permissions are pinned against the former SAM-generated route contract. Every v1 path and all other Body fields remain semantically identical; shared source resources are copied without mutation. Missing snapshots, extra methods/paths, changed API physical identity, host, authorizers, CORS, stage or v1 integration fields fail closed. There is no new API or broad logical-ID exception.
 
+The live API can contain only the SAM-generated annotation
+`Metadata: {SamResourceId: ContentHubApi}` while the candidate omits `Metadata`.
+For that exact pair only, the non-Body comparison copies the live annotation
+into its temporary candidate copy. The composed result retains the complete
+live metadata unchanged. Other metadata values, extra/unknown entries, candidate
+metadata changes, API properties, globals and non-allowlisted Body changes still
+fail closed. Neither input template is mutated; this is not a general metadata
+filter or an exception for shared-resource configuration drift.
+
 `disable` does not deploy an old artifact that deletes the runtime. State has `DeletionPolicy` and `UpdateReplacePolicy: Retain`; superseded Lambda Version removal is allowed only when the change set explicitly reports `PolicyAction: Retain`. Functions, roles, aliases and schedules cannot be removed or replaced. The generic no-removal reviewer remains strict outside this dedicated verified boundary. No automatic rollback, stack deletion, bucket/table/version deletion or protection disablement is attempted.
 
 ## Registry readers and inspection
