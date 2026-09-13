@@ -30,6 +30,18 @@ review failures print their static rejection code and exit nonzero. Unknown or
 provider exceptions keep the generic message; no raw SDK response is logged.
 This diagnostic distinction does not relax any review or deployment guard.
 
+The lifecycle runner validates the returned change-set identity and handles a
+terminal `FAILED` result before requesting its templates or full parameters.
+CloudFormation may not expose a Processed template after transformation fails.
+For a non-no-op failure, the runner stops with the fixed code
+`change_set_creation_failed; diagnostic_retained` and leaves only its own failed,
+unexecuted change set available for private operator inspection. It never prints
+the provider's `StatusReason`, parameters or response. After diagnosis, remove
+only that exact failed plan through a separately verified cleanup; it has not
+created runtime resources. The existing exact no-op review, available-plan
+checks and cleanup of all other unexecuted plans are unchanged. Retention of a
+failed diagnostic is not permission to execute it or relax the cause of failure.
+
 Processed-template drift includes at most 16 structural locations and closed
 node-type labels. Only fixed CloudFormation schema names are emitted; other
 dictionary keys use anonymous indexes in sorted key order. Values are never

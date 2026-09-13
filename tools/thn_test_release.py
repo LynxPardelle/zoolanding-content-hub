@@ -631,6 +631,7 @@ def run_release(session: Any, env: dict, build: Path, operation: str) -> dict:
             or not re.fullmatch(rf"arn:aws:cloudformation:{REGION}:{identity['Account']}:changeSet/{name}/[A-Za-z0-9-]+", change_id)):
         raise ReleaseBlocked("change_set_creation_identity_mismatch")
     executed = False
+    retain_failed_diagnostic = False
     try:
         for attempt in range(120):
             description = cfn.describe_change_set(StackName=STACK, ChangeSetName=change_id)
@@ -641,6 +642,19 @@ def run_release(session: Any, env: dict, build: Path, operation: str) -> dict:
             raise ReleaseBlocked("change_set_creation_timeout")
         if description.get("StackId") != before["StackId"]:
             raise ReleaseBlocked("change_set_stack_identity_mismatch")
+        if (description.get("ChangeSetId") != change_id or description.get("ChangeSetName") != name
+                or description.get("StackName") != STACK or description.get("NextToken")):
+            raise ReleaseBlocked("change_set_response_identity_mismatch")
+        if description.get("Status") == "FAILED":
+            exact_noop = (description.get("ExecutionStatus") == "UNAVAILABLE"
+                          and description.get("StatusReason") == ordinary_review._NO_CHANGE_REASON
+                          and description.get("Changes") in (None, []))
+            if not exact_noop:
+                # A failed transform may have no Processed template or parameters.
+                # Keep only this runner's failed plan for private operator inspection.
+                # Never copy provider StatusReason into public workflow output.
+                retain_failed_diagnostic = True
+                raise ReleaseBlocked("change_set_creation_failed; diagnostic_retained")
         if ordinary_review._parameter_map(description.get("Parameters")) != expected_readback:
             raise ReleaseBlocked("change_set_full_parameter_drift")
         candidate_original = _load_template(cfn.get_template(StackName=STACK, ChangeSetName=change_id, TemplateStage="Original")["TemplateBody"])
@@ -696,7 +710,7 @@ def run_release(session: Any, env: dict, build: Path, operation: str) -> dict:
         return {"operation": operation, "decision": "executed", "retained_state_verified": True,
                 "source_sha": env["GITHUB_SHA"], "template_sha256": hashlib.sha256(serialized).hexdigest()}
     finally:
-        if not executed:
+        if not executed and not retain_failed_diagnostic:
             cfn.delete_change_set(StackName=STACK, ChangeSetName=change_id)
 
 
