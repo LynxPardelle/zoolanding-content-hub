@@ -97,6 +97,18 @@ template invalid against a shared-only baseline. The condition still requires
 THN enablement and the exact operator role; copying it does not grant invocation
 while provisioning. No other `HasThn*` condition is admitted by this correction.
 
+The source is a packaging input for the dedicated lifecycle runner, not a
+template to submit directly. CloudFormation Rules do not support `Fn::Sub`.
+Before uploading the composed template, the runner resolves only the existing
+emergency-operator equality operand to a literal ARN using its hash-pinned STS
+TEST account and `aws` partition. It accepts only the exact authored expression
+or the already bound identical literal (for retained disablement); altered
+operators, accounts or assertion shapes are rejected. The equality assertion,
+its activation condition and every other node remain intact. No new parameter,
+IAM grant, caller-selectable expected identity or generic substitution engine is
+introduced. The ordinary deployment path is unchanged; use the dedicated runner
+for this THN template. See [supported Rule functions](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/intrinsic-function-reference-rules.html).
+
 ## API and rollback boundary
 
 The HTTP API remains the existing `ContentHubApi`. The composer copies its verified live processed Body and replaces only these exact subtrees:

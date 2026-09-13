@@ -245,6 +245,25 @@ def compose_template(candidate: dict, previous: dict, operation: str = "enable",
     return result
 
 
+def bind_test_rule_account(template: dict, account: str) -> dict:
+    """Compile only the exact emergency-role Rules operand using verified TEST identity."""
+    if (not isinstance(account, str) or re.fullmatch(r"[0-9]{12}", account) is None
+            or not hmac.compare_digest(hashlib.sha256(account.encode("ascii")).hexdigest(), ACCOUNT_HASH)):
+        raise ReleaseBlocked("rule_binding_account_mismatch")
+    result = deepcopy(template)
+    literal = f"arn:aws:iam::{account}:role/zoolanding-thn-content-hub-test-operator"
+    symbolic = {"Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-thn-content-hub-test-operator"}
+    reference = {"Ref": "ThnContentHubV2EmergencyOperatorRoleArn"}
+    try:
+        assertion = result["Rules"]["ThnContentHubV2ActivationRule"]["Assertions"][3]["Assert"]
+        if assertion not in ({"Fn::Equals": [reference, symbolic]}, {"Fn::Equals": [reference, literal]}):
+            raise ValueError()
+        assertion["Fn::Equals"][1] = literal
+    except (KeyError, IndexError, TypeError, ValueError):
+        raise ReleaseBlocked("emergency_operator_rule_shape_mismatch") from None
+    return result
+
+
 def review_resources(changes: Any, operation: str, live_processed=None, candidate_processed=None, inventory=None) -> None:
     if operation not in OPERATIONS or not isinstance(changes, list):
         raise ReleaseBlocked("change_set_invalid")
@@ -613,7 +632,7 @@ def run_release(session: Any, env: dict, build: Path, operation: str) -> dict:
         verify_runtime(session, initial_inventory, previous, identity["Account"])
     prefix = f"{STACK}/thn/{env['GITHUB_RUN_ID']}/{env['GITHUB_RUN_ATTEMPT']}/{env['GITHUB_SHA']}"
     candidate = previous if operation == "disable" else _package_template(build, env["ARTIFACTS_BUCKET"], prefix)
-    template = compose_template(candidate, previous, operation, live_processed)
+    template = bind_test_rule_account(compose_template(candidate, previous, operation, live_processed), identity["Account"])
     expected_readback = effective_parameters(template, _parameters(before), parameters)
     serialized = json.dumps(template, sort_keys=True, separators=(",", ":")).encode()
     key = prefix + "/template-" + hashlib.sha256(serialized).hexdigest() + ".json"

@@ -1,6 +1,7 @@
 """A failed THN plan must remain inspectable without leaking provider details."""
 from copy import deepcopy
 import hashlib
+import json
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -58,8 +59,8 @@ class Cloud:
     def get_routes(self, **_kwargs):
         return {"Items": []}
 
-    def put_object(self, **_kwargs):
-        pass
+    def put_object(self, **kwargs):
+        self.uploaded_template = json.loads(kwargs["Body"])
 
     def create_change_set(self, **kwargs):
         composed = release.compose_template(self.source, self.original, "provision", self.processed)
@@ -120,6 +121,14 @@ class HubFailedChangeSetTests(unittest.TestCase):
         self.assertEqual(str(failure), "change_set_response_identity_mismatch")
         deleted = [args for name, args in self.cloud.calls if name == "delete_change_set"]
         self.assertEqual(deleted, [{"StackName": release.STACK, "ChangeSetName": self.cloud.change_id}])
+
+    def test_runner_submits_bound_rule_before_creating_change_set(self):
+        with self.assertRaises(release.ReleaseBlocked):
+            self.run_plan()
+        rule = self.cloud.uploaded_template["Rules"]["ThnContentHubV2ActivationRule"]
+        self.assertEqual(rule["Assertions"][3]["Assert"], {"Fn::Equals": [
+            {"Ref": "ThnContentHubV2EmergencyOperatorRoleArn"},
+            f"arn:aws:iam::{ACCOUNT}:role/zoolanding-thn-content-hub-test-operator"]})
 
     def test_available_plan_keeps_template_checks_and_cleanup(self):
         self.cloud.status, self.cloud.execution_status = "CREATE_COMPLETE", "AVAILABLE"
