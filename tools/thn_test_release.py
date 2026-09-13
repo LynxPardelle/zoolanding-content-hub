@@ -245,6 +245,50 @@ def compose_template(candidate: dict, previous: dict, operation: str = "enable",
     return result
 
 
+def bind_test_rule_account(template: dict, account: str) -> dict:
+    """Compile only the exact emergency-role Rules operand using verified TEST identity."""
+    if (not isinstance(account, str) or re.fullmatch(r"[0-9]{12}", account) is None
+            or not hmac.compare_digest(hashlib.sha256(account.encode("ascii")).hexdigest(), ACCOUNT_HASH)):
+        raise ReleaseBlocked("rule_binding_account_mismatch")
+    result = deepcopy(template)
+    literal = f"arn:aws:iam::{account}:role/zoolanding-thn-content-hub-test-operator"
+    symbolic = {"Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-thn-content-hub-test-operator"}
+    reference = {"Ref": "ThnContentHubV2EmergencyOperatorRoleArn"}
+    try:
+        assertion = result["Rules"]["ThnContentHubV2ActivationRule"]["Assertions"][3]["Assert"]
+        if assertion not in ({"Fn::Equals": [reference, symbolic]}, {"Fn::Equals": [reference, literal]}):
+            raise ValueError()
+        assertion["Fn::Equals"][1] = literal
+    except (KeyError, IndexError, TypeError, ValueError):
+        raise ReleaseBlocked("emergency_operator_rule_shape_mismatch") from None
+    return result
+
+
+def validate_composed_template(template: dict) -> None:
+    """Reject known provider-invalid Rules and missing conditions before upload."""
+    supported = {"Fn::And", "Fn::Contains", "Fn::EachMemberEquals", "Fn::EachMemberIn",
+                 "Fn::Equals", "Fn::Not", "Fn::Or", "Fn::RefAll", "Fn::ValueOf", "Fn::ValueOfAll"}
+    conditions = template.get("Conditions", {})
+    def inspect(value, rules=False):
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if rules and key.startswith("Fn::") and key not in supported:
+                    raise ReleaseBlocked("composed_rule_function_unsupported")
+                # IAM policy Condition objects are not CFN condition references.
+                if not rules and key == "Condition" and isinstance(child, str) and child not in conditions:
+                    raise ReleaseBlocked("composed_condition_missing")
+                if not rules and key == "Fn::If" and (not isinstance(child, list) or len(child) != 3
+                        or not isinstance(child[0], str) or child[0] not in conditions):
+                    raise ReleaseBlocked("composed_condition_missing")
+                inspect(child, rules)
+        elif isinstance(value, list):
+            for child in value:
+                inspect(child, rules)
+    inspect(template.get("Rules", {}), True)
+    for section in ("Conditions", "Resources", "Outputs"):
+        inspect(template.get(section, {}))
+
+
 def review_resources(changes: Any, operation: str, live_processed=None, candidate_processed=None, inventory=None) -> None:
     if operation not in OPERATIONS or not isinstance(changes, list):
         raise ReleaseBlocked("change_set_invalid")
@@ -306,6 +350,11 @@ def review_change_set(description: dict, arn: str, name: str, parameters: list[d
         actual = ordinary_review._parameter_map(description.get("Parameters"))
         if not required.issubset(actual):
             raise ReleaseBlocked("change_set_parameters_missing")
+        # Closed provisioning intentionally leaves the emergency operator empty.
+        # Keep full presence/value checks above and in the runner; do not make
+        # any shared field or enabled-runtime parameter optional.
+        if operation == "provision" and actual.get("ThnContentHubV2EmergencyOperatorRoleArn") == "":
+            required.discard("ThnContentHubV2EmergencyOperatorRoleArn")
         return ordinary_review.review_change_set(normalized, expected_stack_name=STACK,
             expected_change_set_name=name, expected_change_set_arn=arn, expected_change_set_type="UPDATE",
             expected_parameters=expected, required_parameters=required)
@@ -613,7 +662,8 @@ def run_release(session: Any, env: dict, build: Path, operation: str) -> dict:
         verify_runtime(session, initial_inventory, previous, identity["Account"])
     prefix = f"{STACK}/thn/{env['GITHUB_RUN_ID']}/{env['GITHUB_RUN_ATTEMPT']}/{env['GITHUB_SHA']}"
     candidate = previous if operation == "disable" else _package_template(build, env["ARTIFACTS_BUCKET"], prefix)
-    template = compose_template(candidate, previous, operation, live_processed)
+    template = bind_test_rule_account(compose_template(candidate, previous, operation, live_processed), identity["Account"])
+    validate_composed_template(template)
     expected_readback = effective_parameters(template, _parameters(before), parameters)
     serialized = json.dumps(template, sort_keys=True, separators=(",", ":")).encode()
     key = prefix + "/template-" + hashlib.sha256(serialized).hexdigest() + ".json"
@@ -645,6 +695,7 @@ def run_release(session: Any, env: dict, build: Path, operation: str) -> dict:
         if (description.get("ChangeSetId") != change_id or description.get("ChangeSetName") != name
                 or description.get("StackName") != STACK or description.get("NextToken")):
             raise ReleaseBlocked("change_set_response_identity_mismatch")
+        exact_noop = False
         if description.get("Status") == "FAILED":
             exact_noop = (description.get("ExecutionStatus") == "UNAVAILABLE"
                           and description.get("StatusReason") == ordinary_review._NO_CHANGE_REASON
@@ -657,19 +708,19 @@ def run_release(session: Any, env: dict, build: Path, operation: str) -> dict:
                 raise ReleaseBlocked("change_set_creation_failed; diagnostic_retained")
         if ordinary_review._parameter_map(description.get("Parameters")) != expected_readback:
             raise ReleaseBlocked("change_set_full_parameter_drift")
-        candidate_original = _load_template(cfn.get_template(StackName=STACK, ChangeSetName=change_id, TemplateStage="Original")["TemplateBody"])
-        candidate_processed = _load_template(cfn.get_template(StackName=STACK, ChangeSetName=change_id, TemplateStage="Processed")["TemplateBody"])
+        if exact_noop:
+            # A failed no-change plan may have no Processed template. Only an
+            # identical live template and full parameter map can prove a no-op.
+            if previous != template or _parameters(before) != expected_readback:
+                raise ReleaseBlocked("no_change_live_template_or_parameter_mismatch")
+            candidate_original, candidate_processed = previous, live_processed
+        else:
+            candidate_original = _load_template(cfn.get_template(StackName=STACK, ChangeSetName=change_id, TemplateStage="Original")["TemplateBody"])
+            candidate_processed = _load_template(cfn.get_template(StackName=STACK, ChangeSetName=change_id, TemplateStage="Processed")["TemplateBody"])
         if candidate_original != template:
             raise ReleaseBlocked("change_set_template_hash_mismatch")
         verify_processed(live_processed, candidate_processed, initial_inventory)
         decision = review_change_set(description, change_id, name, parameters, operation, live_processed, candidate_processed, initial_inventory)
-        if decision == "noop":
-            _verify_retained_state(session, initial_inventory, template, identity["Account"])
-            verify_runtime(session, initial_inventory, template, identity["Account"])
-            _verify_routes(_routes(session, initial_inventory), original_routes, effective[ENABLE] == "true")
-            if dependency_proof is not None and verify_dependencies(session, operation, effective, identity["Account"]) != dependency_proof:
-                raise ReleaseBlocked("registry_changed_during_review")
-            return {"operation": operation, "decision": "noop", "retained_state_verified": True}
         current = cfn.describe_stacks(StackName=STACK)["Stacks"][0]
         validate_stack(current, identity["Account"], expected_account_hash=ACCOUNT_HASH)
         if (_parameters(current) != _parameters(before) or _inventory(cfn) != initial_inventory
@@ -677,6 +728,13 @@ def run_release(session: Any, env: dict, build: Path, operation: str) -> dict:
                 or _load_template(cfn.get_template(StackName=STACK, TemplateStage="Processed")["TemplateBody"]) != live_processed
                 or _routes(session, initial_inventory) != original_routes):
             raise ReleaseBlocked("stack_changed_during_review")
+        if decision == "noop":
+            _verify_retained_state(session, initial_inventory, template, identity["Account"])
+            verify_runtime(session, initial_inventory, template, identity["Account"])
+            _verify_routes(_routes(session, initial_inventory), original_routes, effective[ENABLE] == "true")
+            if dependency_proof is not None and verify_dependencies(session, operation, effective, identity["Account"]) != dependency_proof:
+                raise ReleaseBlocked("registry_changed_during_review")
+            return {"operation": operation, "decision": "noop", "retained_state_verified": True}
         if dependency_proof is not None and verify_dependencies(session, operation, effective, identity["Account"]) != dependency_proof:
             raise ReleaseBlocked("registry_changed_during_review")
         cfn.execute_change_set(StackName=STACK, ChangeSetName=change_id, ClientRequestToken=name)

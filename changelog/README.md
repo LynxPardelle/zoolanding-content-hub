@@ -2,6 +2,10 @@
 
 Chronological implementation, QA, and release evidence lives here so routine tasks do not load it.
 
+- [2026-09-13 THN lifecycle preflight](2026-09-13-thn-lifecycle-preflight.md)
+
+- [2026-09-13 THN Rules account binding](2026-09-13-thn-rules-account-binding.md)
+
 - [2026-09-13 THN failed-plan private diagnostic](2026-09-13-failed-thn-plan-diagnostic.md)
 
 - [2026-09-13 THN first-provisioning condition closure](2026-09-13-thn-first-condition.md)
