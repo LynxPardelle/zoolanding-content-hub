@@ -85,6 +85,10 @@ class ReleaseBlocked(RuntimeError):
     """A sanitized release-boundary failure; never includes provider inputs."""
 
 
+class _ProcessedApiBoundaryBlocked(ReleaseBlocked):
+    """Only this reviewed-plan failure retains its private native diagnostic."""
+
+
 def validate_deploy_identity(identity: Any) -> None:
     """Pin the actual STS principal, never a supplied role/context field."""
     account = identity.get("Account") if isinstance(identity, dict) else None
@@ -554,8 +558,17 @@ def verify_processed(live: dict, candidate: dict, inventory: dict) -> None:
             "PhysicalResourceId": inventory.get("ContentHubApi", {}).get("PhysicalResourceId"), "Action": "Modify", "Replacement": "False",
             "Scope": ["Properties"], "Details": [{"Target": {"Attribute": "Properties", "Name": "Body", "RequiresRecreation": "Never"}}]},
             live, candidate, inventory)
-    except thn_api_boundary.ApiBoundaryError:
-        raise ReleaseBlocked("processed_shared_api_boundary_mismatch") from None
+    except thn_api_boundary.ApiBoundaryError as error:
+        # Do not reflect arbitrary exception text or provider values into logs.
+        reasons = frozenset({"thn_path_condition_invalid", "thn_path_must_be_enable_conditional",
+            "api_body_missing", "required_thn_path_missing", "thn_path_contract_changed",
+            "verified_template_snapshot_required", "verified_processed_api_required",
+            "exact_thn_http_permission_mismatch", "shared_api_identity_or_scope_invalid",
+            "shared_api_body_details_required", "shared_api_nonbody_target_forbidden",
+            "shared_api_nonbody_field_changed", "shared_api_v1_or_global_field_changed"})
+        reason = error.args[0] if len(error.args) == 1 and type(error.args[0]) is str else None
+        reason = reason if reason in reasons else "unclassified"
+        raise _ProcessedApiBoundaryBlocked("processed_shared_api_boundary_mismatch; reason=" + reason) from None
 
 
 def verify_runtime(session: Any, inventory: dict, template: dict, account: str) -> None:
@@ -719,7 +732,13 @@ def run_release(session: Any, env: dict, build: Path, operation: str) -> dict:
             candidate_processed = _load_template(cfn.get_template(StackName=STACK, ChangeSetName=change_id, TemplateStage="Processed")["TemplateBody"])
         if candidate_original != template:
             raise ReleaseBlocked("change_set_template_hash_mismatch")
-        verify_processed(live_processed, candidate_processed, initial_inventory)
+        try:
+            verify_processed(live_processed, candidate_processed, initial_inventory)
+        except _ProcessedApiBoundaryBlocked as error:
+            # Identity and full Original/parameter checks have already passed.
+            # Keep only this unexecuted plan for private GetTemplate inspection.
+            retain_failed_diagnostic = True
+            raise ReleaseBlocked(str(error) + "; diagnostic_retained") from None
         decision = review_change_set(description, change_id, name, parameters, operation, live_processed, candidate_processed, initial_inventory)
         current = cfn.describe_stacks(StackName=STACK)["Stacks"][0]
         validate_stack(current, identity["Account"], expected_account_hash=ACCOUNT_HASH)

@@ -41,4 +41,6 @@ Chronological implementation, QA, and release evidence lives here so routine tas
 - [2026-09-08 THN retained TEST lifecycle reconciliation](2026-09-08-thn-retained-test-lifecycle.md)
 - [2026-09-10 THN release CLI diagnostic correction](2026-09-10-thn-release-cli-diagnostics.md)
 
+- [2026-09-13 THN processed API rejection diagnostics](2026-09-13-thn-api-boundary-diagnostics.md)
+
 Use [../README.md](../README.md) for the current service contract and [../AGENTS.md](../AGENTS.md) for task routing.

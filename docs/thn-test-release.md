@@ -62,6 +62,17 @@ created runtime resources. The existing exact no-op review, available-plan
 checks and cleanup of all other unexecuted plans are unchanged. Retention of a
 failed diagnostic is not permission to execute it or relax the cause of failure.
 
+After plan identity, full parameters and Original-template equality are verified,
+a rejected Processed shared-API boundary also retains only that unexecuted plan.
+The public error includes one closed API rejection code and `diagnostic_retained`;
+unknown exception arguments become `unclassified`. No template, parameter,
+provider message or private field is printed. Inspect the retained Processed
+template privately to identify the exact mismatch. The API comparisons and
+rejection remain unchanged: retention is diagnostic, never authorization to
+execute the plan. Other available-plan failures still use their existing cleanup.
+After diagnosis, remove only the verified owned plan; do not replay permission
+corrections or infer that successful local SAM translation proves provider parity.
+
 Processed-template drift includes at most 16 structural locations and closed
 node-type labels. Only fixed CloudFormation schema names are emitted; other
 dictionary keys use anonymous indexes in sorted key order. Values are never
