@@ -119,6 +119,47 @@ class SharedApiBoundaryTests(unittest.TestCase):
             with self.subTest(key=key), self.assertRaises(self.tool.ApiBoundaryError):
                 self.tool.compose_body(candidate, self.live)
 
+    def test_packaged_permissions_accept_only_exact_self_metadata_without_mutation(self):
+        processed = {"Resources": deepcopy(FIXTURE["permissions"])}
+        for logical, resource in processed["Resources"].items():
+            # Representation emitted by SAM packaging, not invocation configuration.
+            resource["Metadata"] = {"SamResourceId": logical}
+        snapshot = deepcopy(processed)
+        try:
+            self.tool.verify_route_permissions(processed)
+        except self.tool.ApiBoundaryError as error:
+            self.fail(f"Exact packaged permission metadata rejected: {error}")
+        self.assertEqual(processed, snapshot)
+
+    def test_packaged_permissions_reject_foreign_extra_or_malformed_metadata(self):
+        for logical in FIXTURE["permissions"]:
+            for metadata in ({"SamResourceId": "OtherPermission"},
+                             {"SamResourceId": logical, "extra": True}, {}, None,
+                             {"SamResourceId": [logical]}, logical):
+                with self.subTest(logical=logical, metadata=metadata):
+                    processed = {"Resources": deepcopy(FIXTURE["permissions"])}
+                    processed["Resources"][logical]["Metadata"] = metadata
+                    with self.assertRaises(self.tool.ApiBoundaryError):
+                        self.tool.verify_route_permissions(processed)
+
+    def test_self_metadata_never_masks_permission_property_or_condition_drift(self):
+        for logical in FIXTURE["permissions"]:
+            for key, value in (("Action", "lambda:*"), ("FunctionName", {"Ref": "OtherAlias"}),
+                               ("Principal", "*"), ("SourceArn", "*"), ("ExtraProperty", True)):
+                with self.subTest(logical=logical, property=key):
+                    processed = {"Resources": deepcopy(FIXTURE["permissions"])}
+                    processed["Resources"][logical]["Metadata"] = {"SamResourceId": logical}
+                    processed["Resources"][logical]["Properties"][key] = value
+                    with self.assertRaises(self.tool.ApiBoundaryError):
+                        self.tool.verify_route_permissions(processed)
+            for key, value in (("Condition", "IsThnContentHubV2StateProvisioned"),
+                               ("Type", "AWS::IAM::Policy"), ("DependsOn", "OtherResource")):
+                with self.subTest(logical=logical, resource_field=key):
+                    processed = {"Resources": deepcopy(FIXTURE["permissions"])}
+                    processed["Resources"][logical].update(Metadata={"SamResourceId": logical}, **{key: value})
+                    with self.assertRaises(self.tool.ApiBoundaryError):
+                        self.tool.verify_route_permissions(processed)
+
 
 if __name__ == "__main__":
     unittest.main()
