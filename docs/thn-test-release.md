@@ -4,6 +4,26 @@ Source preparation is not evidence of a deployment or a completed D gate. Produc
 
 ## Source validation is separate from AWS execution
 
+The dedicated runner validates the final composed Rules and condition references
+after binding the verified TEST account, before uploading the final template or
+creating a change set. This catches the observed unsupported Rules substitution
+and omitted condition even if source lint succeeds. It is not a substitute for
+SAM/native validation or provider acceptance. Packaging itself may upload code.
+
+A provider-reported no-op is accepted only when the full live Original template
+and parameter map equal the intended result. It uses the verified live Processed
+snapshot, not a failed no-op plan's potentially unavailable Processed template.
+The runner rechecks stack/template/inventory/routes before success, and checks
+retention, seven aliases and dependencies. Closed provisioning permits the
+declared empty emergency-operator value only; missing parameters, shared empty
+values and enabled-runtime omissions remain errors.
+
+The lifecycle regression exercises successful execution and postchecks, true
+no-op, concurrent drift, changed shared native resources and failed runtime
+readback at an in-memory SDK boundary. It does not emulate SAM/provider semantics
+or prove effective IAM. In particular, the Hub deployment role requires native
+Lambda version discovery independently of the Image execution role.
+
 The existing [TEST promotion workflow](../.github/workflows/deploy-test.yml)
 now validates only. It preserves the exact dev merge/tree gate, runs both suites
 and package checks, and verifies the transported artifact by immutable ID and

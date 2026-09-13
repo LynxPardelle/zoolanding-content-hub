@@ -136,9 +136,9 @@ class HubFailedChangeSetTests(unittest.TestCase):
             self.run_plan()
         self.assertTrue(any(name == "delete_change_set" for name, _ in self.cloud.calls))
 
-    def test_exact_noop_keeps_existing_review_path_and_cleanup(self):
+    def test_noop_reason_cannot_approve_a_changed_live_template(self):
         self.cloud.reason = release.ordinary_review._NO_CHANGE_REASON
-        with self.assertRaises(ClientError):
+        with self.assertRaisesRegex(release.ReleaseBlocked, "no_change_live_template_or_parameter_mismatch"):
             self.run_plan()
         self.assertTrue(any(name == "delete_change_set" for name, _ in self.cloud.calls))
 
