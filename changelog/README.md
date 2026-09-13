@@ -2,6 +2,8 @@
 
 Chronological implementation, QA, and release evidence lives here so routine tasks do not load it.
 
+- [2026-09-13 THN failed-plan private diagnostic](2026-09-13-failed-thn-plan-diagnostic.md)
+
 - [2026-09-13 THN first-provisioning condition closure](2026-09-13-thn-first-condition.md)
 
 - [2026-09-10 THN exact live API SAM annotation](2026-09-10-thn-live-api-sam-annotation.md)
