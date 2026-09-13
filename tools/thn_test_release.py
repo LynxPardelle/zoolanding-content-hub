@@ -175,7 +175,7 @@ def _thn_key(section: str, key: str) -> bool:
     if section == "Parameters":
         return key in KEYS
     if section == "Conditions":
-        return key.startswith("Is" + PREFIX)
+        return key.startswith("Is" + PREFIX) or key == "HasThnContentHubV2EmergencyOperatorRole"
     if section == "Resources":
         return key in RESOURCE_TYPES
     return key.startswith(PREFIX)

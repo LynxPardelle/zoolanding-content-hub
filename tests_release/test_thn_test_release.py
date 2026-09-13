@@ -73,6 +73,26 @@ class HubReleaseTests(unittest.TestCase):
         with self.assertRaises(self.tool.ReleaseBlocked):
             self.tool.compose_template(candidate, self.template, "provision", None)
 
+    def test_first_provision_copies_exact_emergency_condition_from_source(self):
+        previous = deepcopy(self.template)
+        for section in ("Resources", "Parameters", "Conditions", "Rules", "Outputs"):
+            previous[section] = {key: value for key, value in previous.get(section, {}).items()
+                                 if "ThnContentHubV2" not in key}
+        candidate = deepcopy(self.template)
+        candidate["Conditions"]["HasThnContentHubV2UnreviewedRole"] = {"Fn::Equals": ["a", "a"]}
+        snapshots = deepcopy((previous, candidate))
+        result = self.tool.compose_template(candidate, previous, "provision", self.processed)
+        condition = "HasThnContentHubV2EmergencyOperatorRole"
+        self.assertIn(condition, result["Conditions"])
+        self.assertEqual(result["Conditions"][condition], self.template["Conditions"][condition])
+        self.assertNotIn("HasThnContentHubV2UnreviewedRole", result["Conditions"])
+        for key, value in previous["Conditions"].items():
+            self.assertEqual(result["Conditions"][key], value)
+        for suffix in ("InvokePolicy", "InvokePermission"):
+            self.assertEqual(result["Resources"]["ThnContentHubV2EmergencyWithdraw" + suffix]["Condition"], condition)
+        self.assertEqual((previous, candidate), snapshots)
+        self.assertIn({"Condition": "IsThnContentHubV2Enabled"}, result["Conditions"][condition]["Fn::And"])
+
     def test_shared_api_stage_cors_or_registry_resource_changes_cannot_sneak_in(self):
         candidate = deepcopy(self.template)
         candidate["Resources"]["ContentHubApi"]["Properties"]["CorsConfiguration"] = {"AllowOrigins": ["*"]}

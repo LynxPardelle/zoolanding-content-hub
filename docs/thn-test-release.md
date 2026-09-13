@@ -78,6 +78,13 @@ Registry provisioning is a separate operation in the existing stack, not a secon
 
 The seven pairs are Authoring, PrivateAssetCollector, Publisher, PublicMedia, InvalidationWorker, EmergencyWithdraw and PreparedOrphanCollector. They are approved persistent THN dependencies declared by this candidate, **not physically present in the observed 17-resource baseline** and not extra QA services. The enabled private Image function is a separate one-pair dependency.
 
+First provisioning also copies the exact source condition
+`HasThnContentHubV2EmergencyOperatorRole`. Its two conditional resources refer to
+that declaration even while it evaluates false. Omitting it makes the composed
+template invalid against a shared-only baseline. The condition still requires
+THN enablement and the exact operator role; copying it does not grant invocation
+while provisioning. No other `HasThn*` condition is admitted by this correction.
+
 ## API and rollback boundary
 
 The HTTP API remains the existing `ContentHubApi`. The composer copies its verified live processed Body and replaces only these exact subtrees:
