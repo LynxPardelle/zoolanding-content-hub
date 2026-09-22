@@ -1,0 +1,64 @@
+"""A THN runtime reader revision must touch one registry policy only."""
+
+from copy import deepcopy
+from pathlib import Path
+import unittest
+import yaml
+
+from tools import thn_registry_reader_revision as revision
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class RegistryReaderRevisionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.desired = yaml.safe_load((ROOT / "template.yaml").read_text())
+
+    def previous(self):
+        live = deepcopy(self.desired)
+        table = live["Resources"][revision.TABLE]
+        table["Metadata"] = {"SamResourceId": revision.TABLE}
+        approved = revision.reader_list(table)
+        approved.remove(revision.runtime_role_intrinsic())
+        return live
+
+    def test_preserves_every_other_live_field(self):
+        previous = self.previous()
+        previous["Resources"]["ContentHubApi"]["Metadata"] = {"SamResourceId": "ContentHubApi"}
+        composed = revision.compose_revision(previous, self.desired)
+        expected = deepcopy(previous)
+        desired_position = revision.reader_list(self.desired["Resources"][revision.TABLE]).index(
+            revision.runtime_role_intrinsic())
+        revision.reader_list(expected["Resources"][revision.TABLE]).insert(
+            desired_position, revision.runtime_role_intrinsic())
+        self.assertEqual(composed, expected)
+        self.assertEqual(revision.reader_list(composed["Resources"][revision.TABLE]).count(
+            revision.runtime_role_intrinsic()), 1)
+
+    def test_rejects_unrelated_table_change_and_duplicate_reader(self):
+        previous = self.previous()
+        previous["Resources"][revision.TABLE]["Properties"]["DeletionProtectionEnabled"] = False
+        with self.assertRaises(revision.RevisionBlocked):
+            revision.compose_revision(previous, self.desired)
+        duplicate = self.previous()
+        revision.reader_list(duplicate["Resources"][revision.TABLE]).append(revision.runtime_role_intrinsic())
+        with self.assertRaises(revision.RevisionBlocked):
+            revision.compose_revision(duplicate, self.desired)
+
+    def test_accepts_only_single_nonreplacing_table_policy_modify(self):
+        target = {"Attribute": "Properties", "Name": "ResourcePolicy", "RequiresRecreation": "Never"}
+        change = {"Type": "Resource", "ResourceChange": {"Action": "Modify", "LogicalResourceId": revision.TABLE,
+                  "ResourceType": "AWS::DynamoDB::Table", "Replacement": "False", "Scope": ["Properties"],
+                  "Details": [{"Target": target}]}}
+        revision.review_changes([change])
+        for invalid in ([change, change], [{**change, "ResourceChange": {**change["ResourceChange"],
+                        "Replacement": "True"}}], [{**change, "ResourceChange": {**change["ResourceChange"],
+                        "LogicalResourceId": "ContentHubApi"}}]):
+            with self.assertRaises(revision.RevisionBlocked):
+                revision.review_changes(invalid)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -174,6 +174,19 @@ filter or an exception for shared-resource configuration drift.
 
 ## Registry readers and inspection
 
+The dedicated THN auth runtime in TEST has a separate, generated execution-role name.
+Its exact current role is an additional `GetItem` consumer only in
+`DenyRegistryGetItemOutsideApprovedConsumers`; its identity-side grant remains
+owned by the auth runtime stack. The [policy-only workflow](../.github/workflows/revise-thn-registry-reader-test.yml)
+must run from an exact promoted TEST commit before routing the private admin
+front door to that runtime. It composes the existing protected Hub stack's live
+template, preserving all resources, parameters, SAM metadata and API routes.
+It accepts one nonreplacing DynamoDB table `ResourcePolicy` modification and
+pins the currently observed effective-policy digest. A changed policy, role
+replacement, second resource change or failed change set stops the operation;
+it never repeats registry provisioning. If the runtime role is replaced later,
+review and promote a new exact revision rather than broadening the condition.
+
 The registry policy uses IAM action names rather than DynamoDB API-operation
 names. `BatchExecuteStatement` and `ExecuteStatement` are covered by the existing
 unconditional `PartiQLSelect/Insert/Update/Delete` denials. `TransactGetItems`
