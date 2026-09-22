@@ -8,6 +8,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 READERS = ("zoolanding-content-hub-test-deploy", "zoolanding-deployer-image-upload-test-github-deploy")
 PRINCIPALS = [{"Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/" + role} for role in READERS]
+THN_RUNTIME_ROLE = {"Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-thn-auth-runti-ThnAuthRuntimeV2FunctionR-0nd3Hd8ToVOo"}
 KEY = "SERVICE_BINDING#test#thn-journal-test-v2"
 TABLE = {"Fn::Sub": "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-content-hub-test-ServiceBindingRegistryV2"}
 
@@ -43,6 +44,18 @@ class RegistryReleaseReadPolicyTests(unittest.TestCase):
     def test_reader_exceptions_do_not_reach_mutation_reservation_audit_or_listing(self):
         reader_deny = self.statements["DenyRegistryGetItemOutsideApprovedConsumers"]
         allowed = reader_deny["Condition"]["ArnNotEquals"]["aws:PrincipalArn"]
+        named = lambda role: {"Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/" + role}
+        self.assertEqual(allowed, [
+            {"Fn::GetAtt": ["ServiceBindingRegistryV2MutationRole", "Arn"]},
+            named("zoolanding-auth-admin-test-ThnAuthAdminV2FunctionRole"),
+            THN_RUNTIME_ROLE,
+            named("zoolanding-content-hub-test-deploy"),
+            named("zoolanding-deployer-image-upload-test-github-deploy"),
+            named("zoolanding-image-upload-test-ThnImageUploadV2Role"),
+            *(named("zlp-thn-ch-test-" + suffix) for suffix in (
+                "authoring", "private-asset-gc", "publisher", "public-media", "invalidation",
+                "emergency-withdraw", "prepared-orphan-gc")),
+        ])
         for principal in PRINCIPALS:
             self.assertIn(principal, allowed)
         reader_sids = {"AllowRegistryDeploymentBindingRead", "DenyRegistryDeploymentReadMissingKeys",

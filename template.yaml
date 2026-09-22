@@ -509,6 +509,7 @@ Resources:
                         - ServiceBindingRegistryV2MutationRole
                         - Arn
                     - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-auth-admin-test-ThnAuthAdminV2FunctionRole
+                    - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-thn-auth-runti-ThnAuthRuntimeV2FunctionR-0nd3Hd8ToVOo
                     - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-test-deploy
                     - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-deployer-image-upload-test-github-deploy
                     - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-image-upload-test-ThnImageUploadV2Role
