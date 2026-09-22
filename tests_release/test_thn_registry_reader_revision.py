@@ -59,6 +59,18 @@ class RegistryReaderRevisionTests(unittest.TestCase):
             with self.assertRaises(revision.RevisionBlocked):
                 revision.review_changes(invalid)
 
+    def test_effective_policy_hash_ignores_only_order_of_two_known_deployment_roles(self):
+        account = "123456789012"
+        hub = f"arn:aws:iam::{account}:role/zoolanding-content-hub-test-deploy"
+        image = f"arn:aws:iam::{account}:role/zoolanding-deployer-image-upload-test-github-deploy"
+        sids = revision.DEPLOYMENT_READER_SIDS
+        first = {"Statement": [{"Sid": sid, "Principal": {"AWS": [hub, image]}} for sid in sids]}
+        second = {"Statement": [{"Sid": sid, "Principal": {"AWS": [image, hub]}} for sid in sids]}
+        self.assertEqual(revision.normalized_policy(first, account), revision.normalized_policy(second, account))
+        second["Statement"][0]["Principal"]["AWS"][0] = "arn:aws:iam::123456789012:role/unrelated"
+        with self.assertRaises(revision.RevisionBlocked):
+            revision.normalized_policy(second, account)
+
 
 if __name__ == "__main__":
     unittest.main()

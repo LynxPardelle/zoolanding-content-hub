@@ -186,6 +186,10 @@ pins the currently observed effective-policy digest. A changed policy, role
 replacement, second resource change or failed change set stops the operation;
 it never repeats registry provisioning. If the runtime role is replaced later,
 review and promote a new exact revision rather than broadening the condition.
+The digest normalizes only the observed ordering of the same two exact
+deployment-role ARNs in three deployment-reader `Principal.AWS` lists.
+DynamoDB returned both orders under one policy revision. Unknown principals,
+different actions, conditions, statements or reader exceptions still fail.
 
 The registry policy uses IAM action names rather than DynamoDB API-operation
 names. `BatchExecuteStatement` and `ExecuteStatement` are covered by the existing
