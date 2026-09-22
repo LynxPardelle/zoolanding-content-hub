@@ -18,3 +18,9 @@ suite needed local timezone data, which is normally present in the Linux CI
 runner. Live original and processed table resources both matched the expected
 pre-revision source except for CloudFormation's SAM metadata. This entry records
 preparation, not a completed deployment or a working client login.
+
+Pre-deployment readback exposed two JSON orders for the same two deployment
+principals under one DynamoDB policy revision. The guard now sorts only those
+three exact two-role lists before comparing the complete effective-policy
+digest and post-update policy. No policy revision or AWS update occurred during
+this diagnosis.
