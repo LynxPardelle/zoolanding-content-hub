@@ -2,6 +2,10 @@
 
 from copy import deepcopy
 from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
 import unittest
 import yaml
 
@@ -70,6 +74,28 @@ class RegistryReaderRevisionTests(unittest.TestCase):
         second["Statement"][0]["Principal"]["AWS"][0] = "arn:aws:iam::123456789012:role/unrelated"
         with self.assertRaises(revision.RevisionBlocked):
             revision.normalized_policy(second, account)
+
+    def test_registered_private_workflow_packages_and_dispatches_policy_revision(self):
+        workflow = (ROOT / ".github" / "workflows" / "deploy-thn-test.yml").read_text()
+        self.assertIn("registry-reader-revise", workflow)
+        self.assertIn("cp template.yaml .aws-sam/build/release-tools/", workflow)
+        self.assertIn("tools/thn_registry_reader_revision.py", workflow)
+        self.assertIn("--operation apply", workflow)
+
+    def test_revision_tool_imports_from_immutable_release_layout(self):
+        names = ("__init__.py", "thn_test_release.py", "thn_api_boundary.py", "thn_registry_provision.py",
+                 "thn_registry_reader_revision.py", "prepare_test_parameters.py", "review_test_change_set.py")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            tools = root / "tools"
+            tools.mkdir()
+            for name in names:
+                shutil.copy2(ROOT / "tools" / name, tools / name)
+            shutil.copy2(ROOT / "template.yaml", root / "template.yaml")
+            result = subprocess.run([sys.executable, str(tools / "thn_registry_reader_revision.py"), "--help"],
+                                    cwd=root, capture_output=True, text=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("--operation", result.stdout)
 
 
 if __name__ == "__main__":
