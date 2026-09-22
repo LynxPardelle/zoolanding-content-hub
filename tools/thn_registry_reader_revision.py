@@ -16,13 +16,17 @@ import time
 import boto3
 import yaml
 
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
 from tools import thn_test_release as release
 
 
 TABLE = "ServiceBindingRegistryV2Table"
 SID = "DenyRegistryGetItemOutsideApprovedConsumers"
 RUNTIME_ROLE = "zoolanding-thn-auth-runti-ThnAuthRuntimeV2FunctionR-0nd3Hd8ToVOo"
-SOURCE = Path(__file__).resolve().parents[1] / "template.yaml"
+SOURCE = _ROOT / "template.yaml"
 EXPECTED_LIVE_POLICY_SHA256 = "a61b8dc3875dc4bdd45b94b7e61d804f351ade628898c31303ac4cb74f34a08c"
 DEPLOYMENT_READER_SIDS = (
     "AllowRegistryDeploymentBindingRead",
