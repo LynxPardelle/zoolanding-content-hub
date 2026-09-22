@@ -24,6 +24,11 @@ SID = "DenyRegistryGetItemOutsideApprovedConsumers"
 RUNTIME_ROLE = "zoolanding-thn-auth-runti-ThnAuthRuntimeV2FunctionR-0nd3Hd8ToVOo"
 SOURCE = Path(__file__).resolve().parents[1] / "template.yaml"
 EXPECTED_LIVE_POLICY_SHA256 = "a61b8dc3875dc4bdd45b94b7e61d804f351ade628898c31303ac4cb74f34a08c"
+DEPLOYMENT_READER_SIDS = (
+    "AllowRegistryDeploymentBindingRead",
+    "DenyRegistryDeploymentReadOutsideBinding",
+    "DenyRegistryDeploymentReadMissingKeys",
+)
 
 
 class RevisionBlocked(release.ReleaseBlocked):
@@ -125,6 +130,24 @@ def _changed_policy(before: dict, account: str) -> dict:
     return after
 
 
+def normalized_policy(policy: dict, account: str) -> dict:
+    """Ignore only DynamoDB's observed reordering of two exact role principals."""
+    result = deepcopy(policy)
+    expected = {
+        f"arn:aws:iam::{account}:role/zoolanding-content-hub-test-deploy",
+        f"arn:aws:iam::{account}:role/zoolanding-deployer-image-upload-test-github-deploy",
+    }
+    for sid in DEPLOYMENT_READER_SIDS:
+        matches = [item for item in result.get("Statement", []) if item.get("Sid") == sid]
+        if len(matches) != 1:
+            reject()
+        principals = matches[0].get("Principal", {}).get("AWS")
+        if not isinstance(principals, list) or len(principals) != 2 or set(principals) != expected:
+            reject()
+        matches[0]["Principal"]["AWS"] = sorted(principals)
+    return result
+
+
 def _unchanged(current: dict, before: dict, cfn, original: dict, processed: dict, inventory: dict) -> None:
     release.validate_stack(current, current["StackId"].split(":")[4])
     if (current["StackId"] != before["StackId"] or current.get("RoleARN") != before.get("RoleARN")
@@ -163,7 +186,8 @@ def run(session, env: dict, operation: str) -> dict:
     expected_processed = compose_revision(processed, desired)
     policy_before, revision_before = _policy_readers(dynamodb, account)
     policy_after = _changed_policy(policy_before, account)
-    policy_digest = hashlib.sha256(json.dumps(policy_before, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    policy_digest = hashlib.sha256(json.dumps(normalized_policy(policy_before, account),
+                                               sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     if (policy_digest != EXPECTED_LIVE_POLICY_SHA256
             or inventory["ServiceBindingRegistryV2MutationRole"]["PhysicalResourceId"]
                 != "zoolanding-thn-registry-test-mutation"):
@@ -218,7 +242,7 @@ def run(session, env: dict, operation: str) -> dict:
         if release._routes(session, inventory) != original_routes:
             reject()
         policy_now, revision_now = _policy_readers(dynamodb, account)
-        if policy_now != policy_before or revision_now != revision_before:
+        if normalized_policy(policy_now, account) != normalized_policy(policy_before, account) or revision_now != revision_before:
             reject()
         cfn.execute_change_set(StackName=stack_id, ChangeSetName=change_id, ClientRequestToken=name)
         executed = True
@@ -236,7 +260,7 @@ def run(session, env: dict, operation: str) -> dict:
                 reject()
             current_policy = json.loads(dynamodb.get_resource_policy(
                 ResourceArn=f"arn:aws:dynamodb:{release.REGION}:{account}:table/{release.REGISTRY_TABLE}")["Policy"])
-            if current_policy != policy_after:
+            if normalized_policy(current_policy, account) != normalized_policy(policy_after, account):
                 reject()
         return {"operation": operation, "decision": "executed", "preserved_resource_count": len(inventory),
                 "source_sha": env["GITHUB_SHA"], "template_sha256": digest}
