@@ -6,10 +6,10 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: Separate registry bootstrap, retained provisioning, enablement, or disablement
+        description: Registry bootstrap or reader revision, retained provisioning, enablement, or disablement
         required: true
         type: choice
-        options: [registry-provision, provision, enable, disable]
+        options: [registry-provision, registry-reader-revise, provision, enable, disable]
       expected_source_sha:
         description: Reviewed full commit SHA already promoted to TEST
         required: true
@@ -85,7 +85,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p .aws-sam/build/release-tools/tools
-          cp tools/__init__.py tools/thn_test_release.py tools/thn_api_boundary.py tools/thn_registry_provision.py tools/prepare_test_parameters.py tools/review_test_change_set.py .aws-sam/build/release-tools/tools/
+          cp tools/__init__.py tools/thn_test_release.py tools/thn_api_boundary.py tools/thn_registry_provision.py tools/thn_registry_reader_revision.py tools/prepare_test_parameters.py tools/review_test_change_set.py .aws-sam/build/release-tools/tools/
+          cp template.yaml .aws-sam/build/release-tools/
           cp requirements-release.txt .aws-sam/build/release-tools/
           python - <<'PY'
           import json, os
@@ -185,6 +186,10 @@ jobs:
           if os.environ['THN_OPERATION'] == 'registry-provision':
               from tools.thn_registry_provision import parameters
               parameters(context, os.environ.get('THN_REGISTRY_OPERATOR_ROLE_ARN', ''))
+          elif os.environ['THN_OPERATION'] == 'registry-reader-revise':
+              from tools.thn_registry_reader_revision import runtime_role_intrinsic
+              if runtime_role_intrinsic() != {'Fn::Sub': 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-thn-auth-runti-ThnAuthRuntimeV2FunctionR-0nd3Hd8ToVOo'}:
+                  raise SystemExit('registry_reader_role_mismatch')
           else:
               selection = _thn_parameters(dict(os.environ))
               context['Parameters'] += [
@@ -203,7 +208,12 @@ jobs:
           THN_V2_TEST_PARAMETERS_JSON: ${{ vars.THN_V2_TEST_PARAMETERS_JSON }}
           THN_REGISTRY_OPERATOR_ROLE_ARN: ${{ vars.THN_REGISTRY_OPERATOR_ROLE_ARN }}
           ARTIFACTS_BUCKET: ${{ vars.SAM_ARTIFACTS_BUCKET }}
-        run: python .aws-sam/build/release-tools/tools/thn_test_release.py --operation "$THN_OPERATION"
+        run: |
+          if [ "$THN_OPERATION" = 'registry-reader-revise' ]; then
+            python .aws-sam/build/release-tools/tools/thn_registry_reader_revision.py --operation apply
+          else
+            python .aws-sam/build/release-tools/tools/thn_test_release.py --operation "$THN_OPERATION"
+          fi
       - name: Record public-safe release coordinates
         env:
           ARTIFACT_ID: ${{ needs.validate.outputs.artifact_id }}
