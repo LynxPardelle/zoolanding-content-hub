@@ -317,7 +317,13 @@ def _path(event: Mapping[str, Any]) -> str:
     http = request_context.get("http")
     http = http if isinstance(http, Mapping) else {}
     value = event.get("rawPath") or event.get("path") or http.get("path") or "/"
-    return str(value).strip()
+    path = str(value).strip()
+    if request_context.get("stage") == "test" and path in {
+        "/test" + READ_PATH,
+        "/test" + ACTION_PATH,
+    }:
+        return path[len("/test"):]
+    return path
 
 
 def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
