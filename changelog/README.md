@@ -1,5 +1,7 @@
 # Changelog
 
+- [2026-09-26 THN TEST authoring stage path](2026-09-26-thn-authoring-stage-path.md)
+
 - [2026-09-13 THN permission packaging metadata](2026-09-13-thn-permission-package-metadata.md)
 
 Chronological implementation, QA, and release evidence lives here so routine tasks do not load it.
