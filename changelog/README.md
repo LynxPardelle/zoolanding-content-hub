@@ -1,5 +1,7 @@
 # Changelog
 
+- [2026-09-26 THN TEST authoring-only release operation](2026-09-26-thn-authoring-patch.md)
+
 - [2026-09-26 THN TEST authoring stage path](2026-09-26-thn-authoring-stage-path.md)
 
 - [2026-09-13 THN permission packaging metadata](2026-09-13-thn-permission-package-metadata.md)
