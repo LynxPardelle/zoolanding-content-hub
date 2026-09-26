@@ -6,10 +6,10 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: Registry bootstrap or reader revision, retained provisioning, enablement, or disablement
+        description: Registry bootstrap, reader revision, authoring code patch, retained provisioning, enablement, or disablement
         required: true
         type: choice
-        options: [registry-provision, registry-reader-revise, provision, enable, disable]
+        options: [registry-provision, registry-reader-revise, authoring-patch, provision, enable, disable]
       expected_source_sha:
         description: Reviewed full commit SHA already promoted to TEST
         required: true
@@ -85,7 +85,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p .aws-sam/build/release-tools/tools
-          cp tools/__init__.py tools/thn_test_release.py tools/thn_api_boundary.py tools/thn_registry_provision.py tools/thn_registry_reader_revision.py tools/prepare_test_parameters.py tools/review_test_change_set.py .aws-sam/build/release-tools/tools/
+          cp tools/__init__.py tools/thn_test_release.py tools/thn_api_boundary.py tools/thn_registry_provision.py tools/thn_registry_reader_revision.py tools/thn_authoring_patch.py tools/prepare_test_parameters.py tools/review_test_change_set.py .aws-sam/build/release-tools/tools/
           cp template.yaml .aws-sam/build/release-tools/
           cp requirements-release.txt .aws-sam/build/release-tools/
           python - <<'PY'
@@ -190,6 +190,10 @@ jobs:
               from tools.thn_registry_reader_revision import runtime_role_intrinsic
               if runtime_role_intrinsic() != {'Fn::Sub': 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-thn-auth-runti-ThnAuthRuntimeV2FunctionR-0nd3Hd8ToVOo'}:
                   raise SystemExit('registry_reader_role_mismatch')
+          elif os.environ['THN_OPERATION'] == 'authoring-patch':
+              from tools.thn_authoring_patch import FUNCTION
+              if FUNCTION != 'ThnContentHubV2AuthoringFunction':
+                  raise SystemExit('authoring_target_mismatch')
           else:
               selection = _thn_parameters(dict(os.environ))
               context['Parameters'] += [
@@ -211,6 +215,8 @@ jobs:
         run: |
           if [ "$THN_OPERATION" = 'registry-reader-revise' ]; then
             python .aws-sam/build/release-tools/tools/thn_registry_reader_revision.py --operation apply
+          elif [ "$THN_OPERATION" = 'authoring-patch' ]; then
+            python .aws-sam/build/release-tools/tools/thn_authoring_patch.py --operation apply
           else
             python .aws-sam/build/release-tools/tools/thn_test_release.py --operation "$THN_OPERATION"
           fi
