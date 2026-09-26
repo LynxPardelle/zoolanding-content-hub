@@ -172,6 +172,28 @@ filter or an exception for shared-resource configuration drift.
 
 `disable` does not deploy an old artifact that deletes the runtime. State has `DeletionPolicy` and `UpdateReplacePolicy: Retain`; superseded Lambda Version removal is allowed only when the change set explicitly reports `PolicyAction: Retain`. Functions, roles, aliases and schedules cannot be removed or replaced. The generic no-removal reviewer remains strict outside this dedicated verified boundary. No automatic rollback, stack deletion, bucket/table/version deletion or protection disablement is attempted.
 
+## Authoring code patch in TEST
+
+`authoring-patch` is a separate manual operation for an already enabled TEST
+stack. It takes the verified authoring directory from the immutable release
+artifact and changes only that function's `CodeUri` in the live Original
+template. It passes every existing parameter with `UsePreviousValue`. The
+change set must show a nonreplacing authoring Function code change, one new
+retained Version and a nonreplacing `test` Alias retarget. At most one old
+Version removal is accepted, only with `PolicyAction: Retain`. Any API,
+permission, IAM, state, other function or extra resource change aborts before
+execution. The runner rereads the stack, both templates, resource inventory,
+routes and alias before executing, then verifies the final alias code digest.
+Immediately before execution it saves the prior code URI, version identity and
+code digest in an encrypted record in the private release artifact bucket.
+
+The code release still requires a reviewed TEST source SHA and separate
+approval. Afterward, an anonymous `POST {}` to the direct TEST read route
+should return request validation `400` instead of the handler's path `404`;
+then the existing QA session can check the article list without creating or
+publishing an article. A different response needs diagnosis before another
+release. See the [approved design](superpowers/specs/2026-09-26-thn-test-authoring-patch-design.md).
+
 ## Registry readers and inspection
 
 The dedicated THN auth runtime in TEST has a separate, generated execution-role name.

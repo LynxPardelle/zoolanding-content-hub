@@ -325,8 +325,9 @@ actual draft opt-in is implied by this local test.
 ## Dedicated retained TEST lifecycle
 
 The [THN lifecycle guide](docs/thn-test-release.md) defines the separate
-`registry-provision`, `provision`, `enable` and retained-runtime `disable`
-operations. It preserves the shared live template and ordinary no-removal guard;
+`registry-provision`, `registry-reader-revise`, `authoring-patch`, `provision`,
+`enable` and retained-runtime `disable` operations. It preserves the shared
+live template and ordinary no-removal guard;
 the older optional selection path above is not this lifecycle workflow. The
 [IAM matrix](docs/thn-test-iam.md) records exact caller/execution-role prerequisites.
 All new work is local A–C reconciliation, not deployment D.
