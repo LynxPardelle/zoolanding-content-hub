@@ -230,7 +230,15 @@ def _snapshot(session, cfn, account: str) -> dict:
 
 
 def _same_before(a: dict, b: dict) -> bool:
-    return all(a[key] == b[key] for key in ("stack", "original", "processed", "inventory", "routes", "alias", "version"))
+    stable = ("stack", "original", "processed", "inventory", "routes")
+    if any(a[key] != b[key] for key in stable):
+        return False
+    for key in ("alias", "version"):
+        before = {name: value for name, value in a[key].items() if name != "ResponseMetadata"}
+        after = {name: value for name, value in b[key].items() if name != "ResponseMetadata"}
+        if before != after:
+            return False
+    return True
 
 
 def rollback_record(before: dict, old_version: str, new_code_uri: str, source_sha: str) -> dict:
