@@ -121,6 +121,18 @@ class AuthoringPatchTests(unittest.TestCase):
         changed["alias"]["FunctionVersion"] = "3"
         self.assertFalse(patch._same_before(before, changed))
 
+    def test_pre_execution_snapshot_ignores_lambda_request_metadata_only(self):
+        before = {"stack": {"StackId": "a"}, "original": {}, "processed": {},
+                  "inventory": {}, "routes": {},
+                  "alias": {"FunctionVersion": "2", "ResponseMetadata": {"RequestId": "first"}},
+                  "version": {"CodeSha256": "unchanged", "ResponseMetadata": {"RequestId": "first"}}}
+        reread = deepcopy(before)
+        reread["alias"]["ResponseMetadata"]["RequestId"] = "second"
+        reread["version"]["ResponseMetadata"]["RequestId"] = "third"
+        self.assertTrue(patch._same_before(before, reread))
+        reread["version"]["CodeSha256"] = "changed"
+        self.assertFalse(patch._same_before(before, reread))
+
     def test_artifact_identity_requires_matching_source_and_manifest(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
