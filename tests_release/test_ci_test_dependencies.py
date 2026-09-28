@@ -24,6 +24,7 @@ class TestDependencies(unittest.TestCase):
                 with self.subTest(workflow=name, job=job_name):
                     before_tests = script.split("-m unittest discover", 1)[0]
                     self.assertIn("-r requirements-release.txt", before_tests)
+                    self.assertIn("-r requirements-test.txt", before_tests)
 
     def test_offline_job_keeps_network_and_credential_isolation(self):
         workflow = yaml.safe_load((ROOT / ".github/workflows/offline-tests.yml").read_text())

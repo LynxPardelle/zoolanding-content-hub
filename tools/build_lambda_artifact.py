@@ -12,10 +12,15 @@ from collections.abc import Sequence
 REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[1]
 SOURCE_ALLOWLIST = {
     "ServiceBindingRegistryV2MutationFunction": (
+        "production_owner_writer_fence.py",
+        "thn_environment_profile.py",
+        "thn_environment_coordinates.py",
         "service_binding_registry_operator_lambda.py",
         "service_binding_registry_v2.py",
     ),
     "ThnContentHubV2AuthoringFunction": (
+        "thn_environment_profile.py",
+        "thn_environment_coordinates.py",
         "lambda_function.py",
         "content_hub_v2_authoring_handler.py",
         "content_hub_v2_actor_fence.py",
@@ -34,6 +39,8 @@ SOURCE_ALLOWLIST = {
         "service_binding_registry_v2.py",
     ),
     "ThnContentHubV2PrivateAssetCollectorFunction": (
+        "thn_environment_profile.py",
+        "thn_environment_coordinates.py",
         "content_hub_v2_private_asset_gc.py",
         "content_hub_v2_registry_fence.py",
         "service_binding_registry_consumer_v2.py",
@@ -41,6 +48,8 @@ SOURCE_ALLOWLIST = {
         "service_binding_registry_v2.py",
     ),
     "ThnContentHubV2PublisherFunction": (
+        "thn_environment_profile.py",
+        "thn_environment_coordinates.py",
         "publisher_lambda.py", "content_hub_v2_publication_contract.py",
         "content_hub_v2_finalization.py", "content_hub_v2_manifest_update.py",
         "content_hub_v2_projection_manifest.py", "content_hub_v2_projection_delta.py",
@@ -51,14 +60,18 @@ SOURCE_ALLOWLIST = {
         "service_binding_registry_consumer_v2.py", "service_binding_registry_operator_lambda.py",
         "service_binding_registry_v2.py",
     ),
-    "ThnContentHubV2PublicMediaFunction": ("public_media_lambda.py",),
+    "ThnContentHubV2PublicMediaFunction": ("thn_environment_profile.py", "thn_environment_coordinates.py", "public_media_lambda.py",),
     "ThnContentHubV2InvalidationWorkerFunction": (
+        "thn_environment_profile.py",
+        "thn_environment_coordinates.py",
         "invalidation_worker_lambda.py",
         "service_binding_registry_consumer_v2.py",
         "service_binding_registry_operator_lambda.py",
         "service_binding_registry_v2.py",
     ),
     "ThnContentHubV2EmergencyWithdrawFunction": (
+        "thn_environment_profile.py",
+        "thn_environment_coordinates.py",
         "emergency_withdraw_lambda.py",
         "content_hub_v2_projection_manifest.py",
         "service_binding_registry_consumer_v2.py",
@@ -66,6 +79,8 @@ SOURCE_ALLOWLIST = {
         "service_binding_registry_v2.py",
     ),
     "ThnContentHubV2PreparedOrphanCollectorFunction": (
+        "thn_environment_profile.py",
+        "thn_environment_coordinates.py",
         "prepared_orphan_collector_lambda.py",
         "content_hub_v2_projection_store.py",
         "content_hub_v2_projection.py",

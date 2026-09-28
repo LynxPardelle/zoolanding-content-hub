@@ -1,6 +1,9 @@
 """Private upload coordinator. No public uploader, URLs, ACLs or v1 imports."""
 from __future__ import annotations
 
+from thn_environment_coordinates import coordinate
+from thn_environment_profile import PROFILE
+
 import base64
 import binascii
 import hashlib
@@ -14,8 +17,8 @@ MAX_NORMALIZED_BYTES = 4_194_304
 MAX_BASE64_CHARS = 5_592_408
 MAX_METADATA_BYTES = 65_536
 MAX_ENVELOPE_BYTES = 5_750_000
-UPLOAD_TABLE = "zoolanding-image-upload-test-ThnPrivateUploadTransactionsV2"
-UPLOAD_PK = "UPLOAD_TX#test#thehairnarrative.com#journal-owner#thehairnarrative-com#thehairnarrative-com-journal"
+UPLOAD_TABLE = coordinate("zoolanding-image-upload-test-ThnPrivateUploadTransactionsV2")
+UPLOAD_PK = coordinate("UPLOAD_TX#test#thehairnarrative.com#journal-owner#thehairnarrative-com#thehairnarrative-com-journal")
 VARIANTS = ("w480", "w768", "w1200", "w1600")
 CONTENT_TYPES = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}
 
@@ -45,10 +48,7 @@ def validate_upload(data):
 
 
 def private_variant_key(transaction, variant):
-    return ("private/test/thehairnarrative.com/journal-owner/thehairnarrative-com/thehairnarrative-com-journal/"
-            f"articles/{safe_id(transaction['articleId'])}/{safe_locale(transaction['locale'])}/"
-            f"revisions/{safe_id(transaction['revisionId'])}/assets/{safe_id(transaction['assetId'])}/"
-            f"{variant['variantId']}.{CONTENT_TYPES[variant['contentType']]}")
+    return (f"{coordinate('private/test/thehairnarrative.com/journal-owner/thehairnarrative-com/thehairnarrative-com-journal/articles/')}{safe_id(transaction['articleId'])}{coordinate('/')}{safe_locale(transaction['locale'])}{coordinate('/revisions/')}{safe_id(transaction['revisionId'])}{coordinate('/assets/')}{safe_id(transaction['assetId'])}{coordinate('/')}{variant['variantId']}{coordinate('.')}{CONTENT_TYPES[variant['contentType']]}")
 
 
 def safe_asset(asset):
@@ -88,7 +88,7 @@ class PrivateUpload:
         purpose = self.store.auth.account_purpose
         if row.get("recordPurpose") != purpose or any(row.get(k) != v for k, v in THN_CURRENT_USER_SCOPE.items()):
             raise EditorValidationError("invalid_upload_scope")
-        scope = {"environment": "test", "canonicalDomain": "thehairnarrative.com", "authProfileId": "journal-owner",
+        scope = {"environment": coordinate("test"), "canonicalDomain": "thehairnarrative.com", "authProfileId": "journal-owner",
                  "tenantId": "thehairnarrative-com", "hubId": "thehairnarrative-com-journal", "articleId": safe_id(row["articleId"]),
                  "locale": safe_locale(locale), "revisionId": safe_id(row["locales"][locale]["workingRevisionId"]),
                  "writerEpoch": self.store.auth.writer_epoch, "actorPurpose": purpose, "contentType": data["contentType"],

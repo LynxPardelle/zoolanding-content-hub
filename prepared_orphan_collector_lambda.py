@@ -5,6 +5,9 @@ the five-minute grace exceeds the publisher's maximum invocation time, including
 any immutable write already in flight. Later calls verify every exact key/digest
 before deleting pinned versions. Disabled by default, operator-supplied IDs only.
 """
+
+from thn_environment_coordinates import coordinate
+from thn_environment_profile import PROFILE
 from copy import deepcopy
 from types import SimpleNamespace
 import json
@@ -21,7 +24,7 @@ from content_hub_v2_registry_fence import _condition_check, marshal_item, unmars
 from content_hub_v2_authorization import THN_CURRENT_USER_SCOPE
 from service_binding_registry_consumer_v2 import load_active_service_binding
 
-FUNCTION_NAME='zoolanding-content-hub-test-ThnV2PreparedOrphanCollector'
+FUNCTION_NAME=coordinate('zoolanding-content-hub-test-ThnV2PreparedOrphanCollector')
 MIN_AGE_SECONDS=30*86400
 QUIET_PERIOD_SECONDS=300
 
@@ -88,8 +91,8 @@ class PreparedOrphanRuntime:
         keys=[(self.table,{'pk':ARTICLE_PK,'sk':'ARTICLE#'+article}),
             (self.table,{'pk':MANIFEST_PK,'sk':'PAGE#'+article}),
             (self.public_table,{'pk':'HUB#thehairnarrative-com-journal','sk':'ARTICLE#'+article}),
-            (self.public_table,{'pk':f'LIVE_MEDIA#test#thehairnarrative.com#thehairnarrative-com-journal#{article}#{locale}#{revision}','sk':'MANIFEST#V1'}),
-            (self.public_table,{'pk':'SLUG#test#thehairnarrative.com#'+locale,'sk':'PATH#'+path})]
+            (self.public_table,{'pk':f"{coordinate('LIVE_MEDIA#test#thehairnarrative.com#thehairnarrative-com-journal#')}{article}{coordinate('#')}{locale}{coordinate('#')}{revision}",'sk':'MANIFEST#V1'}),
+            (self.public_table,{'pk':coordinate('SLUG#test#thehairnarrative.com#')+locale,'sk':'PATH#'+path})]
         conditions=[]
         for index,(table,key) in enumerate(keys):
             current=self.read(table,key)
@@ -163,7 +166,7 @@ def lambda_handler(event,context):
         or not isinstance(event.get('preparationId'),str) or not re.fullmatch(r'prep-[a-f0-9]{64}',event['preparationId'])):
         raise HandlerNotActiveError('collection_not_active')
     arn=getattr(context,'invoked_function_arn','')
-    match=re.fullmatch(r'arn:(aws):lambda:([a-z]{2}(?:-[a-z]+)+-[0-9]):([0-9]{12}):function:'+FUNCTION_NAME+':test',arn) if isinstance(arn,str) else None
+    match=re.fullmatch(r'arn:(aws):lambda:([a-z]{2}(?:-[a-z]+)+-[0-9]):([0-9]{12}):function:'+FUNCTION_NAME+coordinate(':test'),arn) if isinstance(arn,str) else None
     if not match: raise HandlerNotActiveError('collection_not_active')
     scope=dict(zip(('partition','region','accountId'),match.groups()))
     descriptor={key:os.environ.get(env,'') for key,env in (

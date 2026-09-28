@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from thn_environment_coordinates import coordinate
+from thn_environment_profile import PROFILE
+
 import base64
 import hashlib
 import json
@@ -13,11 +16,11 @@ from decimal import Decimal
 from typing import Any
 from urllib.parse import urlparse
 
-ENVIRONMENT = "test"
+ENVIRONMENT = coordinate("test")
 DOMAIN = "thehairnarrative.com"
 HUB_ID = "thehairnarrative-com-journal"
-PUBLIC_HOST = "test.zoolandingpage.com.mx"
-ADMIN_HOST = "admin-test.thehairnarrative.com"
+PUBLIC_HOST = coordinate("test.zoolandingpage.com.mx")
+ADMIN_HOST = coordinate("admin-test.thehairnarrative.com")
 MANIFEST_RECORD_TYPE = "THN_CONTENT_HUB_V2_LIVE_MEDIA_MANIFEST"
 PUBLIC_MEDIA_PREFIX = "/features/content-hub-v2/public-media"
 IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, s-maxage=31536000, immutable"

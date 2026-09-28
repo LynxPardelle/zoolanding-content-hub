@@ -1,4 +1,7 @@
 """Private authoring-to-publisher invocation; never writes public state."""
+
+from thn_environment_coordinates import coordinate
+from thn_environment_profile import PROFILE
 import json
 import re
 import time
@@ -13,7 +16,7 @@ from content_hub_v2_publication_contract import PUBLISHER_NAME, validate_envelop
 
 class PublicationGateway:
     def __init__(self, auth, session_hash, scope, binding, *, clock=None, lambda_client=None):
-        expected=f"arn:{scope['partition']}:lambda:{scope['region']}:{scope['accountId']}:function:{PUBLISHER_NAME}:test"
+        expected=f"{coordinate('arn:')}{scope['partition']}{coordinate(':lambda:')}{scope['region']}{coordinate(':')}{scope['accountId']}{coordinate(':function:')}{PUBLISHER_NAME}{coordinate(':test')}"
         if not binding or binding!=expected:
             raise EditorValidationError('feature_not_ready')
         self.auth,self.session_hash,self.binding=auth,session_hash,binding

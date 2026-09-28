@@ -7,6 +7,9 @@ registry record.
 
 from __future__ import annotations
 
+from thn_environment_coordinates import coordinate
+from thn_environment_profile import PROFILE
+
 import hashlib
 import json
 import re
@@ -23,14 +26,14 @@ GLOBAL_RESERVATION_RECORD_TYPE = "global-hub-reservation-v2"
 GLOBAL_RESERVATION_SORT_KEY = "GLOBAL"
 AUDIT_RECORD_TYPE = "service-binding-registry-audit-v2"
 ALLOWED_ACTIVATION_STATUSES = frozenset({"inactive", "active"})
-ALLOWED_WRITER_MODES = frozenset({"disabled", "qa-only", "client-owner"})
-APPROVED_ENVIRONMENT = "test"
+ALLOWED_WRITER_MODES = frozenset({"disabled", "client-owner"} | ({"qa-only"} if PROFILE["environment"]=="test" else set()))
+APPROVED_ENVIRONMENT = coordinate("test")
 APPROVED_DOMAIN = "thehairnarrative.com"
-APPROVED_SERVICE_BINDING_ID = "thn-journal-test-v2"
+APPROVED_SERVICE_BINDING_ID = coordinate("thn-journal-test-v2")
 APPROVED_HUB_ID = "thehairnarrative-com-journal"
 APPROVED_AUTH_PROFILE_ID = "journal-owner"
-APPROVED_ADMIN_ORIGIN = "https://admin-test.thehairnarrative.com"
-APPROVED_COOKIE_NAMESPACE = "endefiz7dkk635k6di6k"
+APPROVED_ADMIN_ORIGIN = coordinate("https://admin-test.thehairnarrative.com")
+APPROVED_COOKIE_NAMESPACE = coordinate("endefiz7dkk635k6di6k")
 # Code-owned server scope from Config Authoring. It is never accepted from a
 # CLI flag or inferred from the proposed registry record.
 TRUSTED_TENANT_ID = "thehairnarrative-com"
@@ -52,11 +55,11 @@ _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 RESOURCE_BINDING_SPECS = {
     "authoringFunctionArn": (
         "lambda",
-        "function:zoolanding-content-hub-test-ThnContentHubV2Authoring",
+        coordinate("function:zoolanding-content-hub-test-ThnContentHubV2Authoring"),
     ),
     "metadataTableArn": (
         "dynamodb",
-        "table/zoolanding-content-hub-test-ThnContentHubV2Metadata",
+        coordinate("table/zoolanding-content-hub-test-ThnContentHubV2Metadata"),
     ),
 }
 

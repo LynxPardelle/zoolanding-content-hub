@@ -3,6 +3,9 @@
 SDK clients and server-resolved bucket names are injected. This adapter cannot
 write a public metadata table or make prepared objects addressable.
 """
+
+from thn_environment_coordinates import coordinate
+from thn_environment_profile import PROFILE
 from copy import deepcopy
 from types import SimpleNamespace
 import re
@@ -14,8 +17,8 @@ from content_hub_v2_preparation import SOURCE_ROOT, MAX_OBJECT_BYTES, _bytes, _s
 from content_hub_v2_projection import ROOT, EXTENSIONS, VARIANTS, bundle_key
 from content_hub_v2_registry_fence import _condition_check, marshal_item, unmarshal_item
 
-METADATA_TABLE = "zoolanding-content-hub-test-ThnContentHubV2Metadata"
-PARTITION = "THN#test#thehairnarrative.com#journal-owner#thehairnarrative-com#thehairnarrative-com-journal#PREPARATION"
+METADATA_TABLE = coordinate("zoolanding-content-hub-test-ThnContentHubV2Metadata")
+PARTITION = coordinate("THN#test#thehairnarrative.com#journal-owner#thehairnarrative-com#thehairnarrative-com-journal#PREPARATION")
 INTENT_FIELDS = set(THN_CURRENT_USER_SCOPE)|{"articleId","locale","revisionId","recordPurpose","objects",
     "preparationId","recordType","schemaVersion","intentDigest","candidateAtEpoch","state"}
 
@@ -32,7 +35,7 @@ class AwsPreparationStore:
     def __init__(self,*,dynamodb,s3,account_id,region,source_bucket,delivery_bucket,guard_factory):
         if (not isinstance(account_id,str) or re.fullmatch(r"[0-9]{12}",account_id) is None
                 or not isinstance(region,str) or re.fullmatch(r"[a-z]{2}(?:-[a-z]+)+-[0-9]",region) is None
-                or source_bucket!=f"zlp-thn-private-upload-test-{account_id}-{region}"
+                or source_bucket!=f"{coordinate('zlp-thn-private-upload-test-')}{account_id}{coordinate('-')}{region}"
                 or not isinstance(delivery_bucket,str) or re.fullmatch(r"[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]",delivery_bucket) is None
                 or delivery_bucket==source_bucket or not callable(guard_factory)):
             _reject("invalid_publication_binding")
