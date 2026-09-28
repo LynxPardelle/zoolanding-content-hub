@@ -4,6 +4,9 @@ No event-supplied storage binding, cookie, HTML or session read is accepted.
 The exact TEST alias and immutable server configuration are mandatory. Deployment
 and registry/writer activation remain independent, fail-closed release controls.
 """
+
+from thn_environment_coordinates import coordinate
+from thn_environment_profile import PROFILE
 import os
 import re
 import time
@@ -31,13 +34,13 @@ class PublicationRuntime:
     def __init__(self, context, configuration, *, dynamodb=None, s3=None, clock=None):
         arn=getattr(context,'invoked_function_arn','')
         match=re.fullmatch(r'arn:(aws):lambda:([a-z]{2}(?:-[a-z]+)+-[0-9]):([0-9]{12}):function:'
-            +re.escape(PUBLISHER_NAME)+r':test',arn) if isinstance(arn,str) else None
+            +re.escape(PUBLISHER_NAME)+coordinate(r':test'),arn) if isinstance(arn,str) else None
         if not match: raise HandlerNotActiveError('publication unavailable')
         self.scope=dict(zip(('partition','region','accountId'),match.groups()))
         self.config=dict(configuration)
-        required={'CONTENT_HUB_ENVIRONMENT':'test','CONTENT_HUB_DOMAIN':'thehairnarrative.com',
+        required={'CONTENT_HUB_ENVIRONMENT':coordinate('test'),'CONTENT_HUB_DOMAIN':'thehairnarrative.com',
             'CONTENT_HUB_ID':'thehairnarrative-com-journal','THN_CONTENT_HUB_METADATA_TABLE_NAME':METADATA_TABLE,
-            'THN_CONTENT_HUB_PRIVATE_BUCKET_NAME':f"zlp-thn-ch-test-private-{self.scope['accountId']}-{self.scope['region']}"}
+            'THN_CONTENT_HUB_PRIVATE_BUCKET_NAME':f"{coordinate('zlp-thn-ch-test-private-')}{self.scope['accountId']}{coordinate('-')}{self.scope['region']}"}
         if any(self.config.get(k)!=v for k,v in required.items()): raise HandlerNotActiveError('publication unavailable')
         self.descriptor={key:self.config.get(env,'') for key,env in (
             ('descriptorVersionId','THN_CONTENT_HUB_DESCRIPTOR_VERSION_ID'),
@@ -67,7 +70,7 @@ class PublicationRuntime:
         record=load_active_service_binding(self._ddb,expected_descriptor=self.descriptor,trusted_resource_scope=self.scope)
         if record['writerEpoch']!=envelope['writerEpoch'] or record['writerMode']!=envelope['writerMode']:
             raise ContentHubV2AuthorizationError()
-        user=_validate_current_user(self.get(USER_TABLE,{'pk':'CURRENT_USER#test#thn-journal-test-v2',
+        user=_validate_current_user(self.get(USER_TABLE,{'pk':coordinate('CURRENT_USER#test#thn-journal-test-v2'),
             'sk':'SUBJECT#'+envelope['actorSubject']}),scope=THN_CURRENT_USER_SCOPE,expected_subject=envelope['actorSubject'])
         if user['accountPurpose']!=envelope['actorPurpose'] or user['sessionVersion']!=envelope['sessionVersion']:
             raise ContentHubV2AuthorizationError()
@@ -81,7 +84,7 @@ class PublicationRuntime:
         authorize()
         store=AwsPublicationStore(dynamodb=ddb,s3=s3,account_id=self.scope['accountId'],region=self.scope['region'],
             private_bucket=self.config['THN_CONTENT_HUB_PRIVATE_BUCKET_NAME'],
-            source_bucket=f"zlp-thn-private-upload-test-{self.scope['accountId']}-{self.scope['region']}",
+            source_bucket=f"{coordinate('zlp-thn-private-upload-test-')}{self.scope['accountId']}{coordinate('-')}{self.scope['region']}",
             delivery_bucket=self.config['CONTENT_HUB_PACKAGES_BUCKET_NAME'],
             public_table=self.config['CONTENT_HUB_METADATA_TABLE_NAME'],guard_factory=authorize)
         article,locale,revision=envelope['articleId'],envelope['locale'],envelope['revisionId']

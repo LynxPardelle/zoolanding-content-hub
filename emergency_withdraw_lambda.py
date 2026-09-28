@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from thn_environment_coordinates import coordinate
+from thn_environment_profile import PROFILE
+
 import hashlib
 import os
 import re
@@ -22,9 +25,9 @@ from service_binding_registry_consumer_v2 import (
 )
 
 REGISTRY_TABLE = APPROVED_TABLE_NAME
-PRIVATE_TABLE = "zoolanding-content-hub-test-ThnContentHubV2Metadata"
-AUDIT_TABLE = "zoolanding-content-hub-test-ThnContentHubV2Audit"
-FUNCTION_NAME = "zoolanding-content-hub-test-ThnV2EmergencyWithdraw"
+PRIVATE_TABLE = coordinate("zoolanding-content-hub-test-ThnContentHubV2Metadata")
+AUDIT_TABLE = coordinate("zoolanding-content-hub-test-ThnContentHubV2Audit")
+FUNCTION_NAME = coordinate("zoolanding-content-hub-test-ThnV2EmergencyWithdraw")
 CHECKPOINT_RECORD_TYPE = "THN_CONTENT_HUB_V2_WITHDRAWAL_CHECKPOINT"
 OUTBOX_RECORD_TYPE = "THN_CONTENT_HUB_V2_INVALIDATION_OUTBOX"
 AUDIT_RECORD_TYPE = "THN_CONTENT_HUB_V2_WITHDRAWAL_AUDIT"
@@ -139,7 +142,7 @@ def _validate_binding(value: Any, *, writer_epoch: int) -> dict[str, Any]:
     expected = {
         "environment": projection.ENVIRONMENT,
         "domain": projection.DOMAIN,
-        "serviceBindingId": "thn-journal-test-v2",
+        "serviceBindingId": coordinate("thn-journal-test-v2"),
         "hubId": projection.HUB_ID,
         "tenantId": "thehairnarrative-com",
         "authProfileId": "journal-owner",
@@ -786,7 +789,7 @@ def _validate_context(context: Any) -> None:
     invoked_arn = getattr(context, "invoked_function_arn", None)
     if function_name != FUNCTION_NAME or not isinstance(invoked_arn, str):
         _reject()
-    if not invoked_arn.endswith(f":function:{FUNCTION_NAME}:test"):
+    if not invoked_arn.endswith(f"{coordinate(':function:')}{FUNCTION_NAME}{coordinate(':test')}"):
         _reject()
 
 

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from thn_environment_coordinates import coordinate
+from thn_environment_profile import PROFILE
+
 import base64
 import hashlib
 import hmac
@@ -47,19 +50,19 @@ _SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 _ACCOUNT_ID_RE = re.compile(r"^[0-9]{12}$")
 _REGION_RE = re.compile(r"^[a-z]{2}(?:-gov)?-[a-z0-9-]+-[0-9]+$")
 
-ENVIRONMENT = "test"
+ENVIRONMENT = coordinate("test")
 DOMAIN = "thehairnarrative.com"
 AUTH_PROFILE_ID = "journal-owner"
 HUB_ID = "thehairnarrative-com-journal"
-COOKIE_NAMESPACE = "endefiz7dkk635k6di6k"
+COOKIE_NAMESPACE = coordinate("endefiz7dkk635k6di6k")
 SESSION_COOKIE_NAME = f"__Host-zlp_session_{COOKIE_NAMESPACE}"
 CSRF_COOKIE_NAME = f"zlp_csrf_{COOKIE_NAMESPACE}"
 CSRF_HEADER_NAME = "x-zlp-csrf"
-SESSION_TABLE_NAME = "zoolanding-auth-admin-test-ThnSessionV2"
-CURRENT_USER_TABLE_NAME = "zoolanding-auth-admin-test-ThnCurrentUserStateV2"
-CURRENT_USER_PARTITION_KEY = "CURRENT_USER#test#thn-journal-test-v2"
-AUTHORING_FUNCTION_NAME = "zoolanding-content-hub-test-ThnContentHubV2Authoring"
-AUTHORING_FUNCTION_ALIAS = "test"
+SESSION_TABLE_NAME = coordinate("zoolanding-auth-admin-test-ThnSessionV2")
+CURRENT_USER_TABLE_NAME = coordinate("zoolanding-auth-admin-test-ThnCurrentUserStateV2")
+CURRENT_USER_PARTITION_KEY = coordinate("CURRENT_USER#test#thn-journal-test-v2")
+AUTHORING_FUNCTION_NAME = coordinate("zoolanding-content-hub-test-ThnContentHubV2Authoring")
+AUTHORING_FUNCTION_ALIAS = coordinate("test")
 
 DESCRIPTOR_VERSION_ENV = "THN_CONTENT_HUB_DESCRIPTOR_VERSION_ID"
 DESCRIPTOR_SHA256_ENV = "THN_CONTENT_HUB_DESCRIPTOR_SHA256"
@@ -318,11 +321,11 @@ def _path(event: Mapping[str, Any]) -> str:
     http = http if isinstance(http, Mapping) else {}
     value = event.get("rawPath") or event.get("path") or http.get("path") or "/"
     path = str(value).strip()
-    if request_context.get("stage") == "test" and path in {
-        "/test" + READ_PATH,
-        "/test" + ACTION_PATH,
+    if request_context.get("stage") == PROFILE["stage"] and path in {
+        "/" + PROFILE["stage"] + READ_PATH,
+        "/" + PROFILE["stage"] + ACTION_PATH,
     }:
-        return path[len("/test"):]
+        return path[len("/" + PROFILE["stage"]):]
     return path
 
 

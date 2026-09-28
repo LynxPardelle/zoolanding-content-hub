@@ -4,6 +4,9 @@ Requests use a durable, deterministic CloudFront caller reference; delivery is
 complete only after CloudFront confirms it. A bounded partition cursor retries
 interrupted pages instead of discarding their events. Schedules remain disabled.
 """
+
+from thn_environment_coordinates import coordinate
+from thn_environment_profile import PROFILE
 from copy import deepcopy
 import hashlib
 import json
@@ -13,9 +16,9 @@ import time
 
 from service_binding_registry_consumer_v2 import marshal_item, unmarshal_item
 
-METADATA_TABLE='zoolanding-content-hub-test-ThnContentHubV2Metadata'
-FUNCTION_NAME='zoolanding-content-hub-test-ThnV2Invalidation'
-OUTBOX_PREFIX='OUTBOX#test#thehairnarrative.com#thehairnarrative-com-journal#'
+METADATA_TABLE=coordinate('zoolanding-content-hub-test-ThnContentHubV2Metadata')
+FUNCTION_NAME=coordinate('zoolanding-content-hub-test-ThnV2Invalidation')
+OUTBOX_PREFIX=coordinate('OUTBOX#test#thehairnarrative.com#thehairnarrative-com-journal#')
 PUBLICATION_PK=OUTBOX_PREFIX+'PUBLICATION'
 GLOBALS={'/','/the-journal','/sitemap.xml','/content-hub-search.json'}
 SERIES='(?:form-and-movement|forma-y-movimiento|observation-and-process|observacion-y-proceso|bridal-forms|formas-nupciales)'
@@ -49,7 +52,7 @@ def _event(row,pk,sk):
     fields={'operation','articleId','locale'} if pk==PUBLICATION_PK else {'batchNumber'}
     if not isinstance(row,dict) or set(row)-(common|fields|{'deliveryReceipt'}) or not common|fields <= set(row): _reject()
     if (any(row.get(k)!=v for k,v in {'pk':pk,'sk':sk,'recordType':'THN_CONTENT_HUB_V2_INVALIDATION_OUTBOX',
-        'schemaVersion':1,'environment':'test','domain':'thehairnarrative.com','hubId':'thehairnarrative-com-journal'}.items())
+        'schemaVersion':1,'environment':coordinate('test'),'domain':'thehairnarrative.com','hubId':'thehairnarrative-com-journal'}.items())
         or type(row['schemaVersion']) is not int or row['status'] not in {'pending','submitted','delivered'}
         or type(row['writerEpoch']) is not int or row['writerEpoch']<1
         or type(row['attemptCount']) is not int or row['attemptCount']<0
@@ -146,7 +149,7 @@ def lambda_handler(event,context):
         pk=OUTBOX_PREFIX+f"WITHDRAWAL#{event['writerEpoch']:020d}"
     else: raise HandlerNotActiveError('invalidation_not_active')
     arn=getattr(context,'invoked_function_arn','')
-    if not isinstance(arn,str) or not re.fullmatch(r'arn:aws:lambda:[a-z0-9-]+:[0-9]{12}:function:'+FUNCTION_NAME+':test',arn):
+    if not isinstance(arn,str) or not re.fullmatch(r'arn:aws:lambda:[a-z0-9-]+:[0-9]{12}:function:'+FUNCTION_NAME+coordinate(':test'),arn):
         raise HandlerNotActiveError('invalidation_not_active')
     table=os.environ.get('THN_CONTENT_HUB_METADATA_TABLE_NAME');distribution=os.environ.get('THN_CONTENT_HUB_PUBLIC_DISTRIBUTION_ID')
     # Validate configuration before constructing SDK clients.

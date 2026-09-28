@@ -1,4 +1,7 @@
 """IAM-only bridge to the private processor and exact versioned media reads."""
+
+from thn_environment_coordinates import coordinate
+from thn_environment_profile import PROFILE
 import base64
 import hashlib
 import json
@@ -20,7 +23,7 @@ class AwsMediaStore:
         self.editor, self.auth = editor_store, editor_store.auth
         self.ddb, self._lambda = editor_store.ddb, lambda_client
         self.scope = editor_store.runtime._trusted_resource_scope(editor_store.context)
-        self.bucket = f"zlp-thn-private-upload-test-{self.scope['accountId']}-{self.scope['region']}"
+        self.bucket = f"{coordinate('zlp-thn-private-upload-test-')}{self.scope['accountId']}{coordinate('-')}{self.scope['region']}"
 
     def now_epoch(self):
         return self.editor.runtime.now_epoch()
@@ -54,7 +57,7 @@ class AwsMediaStore:
     def process_upload(self, transaction, image_base64):
         scope = self.scope
         payload = {"operation": "processPrivateImageV2", "transactionId": transaction["transactionId"],
-                   "callerPrincipalArn": f"arn:{scope['partition']}:iam::{scope['accountId']}:role/zlp-thn-ch-test-authoring",
+                   "callerPrincipalArn": f"{coordinate('arn:')}{scope['partition']}{coordinate(':iam::')}{scope['accountId']}{coordinate(':role/zlp-thn-ch-test-authoring')}",
                    "scope": {key: transaction[key] for key in SCOPE_FIELDS}, "imageBase64": image_base64}
         body = json.dumps(payload, separators=(",", ":")).encode()
         if len(body) > MAX_ENVELOPE_BYTES:
@@ -64,7 +67,7 @@ class AwsMediaStore:
             from botocore.config import Config
             self._lambda = boto3.client("lambda", config=Config(read_timeout=95, retries={"max_attempts": 0}))
         response = self._lambda.invoke(
-            FunctionName=f"arn:{scope['partition']}:lambda:{scope['region']}:{scope['accountId']}:function:zoolanding-image-upload-test-ThnImageUploadV2:test",
+            FunctionName=f"{coordinate('arn:')}{scope['partition']}{coordinate(':lambda:')}{scope['region']}{coordinate(':')}{scope['accountId']}{coordinate(':function:zoolanding-image-upload-test-ThnImageUploadV2:test')}",
             InvocationType="RequestResponse", Payload=body)
         if response.get("FunctionError"):
             raise EditorValidationError("image_processing_failed")
@@ -87,7 +90,7 @@ class AwsMediaStore:
             "ExpressionAttributeNames": {"#status": "status"},
             "ExpressionAttributeValues": marshal_item({":tx": transaction["transactionId"], ":purpose": self.auth.account_purpose,
                                                       ":ready": "ready", ":zero": 0, ":private": "private"})}}
-        audit = {"pk": f"AUDIT#test#thehairnarrative.com#thehairnarrative-com-journal#{row['articleId']}",
+        audit = {"pk": f"{coordinate('AUDIT#test#thehairnarrative.com#thehairnarrative-com-journal#')}{row['articleId']}",
                  "sk": "EVENT#" + self.editor.new_id(), "operation": "uploadAsset", "articleId": row["articleId"],
                  "timestamp": self.editor.now(), "writerEpoch": self.auth.writer_epoch, "decision": "committed",
                  "actorHash": hashlib.sha256((PARTITION_PREFIX + self.auth.subject).encode()).hexdigest()}
@@ -101,8 +104,7 @@ class AwsMediaStore:
         if not asset or asset.get("status") != "ready":
             raise EditorValidationError("image_not_ready")
         variant = next((v for v in asset.get("variants", []) if v.get("variantId") == "w768"), None)
-        prefix = ("private/test/thehairnarrative.com/journal-owner/thehairnarrative-com/thehairnarrative-com-journal/"
-                  f"articles/{safe_id(row['articleId'])}/{safe_locale(locale)}/revisions/")
+        prefix = (f"{coordinate('private/test/thehairnarrative.com/journal-owner/thehairnarrative-com/thehairnarrative-com-journal/articles/')}{safe_id(row['articleId'])}{coordinate('/')}{safe_locale(locale)}{coordinate('/revisions/')}")
         expected = re.escape(prefix) + r"[A-Za-z0-9][A-Za-z0-9_-]{0,79}/assets/" + re.escape(safe_id(asset_id)) + r"/w768\.(png|jpg|webp)"
         if (not variant or not isinstance(variant.get("key"), str) or re.fullmatch(expected, variant["key"]) is None
                 or not variant.get("versionId") or variant["versionId"] == "null"

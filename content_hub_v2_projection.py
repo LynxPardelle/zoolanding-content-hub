@@ -1,4 +1,7 @@
 """Pure, closed THN public projections. No SDK, credentials, or private-store I/O."""
+
+from thn_environment_coordinates import coordinate
+from thn_environment_profile import PROFILE
 from copy import deepcopy
 from datetime import datetime
 import re
@@ -9,7 +12,7 @@ from content_hub_v2_editor_model import (
 
 DOMAIN = "thehairnarrative.com"
 HUB_ID = "thehairnarrative-com-journal"
-ROOT = f"content-hubs/test/{HUB_ID}/published/{DOMAIN}"
+ROOT = f"{coordinate('content-hubs/test/')}{HUB_ID}{coordinate('/published/')}{DOMAIN}"
 FIELDS = frozenset(("title","summary","path","categorySlug","publishedAt","updatedAt",
     "canonicalPath","robots","imageSrc","imageAlt"))
 VARIANTS = ("w480","w768","w1200","w1600")
@@ -127,7 +130,7 @@ def build_article_index_item(article_id, live_locales):
 
 def build_slug_pointer(article_id, locale, live):
     fields=_live(article_id,locale,live)
-    return {"pk":f"SLUG#test#{DOMAIN}#{locale}","sk":"PATH#"+fields["path"],
+    return {"pk":f"{coordinate('SLUG#test#')}{DOMAIN}{coordinate('#')}{locale}","sk":"PATH#"+fields["path"],
         "articleId":article_id,"hubId":HUB_ID,"itemFamily":"SLUG","revisionId":live["revisionId"],
         "locale":locale,"path":fields["path"],"status":"published","visibility":"public",
         "publishedBundleKey":bundle_key(article_id,locale,live["revisionId"])}
@@ -166,7 +169,7 @@ def build_delivery_manifest(article_id, locale, revision_id, copied_variants):
         seen.add((asset_id,variant));variants.append(dict(value))
     if any({v for a,v in seen if a==asset_id}!=set(VARIANTS) for asset_id,_ in seen):
         _reject()
-    return {"pk":f"LIVE_MEDIA#test#{DOMAIN}#{HUB_ID}#{article_id}#{locale}#{revision_id}","sk":"MANIFEST#V1",
-        "recordType":"THN_CONTENT_HUB_V2_LIVE_MEDIA_MANIFEST","schemaVersion":1,"environment":"test",
+    return {"pk":f"{coordinate('LIVE_MEDIA#test#')}{DOMAIN}{coordinate('#')}{HUB_ID}{coordinate('#')}{article_id}{coordinate('#')}{locale}{coordinate('#')}{revision_id}","sk":"MANIFEST#V1",
+        "recordType":"THN_CONTENT_HUB_V2_LIVE_MEDIA_MANIFEST","schemaVersion":1,"environment":coordinate("test"),
         "domain":DOMAIN,"hubId":HUB_ID,"articleId":article_id,"locale":locale,"revisionId":revision_id,
         "status":"published","visibility":"public","deliveryState":"live","variants":variants}

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from thn_environment_coordinates import coordinate
+from thn_environment_profile import PROFILE
+
 import json
 import hashlib
 import re
@@ -11,19 +14,19 @@ from typing import Any, Mapping
 import service_binding_registry_v2 as registry
 
 
-APPROVED_TABLE_NAME = "zoolanding-content-hub-test-ServiceBindingRegistryV2"
-APPROVED_PARTITION_KEY = "SERVICE_BINDING#test#thn-journal-test-v2"
+APPROVED_TABLE_NAME = coordinate("zoolanding-content-hub-test-ServiceBindingRegistryV2")
+APPROVED_PARTITION_KEY = coordinate("SERVICE_BINDING#test#thn-journal-test-v2")
 APPROVED_SORT_KEY = "REGISTRY#V2"
 APPROVED_RESERVATION_PARTITION_KEY = "HUB_RESERVATION#thehairnarrative-com-journal"
 APPROVED_RESERVATION_SORT_KEY = "GLOBAL"
-APPROVED_AUDIT_PARTITION_KEY = "REGISTRY_AUDIT#test#thn-journal-test-v2"
+APPROVED_AUDIT_PARTITION_KEY = coordinate("REGISTRY_AUDIT#test#thn-journal-test-v2")
 _AUDIT_SORT_KEY_RE = re.compile(
     r"^EVENT#[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z#"
     r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
 )
 _APPROVED_TABLE_ARN_RE = re.compile(
-    r"^arn:(aws|aws-us-gov|aws-cn):dynamodb:([a-z0-9-]+):([0-9]{12}):"
-    r"table/zoolanding-content-hub-test-ServiceBindingRegistryV2$"
+    coordinate(r"^arn:(aws|aws-us-gov|aws-cn):dynamodb:([a-z0-9-]+):([0-9]{12}):"
+    r"table/zoolanding-content-hub-test-ServiceBindingRegistryV2$")
 )
 _CONDITIONAL_ERROR_CODES = frozenset({"ConditionalCheckFailedException"})
 _MAX_EVENT_BYTES = 256 * 1024
@@ -244,6 +247,7 @@ class DynamoDbRegistryStore:
     def __init__(self, client: Any):
         self._client = client
 
+
     def get_trusted_resource_scope(self) -> dict[str, str]:
         try:
             response = self._client.describe_table(TableName=APPROVED_TABLE_NAME)
@@ -337,6 +341,10 @@ class DynamoDbRegistryStore:
         _require_exact_audit_key(audit)
         if set(expected) != _EXPECTED_CONDITIONAL_FIELDS:
             raise RegistryMutationInputError("conditional registry fields are invalid")
+        owner_conditions = []
+        if PROFILE["environment"] == "production" and binding.get("writerMode") == "client-owner":
+            from production_owner_writer_fence import verify_owner
+            owner_conditions = verify_owner(self._client)
         names = {"#pk": "pk", "#sk": "sk"}
         values: dict[str, Any] = {}
         conditions = ["attribute_exists(#pk)", "attribute_exists(#sk)"]
@@ -346,7 +354,7 @@ class DynamoDbRegistryStore:
             conditions.append(f"#{field} = :{field}")
         try:
             self._client.transact_write_items(
-                TransactItems=[
+                TransactItems=owner_conditions + [
                     {"ConditionCheck": _condition_check_for_exact_item(reservation)},
                     {
                         "Put": {
