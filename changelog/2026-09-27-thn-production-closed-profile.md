@@ -14,3 +14,8 @@ The protected source promotion now checks the parsed native merge commit
 against GITHUB_SHA. This resolves the actual ShellCheck SC2034 unused-variable
 failure and explicitly binds the head identity. Actionlint 1.7.12 with the CI
 ShellCheck 0.9.0 validates every tracked workflow without suppressing checks.
+
+- Keep the shared production release driver identical across the four services:
+  its Auth-only branch explicitly selects Auth's production artifact inventory,
+  excluding the TEST QA/owner mediator. Other service inventories and native
+  templates are unchanged.
