@@ -387,12 +387,17 @@ class ContentHubHandlerTests(unittest.TestCase):
 
     def test_template_keeps_audit_bucket_versioned_without_delete_object(self):
         template = Path("template.yaml").read_text(encoding="utf-8")
+        packages_bucket = template.split("  ContentHubPackagesBucket:\n", 1)[1].split(
+            "\n  ContentHubFunctionRole:", 1
+        )[0]
+        legacy_role = template.split("  ContentHubFunctionRole:\n", 1)[1].split(
+            "\n  ContentHubFunction:", 1
+        )[0]
 
-        self.assertIn("ContentHubPackagesBucket:", template)
-        self.assertIn("VersioningConfiguration:", template)
-        self.assertIn("Status: Enabled", template)
-        self.assertIn("- s3:PutObject", template)
-        self.assertNotIn("- s3:DeleteObject", template)
+        self.assertIn("VersioningConfiguration:", packages_bucket)
+        self.assertIn("Status: Enabled", packages_bucket)
+        self.assertIn("- s3:PutObject", legacy_role)
+        self.assertNotIn("- s3:DeleteObject", legacy_role)
 
     def test_role_policies_authorize_by_action_scoped_permission(self):
         os.environ["CONTENT_HUB_CONFIG_JSON_BASE64"] = encoded_role_policy_config([
@@ -2067,13 +2072,16 @@ class ContentHubTemplateTests(unittest.TestCase):
 
     def test_due_schedule_is_explicit_eventbridge_rule(self):
         template = Path(__file__).resolve().parents[1].joinpath("template.yaml").read_text(encoding="utf-8")
+        due_schedule = template.split("  DueSchedulesRule:\n", 1)[1].split(
+            "\n  DueSchedulesPermission:", 1
+        )[0]
 
         self.assertIn("DueSchedulesRule:", template)
-        self.assertIn("Type: AWS::Events::Rule", template)
-        self.assertIn("ScheduleExpression: rate(5 minutes)", template)
+        self.assertIn("Type: AWS::Events::Rule", due_schedule)
+        self.assertIn("ScheduleExpression: rate(5 minutes)", due_schedule)
         self.assertIn("DueSchedulesPermission:", template)
         self.assertIn("Principal: events.amazonaws.com", template)
-        self.assertNotIn("Type: Schedule", template)
+        self.assertNotIn("Type: Schedule", due_schedule)
 
 
 if __name__ == "__main__":

@@ -168,6 +168,14 @@ class ContentHubConfigError(ContentHubError):
         Exception.__init__(self, message or self.public_message)
 
 
+def thn_content_hub_v2_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
+    """Dispatch only the isolated THN Content Hub v2 authoring contract."""
+
+    from content_hub_v2_authoring_handler import handle_request
+
+    return handle_request(event, context)
+
+
 def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     del context
     request_id = _request_id(event)
