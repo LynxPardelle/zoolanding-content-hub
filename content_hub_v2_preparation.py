@@ -4,6 +4,9 @@ This service has no SDK or Lambda entrypoint. Its injected store must atomically
 reserve each intent, conditionally create immutable objects and persist exact
 versioned receipts. No live pointer or delivery manifest is written here.
 """
+
+from thn_environment_coordinates import coordinate
+from thn_environment_profile import PROFILE
 from copy import deepcopy
 import hashlib
 import json
@@ -17,7 +20,7 @@ from content_hub_v2_projection import (
     build_delivery_manifest, bundle_key,
 )
 
-SOURCE_ROOT = "private/test/thehairnarrative.com/journal-owner/thehairnarrative-com/thehairnarrative-com-journal/articles/"
+SOURCE_ROOT = coordinate("private/test/thehairnarrative.com/journal-owner/thehairnarrative-com/thehairnarrative-com-journal/articles/")
 MAX_OBJECT_BYTES = 4_194_304
 
 

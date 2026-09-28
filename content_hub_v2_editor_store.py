@@ -1,6 +1,9 @@
 """Exact-key DynamoDB/S3 adapter for private editor state; no v1 imports."""
 from __future__ import annotations
 
+from thn_environment_coordinates import coordinate
+from thn_environment_profile import PROFILE
+
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -118,7 +121,7 @@ class AwsEditorStore:
             put.update({"ConditionExpression": "concurrencyToken = :previous AND recordPurpose = :purpose",
                         "ExpressionAttributeValues": marshal_item({":previous": expected, ":purpose": self.auth.account_purpose})})
         references = self._reference_updates(value, expected)
-        audit = {"pk": f"AUDIT#test#thehairnarrative.com#thehairnarrative-com-journal#{safe_id(value['articleId'])}",
+        audit = {"pk": f"{coordinate('AUDIT#test#thehairnarrative.com#thehairnarrative-com-journal#')}{safe_id(value['articleId'])}",
                  "sk": "EVENT#" + safe_id(value.get("concurrencyToken") or self.new_id()),
                  "operation": "createArticle" if expected is None else "updatePackage",
                  "articleId": value["articleId"], "timestamp": self.now(),

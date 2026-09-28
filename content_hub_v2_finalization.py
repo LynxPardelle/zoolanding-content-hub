@@ -4,6 +4,9 @@ The caller supplies server-resolved bindings and fresh registry/actor/session
 guards. All content is loaded from pinned private packages, never from a browser
 payload. This candidate is local-only until publisher/IAM/release gates pass.
 """
+
+from thn_environment_coordinates import coordinate
+from thn_environment_profile import PROFILE
 from copy import deepcopy
 from datetime import datetime,timezone
 import json
@@ -88,10 +91,10 @@ class _Transaction:
 class AwsPublicationStore(AwsPreparationStore):
     def __init__(self,*,private_bucket,public_table,**kwargs):
         super().__init__(**kwargs)
-        if (private_bucket!=f"zlp-thn-ch-test-private-{kwargs['account_id']}-{kwargs['region']}"
+        if (private_bucket!=f"{coordinate('zlp-thn-ch-test-private-')}{kwargs['account_id']}{coordinate('-')}{kwargs['region']}"
                 or not isinstance(public_table,str) or re.fullmatch(r"[A-Za-z0-9_.-]{3,255}",public_table) is None
                 or public_table in {METADATA_TABLE,AUDIT_TABLE,USER_TABLE,SESSION_TABLE,
-                    "zoolanding-content-hub-test-ServiceBindingRegistryV2"}
+                    coordinate("zoolanding-content-hub-test-ServiceBindingRegistryV2")}
                 or private_bucket==self.delivery_bucket):
             _reject("invalid_publication_binding")
         self.private_bucket,self.public_table=private_bucket,public_table
@@ -361,9 +364,9 @@ class AwsPublicationStore(AwsPreparationStore):
                 old=cache[article,locale,previous][0];tx.put(METADATA_TABLE,{**old,"state":"retired"})
             if operation=="publish": tx.put(METADATA_TABLE,{**prepared,"state":"live"})
             manifest=update_manifest(tx,article,delta,epoch,operation_id)
-            outbox={"pk":f"OUTBOX#test#thehairnarrative.com#thehairnarrative-com-journal#PUBLICATION",
+            outbox={"pk":f"{coordinate('OUTBOX#test#thehairnarrative.com#thehairnarrative-com-journal#PUBLICATION')}",
                 "sk":"OPERATION#"+operation_id,"recordType":"THN_CONTENT_HUB_V2_INVALIDATION_OUTBOX","schemaVersion":1,
-                "environment":"test","domain":"thehairnarrative.com","hubId":"thehairnarrative-com-journal",
+                "environment":coordinate("test"),"domain":"thehairnarrative.com","hubId":"thehairnarrative-com-journal",
                 "source":"publication","operation":operation,"articleId":article,"locale":locale,
                 "manifestId":manifest["manifestId"],"projectionDigest":manifest["projectionDigest"],"writerEpoch":epoch,
                 "status":"pending","paths":delta["invalidationPaths"],"pathCount":len(delta["invalidationPaths"]),"attemptCount":0}
@@ -371,7 +374,7 @@ class AwsPublicationStore(AwsPreparationStore):
             tx.put(METADATA_TABLE,outbox)
         elif before:
             check_live_membership(tx,article,delta["beforePointers"],epoch)
-        audit={"pk":f"AUDIT#test#thehairnarrative.com#thehairnarrative-com-journal#{article}","sk":"PUBLICATION#"+operation_id,
+        audit={"pk":f"{coordinate('AUDIT#test#thehairnarrative.com#thehairnarrative-com-journal#')}{article}","sk":"PUBLICATION#"+operation_id,
             "operation":operation,"articleId":article,"locale":locale,"actorHash":actor_hash,"writerEpoch":epoch,
             "timestampEpoch":now,"decision":"committed" if changed else "unchanged"}
         if tx.read(AUDIT_TABLE,{k:audit[k] for k in ("pk","sk")}) is not None: raise EditorConflict()

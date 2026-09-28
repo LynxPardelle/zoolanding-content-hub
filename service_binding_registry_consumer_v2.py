@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from thn_environment_coordinates import coordinate
+from thn_environment_profile import PROFILE
+
 import re
 from copy import deepcopy
 from typing import Any, Mapping
@@ -10,8 +13,8 @@ import service_binding_registry_v2 as registry
 from service_binding_registry_operator_lambda import marshal_item, unmarshal_item
 
 
-APPROVED_TABLE_NAME = "zoolanding-content-hub-test-ServiceBindingRegistryV2"
-APPROVED_PARTITION_KEY = "SERVICE_BINDING#test#thn-journal-test-v2"
+APPROVED_TABLE_NAME = coordinate("zoolanding-content-hub-test-ServiceBindingRegistryV2")
+APPROVED_PARTITION_KEY = coordinate("SERVICE_BINDING#test#thn-journal-test-v2")
 APPROVED_SORT_KEY = "REGISTRY#V2"
 
 _EXPECTED_DESCRIPTOR_FIELDS = frozenset(

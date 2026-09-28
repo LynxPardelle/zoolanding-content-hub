@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from thn_environment_coordinates import coordinate
+from thn_environment_profile import PROFILE
+
 import hashlib
 import json
 import os
@@ -10,12 +13,12 @@ import time
 from content_hub_v2_registry_fence import _condition_check
 from service_binding_registry_consumer_v2 import load_active_service_binding, marshal_item, unmarshal_item
 
-FUNCTION_NAME = "zoolanding-content-hub-test-ThnV2PrivateAssetCollector"
-TABLE = "zoolanding-content-hub-test-ThnContentHubV2Metadata"
-SCOPE = {"environment":"test","domain":"thehairnarrative.com","serviceBindingId":"thn-journal-test-v2",
+FUNCTION_NAME = coordinate("zoolanding-content-hub-test-ThnV2PrivateAssetCollector")
+TABLE = coordinate("zoolanding-content-hub-test-ThnContentHubV2Metadata")
+SCOPE = {"environment":coordinate("test"),"domain":"thehairnarrative.com","serviceBindingId":coordinate("thn-journal-test-v2"),
          "authProfileId":"journal-owner","tenantId":"thehairnarrative-com","hubId":"thehairnarrative-com-journal"}
-PK = "THN#test#thehairnarrative.com#journal-owner#thehairnarrative-com#thehairnarrative-com-journal#"
-SOURCE = "private/test/thehairnarrative.com/journal-owner/thehairnarrative-com/thehairnarrative-com-journal/"
+PK = coordinate("THN#test#thehairnarrative.com#journal-owner#thehairnarrative-com#thehairnarrative-com-journal#")
+SOURCE = coordinate("private/test/thehairnarrative.com/journal-owner/thehairnarrative-com/thehairnarrative-com-journal/")
 ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$")
 VARIANTS = ["w480","w768","w1200","w1600"]
 RETENTION_SECONDS = 7 * 24 * 60 * 60
@@ -107,7 +110,7 @@ class AwsPrivateAssetCollector:
         self.descriptor, self.scope, self.epoch = expected_descriptor, trusted_scope, writer_epoch
         if not isinstance(bucket, str) or not re.fullmatch(r"[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]", bucket):
             _reject()
-        if bucket != f"zlp-thn-private-upload-test-{trusted_scope.get('accountId')}-{trusted_scope.get('region')}":
+        if bucket != f"{coordinate('zlp-thn-private-upload-test-')}{trusted_scope.get('accountId')}{coordinate('-')}{trusted_scope.get('region')}":
             _reject()
 
     def _binding(self):
@@ -169,7 +172,7 @@ def lambda_handler(event, context):
             or type(event.get("writerEpoch")) is not int or event["writerEpoch"] < 1):
         _reject()
     if (getattr(context,"function_name",None) != FUNCTION_NAME
-            or not str(getattr(context,"invoked_function_arn","")).endswith(f":function:{FUNCTION_NAME}:test")):
+            or not str(getattr(context,"invoked_function_arn","")).endswith(f"{coordinate(':function:')}{FUNCTION_NAME}{coordinate(':test')}")):
         _reject()
     candidates = event["candidates"]
     if not isinstance(candidates,list) or len(candidates)>20:

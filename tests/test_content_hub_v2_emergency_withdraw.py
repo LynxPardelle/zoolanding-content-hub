@@ -614,6 +614,7 @@ class EmergencyWithdrawalInfrastructureTests(unittest.TestCase):
         self.assertEqual(
             set(builder.SOURCE_ALLOWLIST["ThnContentHubV2EmergencyWithdrawFunction"]),
             {
+                "thn_environment_profile.py", "thn_environment_coordinates.py",
                 "emergency_withdraw_lambda.py",
                 "content_hub_v2_projection_manifest.py",
                 "service_binding_registry_consumer_v2.py",

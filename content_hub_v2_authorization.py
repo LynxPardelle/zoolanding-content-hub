@@ -6,24 +6,27 @@ independent so its routes and authorization behavior cannot change implicitly.
 
 from __future__ import annotations
 
+from thn_environment_coordinates import coordinate
+from thn_environment_profile import PROFILE
+
 import re
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
 
-ALLOWED_ACCOUNT_PURPOSES = frozenset({"qa", "client-owner"})
-ALLOWED_WRITER_MODES = frozenset({"disabled", "qa-only", "client-owner"})
+ALLOWED_ACCOUNT_PURPOSES = frozenset({"client-owner"} | ({"qa"} if PROFILE["environment"]=="test" else set()))
+ALLOWED_WRITER_MODES = frozenset({"disabled", "client-owner"} | ({"qa-only"} if PROFILE["environment"]=="test" else set()))
 
 THN_CURRENT_USER_SCOPE = {
-    "environment": "test",
+    "environment": coordinate("test"),
     "domain": "thehairnarrative.com",
-    "serviceBindingId": "thn-journal-test-v2",
+    "serviceBindingId": coordinate("thn-journal-test-v2"),
     "authProfileId": "journal-owner",
     "tenantId": "thehairnarrative-com",
     "hubId": "thehairnarrative-com-journal",
 }
-THN_CURRENT_USER_PARTITION_KEY = "CURRENT_USER#test#thn-journal-test-v2"
+THN_CURRENT_USER_PARTITION_KEY = coordinate("CURRENT_USER#test#thn-journal-test-v2")
 THN_AUTH_PROFILE_ROLE = "journal-owner"
 SESSION_IDLE_SECONDS = 30 * 60
 SESSION_ABSOLUTE_SECONDS = 12 * 60 * 60

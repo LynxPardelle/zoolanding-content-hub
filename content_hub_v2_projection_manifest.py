@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from thn_environment_coordinates import coordinate
+from thn_environment_profile import PROFILE
+
 import hashlib
 import json
 import re
@@ -10,12 +13,12 @@ from copy import deepcopy
 from typing import Any
 
 SCHEMA_VERSION = 1
-ENVIRONMENT = "test"
+ENVIRONMENT = coordinate("test")
 DOMAIN = "thehairnarrative.com"
 HUB_ID = "thehairnarrative-com-journal"
 MANIFEST_PK = (
-    "THN#test#thehairnarrative.com#journal-owner#thehairnarrative-com#"
-    "thehairnarrative-com-journal#PROJECTION"
+    coordinate("THN#test#thehairnarrative.com#journal-owner#thehairnarrative-com#"
+    "thehairnarrative-com-journal#PROJECTION")
 )
 MANIFEST_SK = "MANIFEST#V1"
 MANIFEST_RECORD_TYPE = "THN_CONTENT_HUB_V2_PROJECTION_MANIFEST"
