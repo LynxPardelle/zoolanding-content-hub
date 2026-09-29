@@ -18,6 +18,27 @@ _ANCHORS=(
  (':test',':production'),('Aliastest','Aliasproduction'),
 )
 
+def _bind_production_rules(rules):
+    """Compile the exact operator equality; CloudFormation Rules cannot use Fn::Sub."""
+    expected={'Fn::Equals':[
+        {'Ref':'ThnContentHubV2EmergencyOperatorRoleArn'},
+        {'Fn::Sub':'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-thn-content-hub-production-operator'}]}
+    assertion=rules['ThnContentHubV2ActivationRule']['Assertions'][3]['Assert']
+    if assertion != expected:
+        raise ValueError('production_operator_rule_shape_invalid')
+    assertion['Fn::Equals'][1]='arn:aws:iam::765932874577:role/zoolanding-thn-content-hub-production-operator'
+    supported={'Fn::And','Fn::Contains','Fn::EachMemberEquals','Fn::EachMemberIn',
+               'Fn::Equals','Fn::Not','Fn::Or','Fn::RefAll','Fn::ValueOf','Fn::ValueOfAll'}
+    def inspect(value):
+        if isinstance(value,dict):
+            for key,child in value.items():
+                if key.startswith('Fn::') and key not in supported:
+                    raise ValueError('production_rule_function_unsupported')
+                inspect(child)
+        elif isinstance(value,list):
+            for child in value: inspect(child)
+    inspect(rules)
+
 def _project(value, sam=False):
     if isinstance(value,dict): return {key:_project(item,sam) for key,item in value.items()}
     if isinstance(value,list): return [_project(item,sam) for item in value]
@@ -37,7 +58,8 @@ def prepare_template(source):
     result['Parameters']['EnvironmentName']['Default']='prod';result['Parameters']['EnvironmentName']['AllowedValues']=['prod']
     result['Parameters']['ProvisionThnServiceBindingRegistryV2State']={'Type':'String','Default':'false','AllowedValues':['false','true']}
     result['Parameters']['ThnProductionDependencyGate']={'Type':'String','Default':'BLOCKED','AllowedValues':['BLOCKED','CONFIRMED_PRODUCTION_BINDINGS']}
-    result['Rules']=_project(result['Rules'],True);result['Conditions']=_project(result['Conditions'],True)
+    result['Rules']=_project(result['Rules'],True);_bind_production_rules(result['Rules'])
+    result['Conditions']=_project(result['Conditions'],True)
     result['Conditions']['IsThnProductionRegistryStateProvisioned']={'Fn::And':[{'Condition':'IsTestEnvironment'},{'Fn::Equals':[{'Ref':'ProvisionThnServiceBindingRegistryV2State'},'true']}]}
     result['Conditions']['HasServiceBindingRegistryOperatorRole']['Fn::And'].append({'Condition':'IsThnProductionRegistryStateProvisioned'})
     result['Rules']['ThnContentHubV2StateProvisioningRule']['Assertions'].append({'Assert':{'Fn::Equals':[{'Ref':'ProvisionThnServiceBindingRegistryV2State'},'true']},'AssertDescription':'Retained production registry state must be selected independently.'})
