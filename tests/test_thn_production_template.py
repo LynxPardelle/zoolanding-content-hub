@@ -6,6 +6,33 @@ from tools.prepare_thn_production_template import prepare_template
 ROOT=Path(__file__).resolve().parents[1]
 class ProductionTemplateTests(unittest.TestCase):
     def source(self): return yaml.safe_load((ROOT/'template.yaml').read_text())
+    def test_production_rules_bind_exact_operator_without_unsupported_substitution(self):
+        result=prepare_template(self.source())
+        assertion=result['Rules']['ThnContentHubV2ActivationRule']['Assertions'][3]['Assert']
+        self.assertEqual(assertion,{'Fn::Equals':[
+            {'Ref':'ThnContentHubV2EmergencyOperatorRoleArn'},
+            'arn:aws:iam::765932874577:role/zoolanding-thn-content-hub-production-operator']})
+        supported={'Fn::And','Fn::Contains','Fn::EachMemberEquals','Fn::EachMemberIn',
+                   'Fn::Equals','Fn::Not','Fn::Or','Fn::RefAll','Fn::ValueOf','Fn::ValueOfAll'}
+        def inspect(value):
+            if isinstance(value,dict):
+                for key,child in value.items():
+                    if key.startswith('Fn::'): self.assertIn(key,supported)
+                    inspect(child)
+            elif isinstance(value,list):
+                for child in value: inspect(child)
+        inspect(result['Rules'])
+    def test_production_rules_reject_changed_operator_or_other_unsupported_function(self):
+        source=self.source()
+        assertion=source['Rules']['ThnContentHubV2ActivationRule']['Assertions'][3]['Assert']
+        assertion['Fn::Equals'][1]={'Fn::Sub':'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/other'}
+        with self.assertRaisesRegex(ValueError,'production_operator_rule_shape_invalid'):
+            prepare_template(source)
+        source=self.source()
+        source['Rules']['ThnContentHubV2StateProvisioningRule']['Assertions'].append(
+            {'Assert':{'Fn::Equals':[{'Fn::Sub':'unexpected'},'value']}})
+        with self.assertRaisesRegex(ValueError,'production_rule_function_unsupported'):
+            prepare_template(source)
     def test_shared_v1_resources_are_preserved_and_only_private_routes_rebound(self):
         source=self.source();result=prepare_template(source)
         for logical,value in source['Resources'].items():
