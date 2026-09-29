@@ -16,6 +16,12 @@ class ProductionTemplateTests(unittest.TestCase):
             self.assertIn(sid,statements)
             self.assertIn(expected,statements[sid]['Principal']['AWS'])
         self.assertNotIn('zoolanding-content-hub-prod-deploy',json.dumps(policy))
+    def test_registry_policy_preserves_cloudformation_table_stabilization(self):
+        result=prepare_template(self.source())
+        statements={row['Sid']:row for row in result['Resources']['ServiceBindingRegistryV2Table']['Properties']['ResourcePolicy']['PolicyDocument']['Statement']}
+        allowed=statements['DenyRegistryDescribeOutsideMutationAndHubDeployment']['Condition']['ArnNotEquals']['aws:PrincipalArn']
+        expected={'Fn::Sub':'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-deployer-content-hub-production-cfn-exec'}
+        self.assertIn(expected,allowed)
     def test_production_rules_bind_exact_operator_without_unsupported_substitution(self):
         result=prepare_template(self.source())
         assertion=result['Rules']['ThnContentHubV2ActivationRule']['Assertions'][3]['Assert']
