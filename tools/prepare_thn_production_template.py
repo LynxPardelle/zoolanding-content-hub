@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 _ANCHORS=(
+ ('zoolanding-content-hub-test-deploy','zoolanding-content-hub-production-deploy'),
  ('zoolanding-content-hub-test','zoolanding-content-hub-prod'),
  ('zoolanding-auth-admin-test','zoolanding-auth-admin-prod'),
  ('zoolanding-image-upload-test','zoolanding-image-upload-production'),

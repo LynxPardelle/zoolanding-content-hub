@@ -1,4 +1,5 @@
 import copy
+import json
 from pathlib import Path
 import unittest
 import yaml
@@ -6,6 +7,15 @@ from tools.prepare_thn_production_template import prepare_template
 ROOT=Path(__file__).resolve().parents[1]
 class ProductionTemplateTests(unittest.TestCase):
     def source(self): return yaml.safe_load((ROOT/'template.yaml').read_text())
+    def test_registry_policy_uses_actual_production_deployment_role(self):
+        result=prepare_template(self.source())
+        policy=result['Resources']['ServiceBindingRegistryV2Table']['Properties']['ResourcePolicy']['PolicyDocument']
+        expected={'Fn::Sub':'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-production-deploy'}
+        statements={statement['Sid']:statement for statement in policy['Statement']}
+        for sid in ('AllowRegistryDeploymentBindingRead','DenyRegistryDeploymentReadOutsideBinding','DenyRegistryDeploymentReadMissingKeys'):
+            self.assertIn(sid,statements)
+            self.assertIn(expected,statements[sid]['Principal']['AWS'])
+        self.assertNotIn('zoolanding-content-hub-prod-deploy',json.dumps(policy))
     def test_production_rules_bind_exact_operator_without_unsupported_substitution(self):
         result=prepare_template(self.source())
         assertion=result['Rules']['ThnContentHubV2ActivationRule']['Assertions'][3]['Assert']
