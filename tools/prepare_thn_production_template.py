@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 _ANCHORS=(
+ ('zoolanding-content-hub-test-deploy','zoolanding-content-hub-production-deploy'),
  ('zoolanding-content-hub-test','zoolanding-content-hub-prod'),
  ('zoolanding-auth-admin-test','zoolanding-auth-admin-prod'),
  ('zoolanding-image-upload-test','zoolanding-image-upload-production'),
@@ -71,6 +72,14 @@ def prepare_template(source):
         if projected.get('Type')=='AWS::Serverless::Function':
             projected['Properties'].setdefault('Environment',{}).setdefault('Variables',{})['THN_DEPLOYMENT_ENVIRONMENT']='production'
         result['Resources'][logical]=projected
+    registry_policy=result['Resources']['ServiceBindingRegistryV2Table']['Properties']['ResourcePolicy']['PolicyDocument']
+    describe=next((item for item in registry_policy['Statement'] if item.get('Sid')=='DenyRegistryDescribeOutsideMutationAndHubDeployment'),None)
+    expected=[{'Fn::GetAtt':['ServiceBindingRegistryV2MutationRole','Arn']},
+              {'Fn::Sub':'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-production-deploy'}]
+    if not describe or describe.get('Effect')!='Deny' or describe.get('Principal')!='*' or describe.get('Action')!=['dynamodb:DescribeTable'] or describe.get('Condition',{}).get('ArnNotEquals',{}).get('aws:PrincipalArn')!=expected:
+        raise ValueError('production_registry_describe_policy_shape_invalid')
+    describe['Condition']['ArnNotEquals']['aws:PrincipalArn'].append(
+        {'Fn::Sub':'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-deployer-content-hub-production-cfn-exec'})
     result['Parameters']['ThnProductionOwnerPoolArn']={'Type':'String','Default':'BLOCKED','NoEcho':True,'AllowedPattern':'^(BLOCKED|arn:aws:cognito-idp:us-east-1:765932874577:userpool/us-east-1_[A-Za-z0-9]+)$'}
     result['Conditions']['HasThnProductionOwnerPoolArn']={'Fn::Not':[{'Fn::Equals':[{'Ref':'ThnProductionOwnerPoolArn'},'BLOCKED']}]}
     result['Resources']['ServiceBindingRegistryV2MutationFunction']['Properties']['Environment']['Variables']['THN_PRODUCTION_OWNER_POOL_ARN']={'Ref':'ThnProductionOwnerPoolArn'}

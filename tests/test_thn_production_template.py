@@ -1,4 +1,5 @@
 import copy
+import json
 from pathlib import Path
 import unittest
 import yaml
@@ -6,6 +7,21 @@ from tools.prepare_thn_production_template import prepare_template
 ROOT=Path(__file__).resolve().parents[1]
 class ProductionTemplateTests(unittest.TestCase):
     def source(self): return yaml.safe_load((ROOT/'template.yaml').read_text())
+    def test_registry_policy_uses_actual_production_deployment_role(self):
+        result=prepare_template(self.source())
+        policy=result['Resources']['ServiceBindingRegistryV2Table']['Properties']['ResourcePolicy']['PolicyDocument']
+        expected={'Fn::Sub':'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-content-hub-production-deploy'}
+        statements={statement['Sid']:statement for statement in policy['Statement']}
+        for sid in ('AllowRegistryDeploymentBindingRead','DenyRegistryDeploymentReadOutsideBinding','DenyRegistryDeploymentReadMissingKeys'):
+            self.assertIn(sid,statements)
+            self.assertIn(expected,statements[sid]['Principal']['AWS'])
+        self.assertNotIn('zoolanding-content-hub-prod-deploy',json.dumps(policy))
+    def test_registry_policy_preserves_cloudformation_table_stabilization(self):
+        result=prepare_template(self.source())
+        statements={row['Sid']:row for row in result['Resources']['ServiceBindingRegistryV2Table']['Properties']['ResourcePolicy']['PolicyDocument']['Statement']}
+        allowed=statements['DenyRegistryDescribeOutsideMutationAndHubDeployment']['Condition']['ArnNotEquals']['aws:PrincipalArn']
+        expected={'Fn::Sub':'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-deployer-content-hub-production-cfn-exec'}
+        self.assertIn(expected,allowed)
     def test_production_rules_bind_exact_operator_without_unsupported_substitution(self):
         result=prepare_template(self.source())
         assertion=result['Rules']['ThnContentHubV2ActivationRule']['Assertions'][3]['Assert']
