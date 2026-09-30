@@ -1,0 +1,5 @@
+# THN production import preview response
+
+The protected review run [36758061388](https://github.com/LynxPardelle/zoolanding-content-hub/actions/runs/36758061388) passed its source and live AWS preflight, then stopped at `production_import_preview_baseline_changed`. CloudFormation's `DescribeChangeSet` response omitted `ChangeSetType`, although the request explicitly used `IMPORT` and the response contained exactly the four expected `Import` actions. Its stack ID and six parameters matched the protected baseline; its original template matched the proposed import template; its processed template preserved all 17 existing definitions and contained the four retained resources.
+
+The temporary change set was deleted without execution. The stack remains `UPDATE_ROLLBACK_COMPLETE` with 17 resources. The guard now accepts an absent `ChangeSetType` in the response while rejecting an explicitly different value; the exact import inventory remains mandatory. The focused 16 tests and full 537-test suite passed locally. A new protected review still requires separate authorization; no import execution was approved.

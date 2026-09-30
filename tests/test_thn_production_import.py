@@ -307,6 +307,7 @@ class ImportRunnerTests(unittest.TestCase):
         class FakeCloudFormation:
             changes = import_changes()
             preview_parameters = baseline['parameters']
+            preview_type = None  # DescribeChangeSet omits the request's ChangeSetType.
             def create_change_set(self, **kwargs):
                 assert kwargs['ChangeSetType'] == 'IMPORT'
                 assert len(kwargs['ResourcesToImport']) == 4
@@ -316,9 +317,12 @@ class ImportRunnerTests(unittest.TestCase):
                 assert name == 'change_set_create_complete'
                 return FakeWaiter()
             def describe_change_set(self, **kwargs):
-                return {'Status': 'CREATE_COMPLETE', 'ExecutionStatus': 'AVAILABLE',
-                        'StackId': baseline['stackId'], 'ChangeSetType': 'IMPORT',
-                        'Parameters': self.preview_parameters, 'Changes': self.changes}
+                result = {'Status': 'CREATE_COMPLETE', 'ExecutionStatus': 'AVAILABLE',
+                          'StackId': baseline['stackId'],
+                          'Parameters': self.preview_parameters, 'Changes': self.changes}
+                if self.preview_type is not None:
+                    result['ChangeSetType'] = self.preview_type
+                return result
             def get_template(self, **kwargs):
                 return {'TemplateBody': candidate if kwargs['TemplateStage'] == 'Original'
                         else processed_candidate}
@@ -346,6 +350,12 @@ class ImportRunnerTests(unittest.TestCase):
             'ResourceType': 'AWS::S3::Bucket'}}]
         with self.assertRaises(target.ImportError):
             runner.create_preview(changed, captured,
+                                  {'bucket': 'example', 'key': 'template.json',
+                                   'versionId': 'v1'}, '100/1', 'review')
+        wrong_type = FakeSession()
+        wrong_type.cf.preview_type = 'UPDATE'
+        with self.assertRaises(target.ImportError):
+            runner.create_preview(wrong_type, captured,
                                   {'bucket': 'example', 'key': 'template.json',
                                    'versionId': 'v1'}, '100/1', 'review')
 
