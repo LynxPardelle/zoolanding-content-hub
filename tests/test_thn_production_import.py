@@ -291,7 +291,10 @@ class ImportRunnerTests(unittest.TestCase):
         processed = {'Resources': {f'Existing{i:02d}': {} for i in range(17)}}
         baseline = {
             'stackId': 'arn:aws:cloudformation:us-east-1:765932874577:stack/zoolanding-content-hub-prod/123',
-            'parameters': [{'ParameterKey': 'EnvironmentName', 'ParameterValue': 'prod'}],
+            'parameters': [
+                {'ParameterKey': 'EnvironmentName', 'ParameterValue': 'prod'},
+                {'ParameterKey': 'LogLevel', 'ParameterValue': 'INFO'},
+            ],
             'tags': [], 'processed': processed,
         }
         processed_candidate = deepcopy(processed)
@@ -344,6 +347,25 @@ class ImportRunnerTests(unittest.TestCase):
             omitted, captured,
             {'bucket': 'example', 'key': 'template.json', 'versionId': 'v1'},
             '100/1', 'review')[1]), 4)
+        reordered = FakeSession()
+        reordered.cf.preview_parameters = list(reversed(baseline['parameters']))
+        self.assertEqual(len(runner.create_preview(
+            reordered, captured,
+            {'bucket': 'example', 'key': 'template.json', 'versionId': 'v1'},
+            '100/1', 'review')[1]), 4)
+        duplicate = FakeSession()
+        duplicate.cf.preview_parameters = [baseline['parameters'][0]] * 2
+        with self.assertRaises(target.ImportError):
+            runner.create_preview(duplicate, captured,
+                                  {'bucket': 'example', 'key': 'template.json',
+                                   'versionId': 'v1'}, '100/1', 'review')
+        altered = FakeSession()
+        altered.cf.preview_parameters = deepcopy(baseline['parameters'])
+        altered.cf.preview_parameters[1]['ParameterValue'] = 'DEBUG'
+        with self.assertRaises(target.ImportError):
+            runner.create_preview(altered, captured,
+                                  {'bucket': 'example', 'key': 'template.json',
+                                   'versionId': 'v1'}, '100/1', 'review')
         changed = FakeSession()
         changed.cf.changes = import_changes() + [{'Type': 'Resource', 'ResourceChange': {
             'Action': 'Modify', 'LogicalResourceId': 'Existing00',
