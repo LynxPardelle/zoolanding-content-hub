@@ -1,5 +1,6 @@
 """Fail-closed checks for recovering retained production Hub resources."""
 from copy import deepcopy
+from collections import OrderedDict
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from contextlib import redirect_stdout
@@ -289,6 +290,10 @@ class ImportRunnerTests(unittest.TestCase):
         original = current_template()
         candidate = target.build_import_template(original, source_template())
         processed = {'Resources': {f'Existing{i:02d}': {} for i in range(17)}}
+        processed['Resources']['Existing00'] = OrderedDict([
+            ('Type', 'AWS::S3::Bucket'),
+            ('Properties', OrderedDict([('First', 'one'), ('Second', 'two')])),
+        ])
         baseline = {
             'stackId': 'arn:aws:cloudformation:us-east-1:765932874577:stack/zoolanding-content-hub-prod/123',
             'parameters': [
@@ -298,6 +303,10 @@ class ImportRunnerTests(unittest.TestCase):
             'tags': [], 'processed': processed,
         }
         processed_candidate = deepcopy(processed)
+        processed_candidate['Resources']['Existing00'] = OrderedDict([
+            ('Properties', OrderedDict([('Second', 'two'), ('First', 'one')])),
+            ('Type', 'AWS::S3::Bucket'),
+        ])
         processed_candidate['Resources'].update({key: value for key, value in
                                                   candidate['Resources'].items() if key in target.TARGETS})
         arn = 'arn:aws:cloudformation:us-east-1:765932874577:changeSet/review/123'
@@ -311,6 +320,8 @@ class ImportRunnerTests(unittest.TestCase):
             changes = import_changes()
             preview_parameters = baseline['parameters']
             preview_type = None  # DescribeChangeSet omits the request's ChangeSetType.
+            preview_original = OrderedDict(reversed(list(candidate.items())))
+            preview_processed = processed_candidate
             def create_change_set(self, **kwargs):
                 assert kwargs['ChangeSetType'] == 'IMPORT'
                 assert len(kwargs['ResourcesToImport']) == 4
@@ -327,16 +338,17 @@ class ImportRunnerTests(unittest.TestCase):
                     result['ChangeSetType'] = self.preview_type
                 return result
             def get_template(self, **kwargs):
-                return {'TemplateBody': candidate if kwargs['TemplateStage'] == 'Original'
-                        else processed_candidate}
+                return {'TemplateBody': self.preview_original if kwargs['TemplateStage'] == 'Original'
+                        else self.preview_processed}
 
         class FakeSession:
-            cf = FakeCloudFormation()
+            def __init__(self):
+                self.cf = FakeCloudFormation()
             def client(self, service):
                 assert service == 'cloudformation'
                 return self.cf
 
-        captured = {'baseline': baseline, 'candidate': candidate}
+        captured = {'baseline': baseline, 'candidate': OrderedDict(candidate.items())}
         self.assertEqual(len(runner.create_preview(
             FakeSession(), captured,
             {'bucket': 'example', 'key': 'template.json', 'versionId': 'v1'},
@@ -364,6 +376,21 @@ class ImportRunnerTests(unittest.TestCase):
         altered.cf.preview_parameters[1]['ParameterValue'] = 'DEBUG'
         with self.assertRaises(target.ImportError):
             runner.create_preview(altered, captured,
+                                  {'bucket': 'example', 'key': 'template.json',
+                                   'versionId': 'v1'}, '100/1', 'review')
+        altered_processed = FakeSession()
+        altered_processed.cf.preview_processed = deepcopy(processed_candidate)
+        altered_processed.cf.preview_processed['Resources']['Existing00'][
+            'Properties']['First'] = 'changed'
+        with self.assertRaises(target.ImportError):
+            runner.create_preview(altered_processed, captured,
+                                  {'bucket': 'example', 'key': 'template.json',
+                                   'versionId': 'v1'}, '100/1', 'review')
+        altered_original = FakeSession()
+        altered_original.cf.preview_original = deepcopy(altered_original.cf.preview_original)
+        altered_original.cf.preview_original['Transform'] = 'wrong'
+        with self.assertRaises(target.ImportError):
+            runner.create_preview(altered_original, captured,
                                   {'bucket': 'example', 'key': 'template.json',
                                    'versionId': 'v1'}, '100/1', 'review')
         changed = FakeSession()
