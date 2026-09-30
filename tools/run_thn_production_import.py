@@ -287,6 +287,38 @@ def create_preview(session, captured, coordinate, run_id, phase):
     return arn, changes, release.sha(sorted(preview['Changes'], key=release.canonical))
 
 
+def capture_change_labels(before, after):
+    """Name changed capture fields without logging private provider values."""
+    labels = []
+    if release.sha(before['baseline']) != release.sha(after['baseline']):
+        labels.append('baseline')
+    if before['permissionSha256'] != after['permissionSha256']:
+        labels.append('permissions')
+    if before['templateBytes'] != after['templateBytes']:
+        labels.append('template')
+
+    def target_paths(left, right, path):
+        if isinstance(left, dict) and isinstance(right, dict):
+            for key in sorted(set(left) | set(right)):
+                label = key if isinstance(key, str) and re.fullmatch(r'[A-Za-z0-9_]+', key) else 'field'
+                if key not in left or key not in right:
+                    yield f'{path}.{label}'
+                else:
+                    yield from target_paths(left[key], right[key], f'{path}.{label}')
+        elif isinstance(left, list) and isinstance(right, list):
+            if len(left) != len(right):
+                yield path
+            else:
+                for index, (old, new) in enumerate(zip(left, right)):
+                    yield from target_paths(old, new, f'{path}.{index}')
+        elif release.sha(left) != release.sha(right):
+            yield path
+
+    if release.sha(before['target']) != release.sha(after['target']):
+        labels.extend(target_paths(before['target'], after['target'], 'target'))
+    return sorted(set(labels))[:32]
+
+
 def review(session, captured, source_sha, run_id, output_path):
     coordinate = release.seal_object(
         session.client('s3'), CONFIG['bucket'],
@@ -294,22 +326,33 @@ def review(session, captured, source_sha, run_id, output_path):
         captured['templateBytes'])
     arn, changes, native_sha = create_preview(session, captured, coordinate, run_id,
                                                'review')
-    record = guard.make_import_review_record(
-        source_sha=source_sha, stack_id=captured['baseline']['stackId'],
-        baseline_sha=release.sha(captured['baseline']),
-        target_sha=release.sha(captured['target']),
-        template_sha=release.sha(captured['templateBytes']),
-        template_coordinate=coordinate,
-        registry_policy_revision=captured['target']['policyRevision'],
-        registry_policy_sha=captured['target']['policySha256'],
-        permission_sha=captured['permissionSha256'], native_inventory_sha=native_sha,
-        changes=[
-            {'Type': 'Resource', 'ResourceChange': change} for change in changes],
-        created_at=int(time.time()))
-    Path(output_path).write_text(json.dumps(record, sort_keys=True, indent=2) + '\n')
-    session.client('cloudformation').delete_change_set(ChangeSetName=arn)
-    print(json.dumps({'digest': record['digest'], 'changes': record['changes'],
-                      'expiresAt': record['expiresAt']}))
+    try:
+        fresh = capture(session, run_id, source_sha)
+        stable = (release.sha(fresh['baseline']) == release.sha(captured['baseline'])
+                  and release.sha(fresh['target']) == release.sha(captured['target'])
+                  and fresh['permissionSha256'] == captured['permissionSha256']
+                  and fresh['templateBytes'] == captured['templateBytes'])
+        if not stable:
+            print(json.dumps({'preexecuteChanged':
+                              capture_change_labels(captured, fresh) or ['unclassified']}))
+            raise guard.ImportError('production_import_preexecute_state_changed')
+        record = guard.make_import_review_record(
+            source_sha=source_sha, stack_id=captured['baseline']['stackId'],
+            baseline_sha=release.sha(captured['baseline']),
+            target_sha=release.sha(captured['target']),
+            template_sha=release.sha(captured['templateBytes']),
+            template_coordinate=coordinate,
+            registry_policy_revision=captured['target']['policyRevision'],
+            registry_policy_sha=captured['target']['policySha256'],
+            permission_sha=captured['permissionSha256'], native_inventory_sha=native_sha,
+            changes=[
+                {'Type': 'Resource', 'ResourceChange': change} for change in changes],
+            created_at=int(time.time()))
+        Path(output_path).write_text(json.dumps(record, sort_keys=True, indent=2) + '\n')
+        print(json.dumps({'digest': record['digest'], 'changes': record['changes'],
+                          'expiresAt': record['expiresAt']}))
+    finally:
+        session.client('cloudformation').delete_change_set(ChangeSetName=arn)
 
 
 def execute(session, captured, source_sha, run_id, record_path, approved_digest):
@@ -328,19 +371,29 @@ def execute(session, captured, source_sha, run_id, record_path, approved_digest)
     guard.require(body == captured['templateBytes'], 'production_import_sealed_template_changed')
     arn, changes, native_sha = create_preview(
         session, captured, record['templateCoordinate'], run_id, 'execute')
-    guard.require(changes == record['changes'] and
-                  native_sha == record['nativeInventorySha256'],
-                  'production_import_inventory_changed')
-    # Repeat all read-only proofs immediately before the irreversible import.
-    fresh = capture(session, run_id, source_sha)
-    guard.require(release.sha(fresh['baseline']) == record['baselineSha256']
+    try:
+        guard.require(changes == record['changes'] and
+                      native_sha == record['nativeInventorySha256'],
+                      'production_import_inventory_changed')
+        # Repeat all read-only proofs immediately before the irreversible import.
+        fresh = capture(session, run_id, source_sha)
+        stable = (release.sha(fresh['baseline']) == record['baselineSha256']
                   and release.sha(fresh['target']) == record['targetSha256']
                   and fresh['target']['policyRevision'] == record['registryPolicyRevision']
                   and fresh['target']['policySha256'] == record['registryPolicySha256']
                   and fresh['permissionSha256'] == record['permissionSha256']
-                  and fresh['templateBytes'] == body,
-                  'production_import_preexecute_state_changed')
-    sealed_source(source_sha)
+                  and fresh['templateBytes'] == body)
+        if not stable:
+            print(json.dumps({'preexecuteChanged':
+                              capture_change_labels(captured, fresh) or ['unclassified']}))
+            raise guard.ImportError('production_import_preexecute_state_changed')
+        sealed_source(source_sha)
+    except Exception:
+        try:
+            session.client('cloudformation').delete_change_set(ChangeSetName=arn)
+        except Exception:
+            print('production_import_preview_cleanup_failed')
+        raise
     session.client('cloudformation').execute_change_set(
         ChangeSetName=arn, ClientRequestToken=f'thn-hub-import-{record["digest"]}')
     cf = session.client('cloudformation')

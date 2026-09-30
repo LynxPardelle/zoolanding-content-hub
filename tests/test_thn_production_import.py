@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 from contextlib import redirect_stdout
 import io
 import json
+import time
 import unittest
 from unittest.mock import patch
 
@@ -479,6 +480,7 @@ class ImportRunnerTests(unittest.TestCase):
                  patch.object(runner, 'create_preview', return_value=(
                      'arn:aws:cloudformation:us-east-1:765932874577:changeSet/review/123',
                      target.validate_import_inventory(import_changes()), '1' * 64)), \
+                 patch.object(runner, 'capture', return_value=captured), \
                  redirect_stdout(io.StringIO()):
                 runner.review(session, captured, source_sha, '100/1', path)
             record = json.loads(path.read_text())
@@ -487,6 +489,124 @@ class ImportRunnerTests(unittest.TestCase):
         self.assertNotIn('PolicyDocument', json.dumps(record))
         self.assertNotIn('Statement', json.dumps(record))
         self.assertNotIn('ParameterValue', json.dumps(record))
+
+    def test_review_detects_target_drift_and_deletes_preview_without_raw_values(self):
+        arn = 'arn:aws:cloudformation:us-east-1:765932874577:changeSet/review/123'
+
+        class FakeCF:
+            deleted = []
+            def delete_change_set(self, **kwargs):
+                self.deleted.append(kwargs['ChangeSetName'])
+
+        class FakeSession:
+            cf = FakeCF()
+            def client(self, name):
+                return self.cf if name == 'cloudformation' else object()
+
+        source_sha = 'a' * 40
+        body = b'private-template'
+        coordinate = {
+            'bucket': runner.CONFIG['bucket'],
+            'key': f'thn/production/hub/import/{source_sha}/100/1/import-original.json',
+            'versionId': 'v1', 'sha256': release.sha(body)}
+        captured = {
+            'baseline': {'stackId': 'arn:aws:cloudformation:us-east-1:765932874577:stack/zoolanding-content-hub-prod/123'},
+            'templateBytes': body,
+            'target': {'policyRevision': '123', 'policySha256': 'd' * 64,
+                       'tables': {'ServiceBindingRegistryV2Table': {
+                           'Table': {'TableId': 'old-id'}}}},
+            'permissionSha256': 'e' * 64,
+        }
+        fresh = deepcopy(captured)
+        fresh['target']['tables']['ServiceBindingRegistryV2Table']['Table']['TableId'] = 'private-marker'
+        session = FakeSession()
+        output = io.StringIO()
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / 'review.json'
+            with patch.object(runner.release, 'seal_object', return_value=coordinate), \
+                 patch.object(runner, 'create_preview', return_value=(
+                     arn, target.validate_import_inventory(import_changes()), '1' * 64)), \
+                 patch.object(runner, 'capture', return_value=fresh), \
+                 redirect_stdout(output):
+                with self.assertRaises(target.ImportError):
+                    runner.review(session, captured, source_sha, '100/1', path)
+            self.assertFalse(path.exists())
+        self.assertEqual(session.cf.deleted, [arn])
+        self.assertIn('target.tables.ServiceBindingRegistryV2Table.Table.TableId', output.getvalue())
+        self.assertNotIn('private-marker', output.getvalue())
+
+    def test_diagnostic_preserves_type_sensitive_target_fingerprint(self):
+        before = {
+            'baseline': {}, 'templateBytes': b'template', 'permissionSha256': 'e' * 64,
+            'target': {'tables': {'ServiceBindingRegistryV2Table': {
+                'PointInTimeRecoveryDescription': {'RecoveryPeriodInDays': 1}}}},
+        }
+        after = deepcopy(before)
+        after['target']['tables']['ServiceBindingRegistryV2Table'][
+            'PointInTimeRecoveryDescription']['RecoveryPeriodInDays'] = 1.0
+        self.assertEqual(runner.capture_change_labels(before, after), [
+            'target.tables.ServiceBindingRegistryV2Table.PointInTimeRecoveryDescription.RecoveryPeriodInDays'])
+
+    def test_execute_deletes_preview_when_last_read_detects_drift(self):
+        source_sha = 'a' * 40
+        stack_id = ('arn:aws:cloudformation:us-east-1:765932874577:'
+                    'stack/zoolanding-content-hub-prod/123')
+        arn = 'arn:aws:cloudformation:us-east-1:765932874577:changeSet/execute/123'
+        body = b'private-template'
+        captured = {
+            'baseline': {'stackId': stack_id},
+            'templateBytes': body,
+            'target': {'policyRevision': '123', 'policySha256': 'd' * 64,
+                       'tables': {'ServiceBindingRegistryV2Table': {
+                           'Table': {'TableId': 'old-id'}}}},
+            'permissionSha256': 'e' * 64,
+        }
+        fresh = deepcopy(captured)
+        fresh['target']['tables']['ServiceBindingRegistryV2Table']['Table']['TableId'] = 'private-marker'
+        coordinate = {
+            'bucket': runner.CONFIG['bucket'],
+            'key': f'thn/production/hub/import/{source_sha}/100/1/import-original.json',
+            'versionId': 'v1', 'sha256': release.sha(body)}
+        record = target.make_import_review_record(
+            source_sha=source_sha, stack_id=stack_id,
+            baseline_sha=release.sha(captured['baseline']),
+            target_sha=release.sha(captured['target']), template_sha=release.sha(body),
+            template_coordinate=coordinate, registry_policy_revision='123',
+            registry_policy_sha='d' * 64, permission_sha='e' * 64,
+            native_inventory_sha='1' * 64, changes=import_changes(),
+            created_at=int(time.time()))
+
+        class FakeCF:
+            deleted = []
+            executed = []
+            def delete_change_set(self, **kwargs):
+                self.deleted.append(kwargs['ChangeSetName'])
+            def execute_change_set(self, **kwargs):
+                self.executed.append(kwargs['ChangeSetName'])
+
+        class FakeSession:
+            cf = FakeCF()
+            def client(self, name):
+                return self.cf if name == 'cloudformation' else object()
+
+        session = FakeSession()
+        output = io.StringIO()
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / 'review.json'
+            path.write_text(json.dumps(record))
+            with patch.object(runner.release, 'verify_object', return_value=body), \
+                 patch.object(runner, 'create_preview', return_value=(
+                     arn, record['changes'], record['nativeInventorySha256'])), \
+                 patch.object(runner, 'capture', return_value=fresh), \
+                 redirect_stdout(output):
+                with self.assertRaisesRegex(target.ImportError,
+                                            'production_import_preexecute_state_changed'):
+                    runner.execute(session, captured, source_sha, '200/1', path,
+                                   record['digest'])
+        self.assertEqual(session.cf.deleted, [arn])
+        self.assertEqual(session.cf.executed, [])
+        self.assertIn('target.tables.ServiceBindingRegistryV2Table.Table.TableId', output.getvalue())
+        self.assertNotIn('private-marker', output.getvalue())
 
 
 if __name__ == '__main__':
