@@ -1,0 +1,129 @@
+name: THN Production Retained Resource Import
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        type: choice
+        required: true
+        options: [review, execute]
+      source_sha:
+        type: string
+        required: true
+      review_run_id:
+        type: string
+        required: false
+      approved_digest:
+        type: string
+        required: false
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: thn-production-retained-hub
+  cancel-in-progress: false
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      OPERATION: ${{ inputs.operation }}
+      REVIEW_RUN_ID: ${{ inputs.review_run_id }}
+      APPROVED_DIGEST: ${{ inputs.approved_digest }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - name: Require current MAIN and exact operation inputs before credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          if [[ "$OPERATION" == review ]]; then
+            test -z "$REVIEW_RUN_ID"
+            test -z "$APPROVED_DIGEST"
+          else
+            [[ "$REVIEW_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+            [[ "$APPROVED_DIGEST" =~ ^[a-f0-9]{64}$ ]]
+          fi
+          python tools/run_thn_production_import.py validate --source-sha "$SOURCE_SHA" --approved-digest "$APPROVED_DIGEST"
+      - name: Install declared release guard dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements-import.txt
+      - name: Run offline import guards
+        run: python -m unittest discover -s tests -p 'test_thn_production_import.py'
+  operation:
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: production
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    env:
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      OPERATION: ${{ inputs.operation }}
+      REVIEW_RUN_ID: ${{ inputs.review_run_id }}
+      APPROVED_DIGEST: ${{ inputs.approved_digest }}
+      AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+      GH_TOKEN: ${{ github.token }}
+      AWS_EC2_METADATA_DISABLED: 'true'
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - name: Install declared release dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements-import.txt
+      - name: Require exact Hub role and current MAIN before credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$AWS_ROLE_ARN" = arn:aws:iam::765932874577:role/zoolanding-content-hub-production-deploy
+          python tools/run_thn_production_import.py validate --source-sha "$SOURCE_SHA" --approved-digest "$APPROVED_DIGEST"
+      - name: Verify successful matching review before downloading
+        if: inputs.operation == 'execute'
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$REVIEW_RUN_ID" > "$RUNNER_TEMP/import-review-run.json"
+          python - <<'PY'
+          import json,os,pathlib
+          value=json.loads((pathlib.Path(os.environ['RUNNER_TEMP'])/'import-review-run.json').read_text())
+          assert value['event']=='workflow_dispatch' and value['head_branch']=='main'
+          assert value['path']=='.github/workflows/import-thn-production-retained.yml'
+          assert value['status']=='completed' and value['conclusion']=='success'
+          assert value['head_sha']==os.environ['SOURCE_SHA']
+          PY
+          gh run download "$REVIEW_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "thn-production-hub-import-review-$REVIEW_RUN_ID" --dir retained-import-review
+          test "$(find retained-import-review -type f | wc -l)" = 1
+          cp retained-import-review/production-import-review.json production-import-review.json
+      - name: Assume bounded production Hub deployment identity
+        uses: aws-actions/configure-aws-credentials@517a711dbcd0e402f90c77e7e2f81e849156e31d # v6
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+          allowed-account-ids: '765932874577'
+      - name: Verify live stack, retained targets, policy, template and permissions
+        shell: bash
+        run: python tools/run_thn_production_import.py preflight --source-sha "$SOURCE_SHA"
+      - name: Review or execute exact retained import
+        shell: bash
+        run: python tools/run_thn_production_import.py "$OPERATION" --source-sha "$SOURCE_SHA" --record production-import-review.json --approved-digest "$APPROVED_DIGEST"
+      - name: Transport only hashes, identities and bounded object coordinate
+        if: inputs.operation == 'review'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: thn-production-hub-import-review-${{ github.run_id }}
+          path: production-import-review.json
+          retention-days: 30
+          if-no-files-found: error
