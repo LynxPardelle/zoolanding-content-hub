@@ -7,6 +7,7 @@ from pathlib import Path
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -15,6 +16,7 @@ import zipfile
 import io
 import base64
 import urllib.request
+from copy import deepcopy
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
@@ -220,10 +222,10 @@ def captured_baseline(session):
                 'original':release.parse_template(baseline['original']),
                 'processed':release.parse_template(baseline['processed'])}
         imported.validate_post_import_state_baseline(parsed)
-        targets=read_targets(session,parsed['original'])
+        targets=read_targets(session,parsed['original'],include_policy=True)
         imported.require(targets['policyRevision']=='1790716784435' and
-                         targets['policySha256']==
-                         '7a879e95713300b080111e7bf59aa81f550c6bed3dfc530a8b67ca857de5f54f',
+                         targets['policySemanticSha256']==
+                         '746729dad0f26e808c342c6c07fdc055a99ff197e43f7e8d1249d663985dbaf8',
                          'production_post_import_registry_policy_changed')
         baseline['postImportTargets']=targets
     if os.environ.get('THN_PRODUCTION_SELECTED_PURPOSE')=='activate':
@@ -291,9 +293,32 @@ def candidate_for_scope(candidate,baseline,purpose):
             if not name.startswith(('Thn','ServiceBinding','ProvisionThn','EnableThn')) and name!='EnvironmentName':
                 candidate['Parameters'][name]=item
         if CONFIG['service']=='hub' and purpose=='state' and set(imported.TARGETS) <= set(old['Resources']):
-            # Import already attached these resources. State only creates the
-            # remaining THN resources; the public API changes at activation.
-            for logical in (*imported.TARGETS,'ContentHubApi'):
+            # The imported Registry policy must bind the recreated mutation
+            # role. Keep every other imported property and the public API.
+            logical='ServiceBindingRegistryV2Table'
+            registry=deepcopy(candidate['Resources'].get(logical))
+            previous=old['Resources'][logical]
+            imported.require(isinstance(registry,dict) and
+                             'ServiceBindingRegistryV2MutationRole' in candidate['Resources'],
+                             'production_post_import_registry_transition_missing')
+            policy=registry.get('Properties',{}).get('ResourcePolicy')
+            imported.require(isinstance(policy,dict) and
+                             isinstance(policy.get('PolicyDocument'),dict) and
+                             policy['PolicyDocument'].get('Statement'),
+                             'production_post_import_registry_transition_missing')
+            imported.require(registry.get('Type')==previous.get('Type') and
+                             registry.get('DeletionPolicy')==previous.get('DeletionPolicy') and
+                             registry.get('UpdateReplacePolicy')==previous.get('UpdateReplacePolicy'),
+                             'production_post_import_registry_other_property_changed')
+            without_policy=deepcopy(registry['Properties'])
+            without_policy.pop('ResourcePolicy')
+            imported.require(without_policy==previous.get('Properties'),
+                             'production_post_import_registry_other_property_changed')
+            transitioned=deepcopy(previous)
+            transitioned['Properties']['ResourcePolicy']=policy
+            candidate['Resources'][logical]=transitioned
+            for logical in (*[name for name in imported.TARGETS if name!='ServiceBindingRegistryV2Table'],
+                            'ContentHubApi'):
                 candidate['Resources'][logical]=old['Resources'][logical]
     return candidate
 
@@ -315,6 +340,16 @@ def review(session,args,source,identity,permissions):
     else:
         packaged=release.parse_template(Path(args.template).read_text())
         packages=sealed_packages(session,packaged)
+        if CONFIG['service']=='hub' and args.purpose=='state':
+            imported.require(packaged['Resources']['ServiceBindingRegistryV2MutationRole']
+                             ['Properties'].get('RoleName') ==
+                             'zoolanding-thn-registry-production-mutation',
+                             'production_registry_mutation_role_changed')
+            imported.validate_registry_policy_transition(
+                baseline['postImportTargets']['policyDocument'],
+                packaged['Resources']['ServiceBindingRegistryV2Table']
+                    ['Properties']['ResourcePolicy']['PolicyDocument'],
+                imported.MUTATION_ROLE_ARN)
         packaged=candidate_for_scope(packaged,baseline,args.purpose)
     overrides=load_json(os.environ.get('THN_PRODUCTION_PARAMETERS_JSON','{}'))
     parameters=release.select_parameters(packaged.get('Parameters',{}),baseline['parameters'],overrides,purpose=args.purpose)
@@ -377,13 +412,27 @@ def fresh_execute_authority(session,record,source,purpose,preview,processed):
     release.require(source_selection(source['sourceSha'])==source,'production_source_changed_before_execute')
     baseline=captured_baseline(session)
     release.require(release.sha(baseline)==record['baselineSha256'],'production_baseline_changed_before_execute')
-    if CONFIG['service']=='hub' and purpose=='state' and 'postImportTargets' in baseline:
+    if CONFIG['service']=='hub' and purpose=='state':
+        imported.require('postImportTargets' in baseline,
+                         'production_post_import_targets_missing')
         imported.validate_post_import_state_inventory(preview['Changes'],baseline)
+        imported.validate_registry_policy_transition(
+            baseline['postImportTargets']['policyDocument'],
+            processed['Resources']['ServiceBindingRegistryV2Table']
+                ['Properties']['ResourcePolicy']['PolicyDocument'],
+            imported.MUTATION_ROLE_ARN)
     identity,permissions=identity_and_permissions(session,source,purpose,preview['Changes'],processed,
         release.parse_template(baseline['processed']))
     release.require(release.sha(identity)==record['identitySha256'] and
         release.sha(permissions)==record['permissionSha256'],'production_permissions_changed_before_execute')
     release.require(release.sha(source)==record['sourcePackageSha256'],'production_source_package_changed')
+
+
+def safe_failure_code(error):
+    if (isinstance(error,(release.ReleaseError,imported.ImportError)) and
+            re.fullmatch(r'production_[a-z0-9_]+',str(error))):
+        return str(error)
+    return type(error).__name__
 
 
 def main(argv=None):
@@ -437,7 +486,34 @@ def main(argv=None):
                     baseline=baseline,permissions=permissions,identity=identity,source_package=source,
                     authority_check=lambda:fresh_execute_authority(session,record,source,args.purpose,preview,release.parse_template(session.client('cloudformation').get_template(ChangeSetName=record['changeSetArn'],TemplateStage='Processed')['TemplateBody'])))
                 session.client('cloudformation').get_waiter('stack_create_complete' if baseline.get('absent') else 'stack_update_complete').wait(StackName=record['stackId'])
-                after=captured_baseline(session)
+                if CONFIG['service']=='hub' and args.purpose=='state':
+                    after=release.snapshot(session.client('cloudformation'),CONFIG['stack'])
+                    parsed_before={**baseline,
+                        'original':release.parse_template(baseline['original']),
+                        'processed':release.parse_template(baseline['processed'])}
+                    parsed_after={**after,
+                        'original':release.parse_template(after['original']),
+                        'processed':release.parse_template(after['processed'])}
+                    imported.validate_post_import_state_completion(
+                        parsed_before,parsed_after,preview['Changes'])
+                    release.require(release.sha(parsed_after['original'])==
+                                    record['originalTemplateSha256'],
+                                    'production_post_import_deployed_template_changed')
+                    mutation=next(row for row in after['resources'] if
+                        row['LogicalResourceId']=='ServiceBindingRegistryV2MutationRole')
+                    release.require(mutation['PhysicalResourceId']==
+                                    'zoolanding-thn-registry-production-mutation',
+                                    'production_registry_mutation_role_changed')
+                    registry=session.client('dynamodb').get_resource_policy(
+                        ResourceArn=('arn:aws:dynamodb:us-east-1:765932874577:table/'
+                            'zoolanding-content-hub-prod-ServiceBindingRegistryV2'))
+                    imported.validate_completed_registry_policy(
+                        load_json(registry['Policy']),
+                        parsed_after['original']['Resources']['ServiceBindingRegistryV2Table']
+                            ['Properties']['ResourcePolicy']['PolicyDocument'],
+                        imported.MUTATION_ROLE_ARN)
+                else:
+                    after=captured_baseline(session)
                 before={r['LogicalResourceId']:r['PhysicalResourceId'] for r in baseline.get('resources',[])}
                 current={r['LogicalResourceId']:r['PhysicalResourceId'] for r in after['resources']}
                 release.require(all(current.get(k)==v for k,v in before.items() if not k.startswith('Thn') or 'Version' not in k),
@@ -446,7 +522,7 @@ def main(argv=None):
         return 0
     except Exception as error:
         # Closed diagnostic codes only; never echo provider messages or inputs.
-        code=str(error) if isinstance(error,release.ReleaseError) else type(error).__name__
+        code=safe_failure_code(error)
         print('production_release_failed:'+code+'; retain preview and diagnose exact evidence before another run',file=sys.stderr)
         return 2
 if __name__=='__main__':raise SystemExit(main())

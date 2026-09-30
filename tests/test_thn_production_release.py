@@ -158,7 +158,7 @@ class EffectivePermissionDriverTests(unittest.TestCase):
             fresh_identity=identity if field!='identity' else {'role':'changed'}
             fresh_permissions=permissions if field!='permissions' else {'denied':True}
             fresh_source=source if field!='source' else {'sourceSha':'b'*40}
-            with patch.object(driver,'source_selection',return_value=fresh_source),patch.object(driver,'captured_baseline',return_value=fresh_baseline),patch.object(driver,'identity_and_permissions',return_value=(fresh_identity,fresh_permissions)):
+            with patch.object(driver,'CONFIG',{**driver.CONFIG,'service':'auth'}),patch.object(driver,'source_selection',return_value=fresh_source),patch.object(driver,'captured_baseline',return_value=fresh_baseline),patch.object(driver,'identity_and_permissions',return_value=(fresh_identity,fresh_permissions)):
                 if field=='none':driver.fresh_execute_authority(session,record,source,'state',preview,{'Resources':{}})
                 else:
                     with self.assertRaises(ReleaseError):driver.fresh_execute_authority(session,record,source,'state',preview,{'Resources':{}})
