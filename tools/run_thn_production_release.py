@@ -113,8 +113,8 @@ def identity_and_permissions(session,source,purpose,native_changes=None,native_t
     caller_actions=set().union(*(set(r.get('actions',[])) for r in plan['requests'] if r.get('principalArn')==role['Arn']))
     release.require(CALLER_ACTIONS<=caller_actions,'production_caller_permission_coverage_incomplete')
     schemas=[];required_execution=set()
-    from tools.thn_production_native_permissions import selected_actions
-    by_type={}
+    from tools.thn_production_native_permissions import selected_actions, prove_event_rule_resources
+    by_type={};selected_by_type={}
     for item in native_changes or []:
         change=item['ResourceChange'];by_type.setdefault(change['ResourceType'],[]).append(change)
     for kind in sorted(by_type):
@@ -122,6 +122,7 @@ def identity_and_permissions(session,source,purpose,native_changes=None,native_t
         schema=load_json(metadata['Schema'])
         permissions=selected_actions(kind,schema['handlers'],by_type[kind],native_template,previous)
         release.require(permissions,'production_native_handler_permissions_unavailable')
+        selected_by_type[kind]=permissions
         required_execution.update(permissions)
         schemas.append({'resourceType':kind,'schemaSha256':release.sha(schema),'handlerPermissions':sorted(permissions)})
     execution_actions=set().union(*(set(r.get('actions',[])) for r in plan['requests'] if r.get('principalArn')==execution['Arn']))
@@ -158,6 +159,9 @@ def identity_and_permissions(session,source,purpose,native_changes=None,native_t
             release.require(sorted(covered,key=str)==sorted(request['resources']),
                 'production_iam_simulation_resource_coverage_incomplete')
         proofs.append({'request':request,'evaluation':release.stable_simulation_evaluations(evaluations)})
+    if 'AWS::Events::Rule' in selected_by_type:
+        proofs.extend(prove_event_rule_resources(iam,plan['requests'],execution['Arn'],
+            selected_by_type['AWS::Events::Rule'],native_changes,native_template,CONFIG['stack']))
     # Full policy documents stay in memory, are fingerprinted and never emitted.
     def policies(name):
         values=[]
