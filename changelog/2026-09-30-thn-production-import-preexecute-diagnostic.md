@@ -1,0 +1,7 @@
+# THN production import: identify pre-execution state differences
+
+Protected import review [#36766617364](https://github.com/LynxPardelle/zoolanding-content-hub/actions/runs/36766617364) passed with exactly four `Import` actions. The separately approved execution [#36766926695](https://github.com/LynxPardelle/zoolanding-content-hub/actions/runs/36766926695) recreated that inventory but stopped at `production_import_preexecute_state_changed` before `ExecuteChangeSet`. Its unexecuted change set was removed. The production stack stayed protected at 17 resources; no import occurred.
+
+The old error combined baseline, target, permission, policy, and template comparisons, so it did not identify the changed field. Read-only checks after the run matched the reviewed baseline, template and permission fingerprints. The human IAM principal is explicitly denied access to the Registry table, so a complete target comparison requires the protected deployment role. The exact cause remains unconfirmed.
+
+The review now repeats the read-only capture while its four-resource preview exists. If a field differs, it reports only field paths, fails without creating a review record and deletes the preview. Execution reports the same bounded field paths and deletes its unexecuted preview on a pre-execution guard failure. Raw values, parameters and policy documents remain out of logs and review artifacts. No guard is relaxed, and a new review and digest approval will be required before another import attempt.
