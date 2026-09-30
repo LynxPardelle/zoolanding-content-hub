@@ -155,15 +155,22 @@ class PostImportStateTests(unittest.TestCase):
     def test_state_candidate_preserves_other_imported_declarations_and_public_api(self):
         baseline, targets = post_import_baseline()
         baseline["original"]["Resources"]["ContentHubApi"] = {"Type": "AWS::Serverless::HttpApi", "Properties": {"StageName": "prod"}}
+        baseline["original"]["Resources"]["ContentHubFunction"] = {
+            "Type": "AWS::Serverless::Function",
+            "Properties": {"CodeUri": "s3://historical/function.zip"}}
+        baseline["original"]["Parameters"]["LegacySetting"] = {
+            "Type": "String", "Default": "historical"}
         registry = copy.deepcopy(targets["ServiceBindingRegistryV2Table"])
         registry["Condition"] = "ProvisionRegistry"
         registry["Properties"]["ResourcePolicy"] = {"PolicyDocument": {"Statement": [
             {"Sid": "DenyUnapproved", "Effect": "Deny"}]}}
-        candidate = {"Parameters": {}, "Resources": {
+        candidate = {"Parameters": {"LegacySetting": {"Type": "String", "Default": "new"}}, "Resources": {
             **{name: {**value, "Condition": "ProvisionState", "Properties": {"changed": True}}
                for name, value in targets.items()},
             "ServiceBindingRegistryV2Table": registry,
             "ContentHubApi": {"Type": "AWS::Serverless::HttpApi", "Properties": {"StageName": "other"}},
+            "ContentHubFunction": {"Type": "AWS::Serverless::Function",
+                                   "Properties": {"CodeUri": "s3://new/function.zip"}},
             "ServiceBindingRegistryV2MutationRole": {"Type": "AWS::IAM::Role"},
             "ThnContentHubV2AuthoringRole": {"Type": "AWS::IAM::Role"},
         }}
@@ -174,6 +181,16 @@ class PostImportStateTests(unittest.TestCase):
         expected.pop("Condition")
         self.assertEqual(selected["Resources"]["ServiceBindingRegistryV2Table"], expected)
         self.assertIn("ThnContentHubV2AuthoringRole", selected["Resources"])
+        baseline["original"]["Resources"]["ContentHubFunction"]["Properties"]["CodeUri"] = {
+            "Bucket": "recovery", "Key": "previous.zip", "Version": "v1"}
+        baseline["original"]["Resources"]["ContentHubApi"]["Properties"]["StageName"] = "recovery"
+        baseline["original"]["Resources"]["ThnContentHubV2AuditTable"]["Properties"]["changed"] = True
+        baseline["original"]["Parameters"]["LegacySetting"]["Default"] = "recovery"
+        self.assertEqual(selected["Resources"]["ContentHubFunction"]["Properties"]["CodeUri"],
+                         "s3://historical/function.zip")
+        self.assertEqual(selected["Resources"]["ContentHubApi"]["Properties"]["StageName"], "prod")
+        self.assertNotIn("changed", selected["Resources"]["ThnContentHubV2AuditTable"]["Properties"])
+        self.assertEqual(selected["Parameters"]["LegacySetting"]["Default"], "historical")
 
     def test_state_candidate_restores_only_registry_policy(self):
         baseline, targets = post_import_baseline()
