@@ -28,15 +28,35 @@ The six Lambda versions marked `DELETE_SKIPPED` in stack events no longer
 exist. The production deployment-identities IAM patch is complete and the
 27 EventBridge permission simulations passed.
 
+## Prerequisite: bounded preflight reads
+
+The Hub production deployment role can describe the tables, but IAM
+simulation returns `implicitDeny` for `dynamodb:GetResourcePolicy` on the
+Registry table and for `s3:GetBucketVersioning`,
+`s3:GetEncryptionConfiguration`, `s3:GetBucketPublicAccessBlock`, and
+`s3:ListBucket` on the private bucket. The CloudFormation execution role
+has these reads, but the manual GitHub workflow cannot assume it directly.
+Before import, add one retained `AWS::IAM::Policy` to the production
+deployment-identities stack, attached only to
+`zoolanding-content-hub-production-deploy`. Its statements grant exactly
+those actions on the exact Registry table ARN and private bucket ARN.
+The protected IAM review must contain only this one `Add`, with no other
+changes or replacements; execution requires separate approval of its
+inventory and digest. Verify effective permissions afterward. If the
+bounded policy cannot pass review, stop rather than weakening import
+preflight.
+
 ## Recovery operation
 
-1. Capture a fresh, redacted baseline of stack ID/status, original and
+1. After the IAM prerequisite is verified, capture a fresh, redacted
+   baseline of stack ID/status, original and
    processed template digests, parameters, tags, 17 resource identities, and
    the four external identities and configurations. Record the Registry
    resource-policy revision and digest directly. Never log secret parameter
    values, table items, or object content.
 2. Build an import template from the **current** stack template, retaining
-   the current 17 resource definitions and parameter values. Add only the
+   its 10 original SAM resource definitions (which expand to 17 deployed
+   resources) and parameter values. Add only the
    four native resource declarations above with `DeletionPolicy: Retain` and
    `UpdateReplacePolicy: Retain`. Match live names and declared properties.
    For Registry, the interim declaration omits `ResourcePolicy`: its live
