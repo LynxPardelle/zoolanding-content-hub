@@ -276,10 +276,12 @@ def create_preview(session, captured, coordinate, run_id, phase):
         ChangeSetName=arn, TemplateStage='Original')['TemplateBody'])
     processed = release.parse_template(cf.get_template(
         ChangeSetName=arn, TemplateStage='Processed')['TemplateBody'])
-    guard.require(original == captured['candidate'] and
+    guard.require(release.canonical(original) ==
+                  release.canonical(captured['candidate']) and
                   set(processed.get('Resources', {})) ==
                   set(captured['baseline']['processed']['Resources']) | set(guard.TARGETS)
-                  and all(processed['Resources'][key] == value for key, value in
+                  and all(release.canonical(processed['Resources'][key]) ==
+                          release.canonical(value) for key, value in
                           captured['baseline']['processed']['Resources'].items()),
                   'production_import_processed_template_changed')
     return arn, changes, release.sha(sorted(preview['Changes'], key=release.canonical))
