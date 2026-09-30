@@ -121,19 +121,238 @@ def validate_post_import_state_baseline(baseline):
 
 
 def validate_post_import_state_inventory(changes, baseline):
-    """Initial state may add THN resources; the imported 21 stay untouched."""
+    """Initial state may add THN resources and rebind Registry policy only."""
     require(isinstance(changes, list) and isinstance(baseline, dict)
             and isinstance(baseline.get('resources'), list),
             'production_post_import_inventory_invalid')
     previous = {row.get('LogicalResourceId') for row in baseline['resources']}
+    require(sum(item.get('ResourceChange', {}).get('LogicalResourceId') ==
+                'ServiceBindingRegistryV2Table' and
+                item.get('ResourceChange', {}).get('Action') == 'Modify'
+                for item in changes) == 1,
+            'production_post_import_registry_transition_missing')
     for item in changes:
         change = item.get('ResourceChange', {})
         logical = change.get('LogicalResourceId')
+        if logical == 'ServiceBindingRegistryV2Table' and change.get('Action') == 'Modify':
+            details=change.get('Details',[])
+            require(change.get('ResourceType')=='AWS::DynamoDB::Table' and
+                    change.get('Replacement')=='False' and details and
+                    all(detail.get('Target',{}).get('Attribute')=='Properties' and
+                        detail.get('Target',{}).get('Name')=='ResourcePolicy' and
+                        detail.get('Target',{}).get('RequiresRecreation','Never')=='Never'
+                        for detail in details),
+                    'production_post_import_registry_transition_unreviewed')
+            continue
         require(change.get('Action') == 'Add' and change.get('Replacement') in (None, 'False')
                 and isinstance(logical, str) and logical not in previous
                 and logical.startswith(('Thn', 'ServiceBinding')),
                 'production_post_import_existing_resource_changed')
     return changes
+
+
+MUTATION_ALLOW_SIDS = frozenset({
+    'AllowRegistryMutationFunctionDescribe',
+    'AllowRegistryMutationFunctionExactRead',
+    'AllowRegistryMutationFunctionAtomicPut',
+    'AllowRegistryMutationFunctionAtomicConditionCheck',
+})
+ORPHAN_MUTATION_ROLE_ID = 'AROA3EVJIFNI4YJ2FP2VF'
+MUTATION_ROLE_ARN = (
+    'arn:aws:iam::765932874577:role/zoolanding-thn-registry-production-mutation')
+
+
+def normalize_registry_policy(policy):
+    """Canonicalize IAM's equivalent list/scalar and statement-order forms."""
+    require(isinstance(policy, dict) and set(policy) == {'Version', 'Statement'}
+            and policy['Version'] == '2012-10-17'
+            and isinstance(policy['Statement'], list)
+            and len(policy['Statement']) == 26,
+            'production_registry_policy_shape_changed')
+    statements = []
+    for source in policy['Statement']:
+        require(isinstance(source, dict) and
+                {'Sid', 'Effect', 'Principal', 'Action', 'Resource'} <= set(source) <=
+                {'Sid', 'Effect', 'Principal', 'Action', 'Resource', 'Condition'}
+                and isinstance(source['Sid'], str) and source['Sid']
+                and source['Effect'] in {'Allow', 'Deny'},
+                'production_registry_policy_shape_changed')
+        statement = deepcopy(source)
+        for name in ('Action', 'Resource'):
+            value = statement[name]
+            if isinstance(value, str):
+                value = [value]
+            require(isinstance(value, list) and value and
+                    all(isinstance(item, str) and item for item in value) and
+                    len(value) == len(set(value)),
+                    'production_registry_policy_shape_changed')
+            statement[name] = sorted(value)
+        principal = statement['Principal']
+        if isinstance(principal, dict):
+            require(set(principal) == {'AWS'},
+                    'production_registry_policy_shape_changed')
+            values = principal['AWS']
+            if isinstance(values, str):
+                values = [values]
+            require(isinstance(values, list) and values and
+                    all(isinstance(value, str) and value for value in values) and
+                    len(values) == len(set(values)),
+                    'production_registry_policy_shape_changed')
+            principal['AWS'] = sorted(values)
+        else:
+            require(principal == '*', 'production_registry_policy_shape_changed')
+        for entries in statement.get('Condition', {}).values():
+            require(isinstance(entries, dict),
+                    'production_registry_policy_shape_changed')
+            for key, value in entries.items():
+                if isinstance(value, str):
+                    value = [value]
+                require(isinstance(value, list) and value and
+                        all(isinstance(item, str) for item in value) and
+                        len(value) == len(set(value)),
+                        'production_registry_policy_shape_changed')
+                entries[key] = sorted(value)
+        statements.append(statement)
+    sids = [statement['Sid'] for statement in statements]
+    require(len(sids) == len(set(sids)), 'production_registry_policy_duplicate_sid')
+    return {'Version': '2012-10-17',
+            'Statement': sorted(statements, key=lambda item: item['Sid'])}
+
+
+def resolve_registry_policy(policy, role_arn):
+    """Resolve only the three AWS pseudo values and one reviewed role ARN."""
+    require(role_arn == MUTATION_ROLE_ARN,
+            'production_registry_mutation_role_changed')
+
+    def resolve(value):
+        if isinstance(value, dict):
+            if set(value) == {'Fn::GetAtt'}:
+                require(value['Fn::GetAtt'] ==
+                        ['ServiceBindingRegistryV2MutationRole', 'Arn'],
+                        'production_registry_policy_intrinsic_unreviewed')
+                return role_arn
+            if set(value) == {'Fn::Sub'}:
+                require(isinstance(value['Fn::Sub'], str),
+                        'production_registry_policy_intrinsic_unreviewed')
+                text = value['Fn::Sub']
+                for key, replacement in (
+                    ('AWS::Partition', 'aws'), ('AWS::Region', 'us-east-1'),
+                    ('AWS::AccountId', '765932874577')):
+                    text = text.replace('${' + key + '}', replacement)
+                require('${' not in text,
+                        'production_registry_policy_intrinsic_unreviewed')
+                return text
+            require(not any(key.startswith('Fn::') or key == 'Ref' for key in value),
+                    'production_registry_policy_intrinsic_unreviewed')
+            return {key: resolve(child) for key, child in value.items()}
+        if isinstance(value, list):
+            return [resolve(child) for child in value]
+        return value
+
+    return resolve(policy)
+
+
+def validate_registry_policy_transition(live_policy, proposed_policy, role_arn):
+    """Allow only replacement of the deleted mutation role principal."""
+    before = normalize_registry_policy(live_policy)
+    target = normalize_registry_policy(resolve_registry_policy(proposed_policy, role_arn))
+    rebound = deepcopy(before)
+    changed = []
+    for statement in rebound['Statement']:
+        if statement['Sid'] in MUTATION_ALLOW_SIDS:
+            require(statement['Principal'] == {'AWS': [ORPHAN_MUTATION_ROLE_ID]},
+                    'production_registry_orphan_principal_changed')
+            statement['Principal'] = {'AWS': [role_arn]}
+            changed.append(statement['Sid'])
+    require(set(changed) == MUTATION_ALLOW_SIDS and rebound == target,
+            'production_registry_policy_transition_unreviewed')
+    return {'beforeSemanticSha256': _digest(before),
+            'targetSemanticSha256': _digest(target),
+            'reboundSids': sorted(changed)}
+
+
+def validate_completed_registry_policy(live_policy, proposed_policy, role_arn,
+                                       new_role_id=None):
+    """Require the new role principal and all reviewed Registry deny rules."""
+    actual = normalize_registry_policy(live_policy)
+    target = normalize_registry_policy(resolve_registry_policy(proposed_policy, role_arn))
+    rebound = deepcopy(actual)
+    principals=[]
+    for statement in rebound['Statement']:
+        if statement['Sid'] in MUTATION_ALLOW_SIDS:
+            values=statement['Principal'].get('AWS') if isinstance(
+                statement['Principal'],dict) else None
+            require(isinstance(values,list) and len(values)==1,
+                    'production_registry_new_principal_missing')
+            principals.append(values[0])
+            statement['Principal'] = {'AWS': [role_arn]}
+    require(len(principals)==len(MUTATION_ALLOW_SIDS) and
+            len(set(principals))==1,
+            'production_registry_new_principal_missing')
+    observed=principals[0]
+    if new_role_id is not None:
+        require(new_role_id==observed,
+                'production_registry_new_principal_missing')
+    require(observed==role_arn or (observed.startswith('AROA') and
+            observed!=ORPHAN_MUTATION_ROLE_ID),
+            'production_registry_mutation_role_not_recreated')
+    require(rebound == target,
+            'production_registry_completed_policy_changed')
+    return {'liveSemanticSha256': _digest(actual),
+            'targetSemanticSha256': _digest(target),
+            'reboundSids': sorted(MUTATION_ALLOW_SIDS)}
+
+
+def validate_post_import_state_completion(before, after, changes):
+    """Verify a completed state release without reapplying the import baseline."""
+    validate_post_import_state_baseline(before)
+    validate_post_import_state_inventory(changes, before)
+    require(isinstance(after, dict) and after.get('status') == 'UPDATE_COMPLETE'
+            and after.get('stackId') == before['stackId']
+            and after.get('terminationProtection') is True
+            and after.get('roleArn') == before['roleArn']
+            and after.get('tags') == before['tags']
+            and isinstance(after.get('parameters'),list)
+            and all(item.get('ParameterValue')=='false' for item in
+                after['parameters'] if item.get('ParameterKey','').startswith('EnableThn')),
+            'production_post_import_state_completion_invalid')
+    previous = {row['LogicalResourceId']: row for row in before['resources']}
+    current = {row['LogicalResourceId']: row for row in after.get('resources', [])}
+    additions = {item['ResourceChange']['LogicalResourceId']
+                 for item in changes if item['ResourceChange']['Action'] == 'Add'}
+    require(len(current) == len(after.get('resources', [])) and
+            set(current) == set(previous) | additions and
+            all(current[name].get('PhysicalResourceId') == row.get('PhysicalResourceId')
+                and current[name].get('ResourceType') == row.get('ResourceType')
+                for name, row in previous.items()) and
+            all(current[name].get('ResourceType') == next(
+                item['ResourceChange']['ResourceType'] for item in changes
+                if item['ResourceChange']['LogicalResourceId'] == name)
+                for name in additions) and
+            'ServiceBindingRegistryV2MutationRole' in additions,
+            'production_post_import_state_identity_changed')
+    original = after.get('original', {})
+    processed = after.get('processed', {})
+    native = processed.get('Resources', {}) if isinstance(processed, dict) else {}
+    require(isinstance(original, dict) and isinstance(processed, dict) and
+            isinstance(native, dict) and set(current) <= set(native) and
+            all(isinstance(native[name].get('Condition'), str) and
+                native[name]['Condition'] for name in set(native) - set(current)),
+            'production_post_import_state_template_changed')
+    before_resources = before['original']['Resources']
+    after_resources = original.get('Resources', {})
+    require(all(after_resources.get(name) == item for name, item in
+                before_resources.items() if name != 'ServiceBindingRegistryV2Table'),
+            'production_post_import_existing_template_changed')
+    registry_before = before_resources['ServiceBindingRegistryV2Table']
+    registry_after = deepcopy(after_resources.get('ServiceBindingRegistryV2Table'))
+    require(isinstance(registry_after, dict) and
+            isinstance(registry_after.get('Properties', {}).get('ResourcePolicy'), dict),
+            'production_post_import_registry_policy_missing')
+    registry_after['Properties'].pop('ResourcePolicy')
+    require(registry_after == registry_before,
+            'production_post_import_registry_other_property_changed')
+    return after
 
 
 def build_import_template(current_original, production_source):
