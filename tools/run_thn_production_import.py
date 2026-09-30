@@ -90,7 +90,7 @@ def pinned_candidate(session):
     return candidate
 
 
-def read_targets(session, import_template):
+def read_targets(session, import_template, *, include_policy=False):
     dynamodb = session.client('dynamodb')
     tables = {}
     for logical, (kind, name) in guard.TARGETS.items():
@@ -127,8 +127,14 @@ def read_targets(session, import_template):
                   and re.fullmatch(r'[0-9]+', registry.get('RevisionId', '')),
                   'production_import_registry_policy_invalid')
     identities = guard.validate_live_resource_settings(import_template, tables, bucket)
-    return {'identities': identities, 'tables': tables, 'bucket': bucket,
+    result={'identities': identities, 'tables': tables, 'bucket': bucket,
             'policyRevision': registry['RevisionId'], 'policySha256': release.sha(policy)}
+    if include_policy:
+        normalized=guard.normalize_registry_policy(policy)
+        result.pop('policySha256')
+        result['policySemanticSha256']=release.sha(normalized)
+        result['policyDocument']=normalized
+    return result
 
 
 def _allowed(iam, role, actions, resource):
