@@ -4,6 +4,33 @@ import unittest
 from tools.thn_production_native_permissions import selected_actions, prove_event_rule_resources
 from tools.thn_production_release import ReleaseError
 class NativePermissionProfileTests(unittest.TestCase):
+    def test_event_rule_physical_proof_excludes_pass_role(self):
+        logical='ThnContentHubV2InvalidationWorkerFunctionInvalidationSchedule'
+        stack='zoolanding-content-hub-prod'
+        prefix=f'{stack[:25]}-{logical[:25]}-'
+        concrete=f'arn:aws:events:us-east-1:765932874577:rule/{prefix}'+'A'*12
+        execution='arn:aws:iam::765932874577:role/zoolanding-deployer-content-hub-production-cfn-exec'
+        events={'events:DescribeRule','events:PutRule'}
+        actions=events | {'iam:PassRole'}
+        request={'principalArn':execution,'actions':sorted(events),
+                 'resources':[f'arn:aws:events:us-east-1:765932874577:rule/{prefix}*'],
+                 'context':[{'ContextKeyName':'aws:RequestedRegion','ContextKeyValues':['us-east-1'],
+                             'ContextKeyType':'string'}]}
+        changes=[{'ResourceChange':{'Action':'Add','LogicalResourceId':logical,
+                                    'ResourceType':'AWS::Events::Rule'}}]
+        template={'Resources':{logical:{'Properties':{'ScheduleExpression':'rate(1 minute)'}}}}
+        class IAM:
+            def __init__(self):self.calls=[]
+            def simulate_principal_policy(self,**kwargs):
+                self.calls.append(kwargs)
+                return {'EvaluationResults':[{'EvalActionName':action,'EvalDecision':'allowed',
+                    'EvalResourceName':concrete} for action in kwargs['ActionNames']]}
+        iam=IAM()
+        proof=prove_event_rule_resources(iam,[request],execution,actions,changes,template,stack)
+        self.assertEqual(len(proof),1)
+        self.assertEqual(iam.calls[0]['ResourceArns'],[concrete])
+        self.assertEqual(set(iam.calls[0]['ActionNames']),{action.lower() for action in events})
+
     def test_generated_event_rule_uses_truncated_physical_name_in_iam_proof(self):
         logical='ThnContentHubV2PreparedOrphanCollectorFunctionCollectionSchedule'
         stack='zoolanding-content-hub-prod'

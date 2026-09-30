@@ -75,6 +75,9 @@ def prove_event_rule_resources(iam,requests,execution_arn,actions,changes,templa
     string cannot match a real generated rule. For unnamed rules CloudFormation
     uses 25 characters from the stack and logical IDs plus a random suffix.
     """
+    rule_actions={action for action in actions if action.startswith('events:')}
+    require(rule_actions and actions-rule_actions <= {'iam:PassRole'},
+            'production_event_rule_actions_unreviewed')
     proofs=[]
     for item in changes:
         change=item['ResourceChange']
@@ -96,20 +99,20 @@ def prove_event_rule_resources(iam,requests,execution_arn,actions,changes,templa
             require(physical==name,'production_event_rule_physical_name_unreviewed')
         concrete=f'arn:aws:events:us-east-1:765932874577:rule/{physical}'
         request=next((row for row in requests if row.get('principalArn')==execution_arn and
-                      actions<=set(row.get('actions',[])) and pattern in row.get('resources',[])),None)
+                      rule_actions<=set(row.get('actions',[])) and pattern in row.get('resources',[])),None)
         require(request is not None,'production_event_rule_resource_unproven')
         result=iam.simulate_principal_policy(PolicySourceArn=execution_arn,
-            ActionNames=sorted(action.lower() for action in actions),ResourceArns=[concrete],
+            ActionNames=sorted(action.lower() for action in rule_actions),ResourceArns=[concrete],
             ContextEntries=request['context'])
         evaluations=result.get('EvaluationResults',[])
         require(result.get('IsTruncated') is not True and
-                {entry['EvalActionName'].lower() for entry in evaluations}=={a.lower() for a in actions} and
+                {entry['EvalActionName'].lower() for entry in evaluations}=={a.lower() for a in rule_actions} and
                 all(entry.get('EvalDecision')=='allowed' and not entry.get('MissingContextValues') and
                     (entry.get('EvalResourceName')==concrete if not entry.get('ResourceSpecificResults') else all(
                         row.get('EvalResourceName')==concrete and row.get('EvalResourceDecision')=='allowed' and
                         not row.get('MissingContextValues') for row in entry['ResourceSpecificResults']))
                     for entry in evaluations),'production_event_rule_effective_permission_denied')
-        proofs.append({'concreteResource':concrete,'actions':sorted(actions),
+        proofs.append({'concreteResource':concrete,'actions':sorted(rule_actions),
                        'context':request['context'],
                        'evaluation':stable_simulation_evaluations(evaluations)})
     return proofs
