@@ -207,7 +207,7 @@ def verify_object(s3,coordinate):
 def snapshot(cf,stack_name):
     """Fingerprint input captured by the caller; never print or publish raw parameter values."""
     stack=cf.describe_stacks(StackName=stack_name)['Stacks'][0]
-    require(stack.get('StackStatus') in {'CREATE_COMPLETE','UPDATE_COMPLETE','UPDATE_ROLLBACK_COMPLETE','REVIEW_IN_PROGRESS'})
+    require(stack.get('StackStatus') in {'CREATE_COMPLETE','UPDATE_COMPLETE','UPDATE_ROLLBACK_COMPLETE','IMPORT_COMPLETE','REVIEW_IN_PROGRESS'})
     resources=[];token=None
     while True:
         kwargs={'StackName':stack_name}
