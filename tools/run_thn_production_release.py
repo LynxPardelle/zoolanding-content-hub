@@ -288,10 +288,10 @@ def candidate_for_scope(candidate,baseline,purpose):
     if purpose in {'state','activate'} and not baseline.get('absent'):
         for logical,item in old['Resources'].items():
             if not logical.startswith(('Thn','ServiceBinding')) and logical!='ContentHubApi':
-                candidate['Resources'][logical]=item
+                candidate['Resources'][logical]=deepcopy(item)
         for name,item in old.get('Parameters',{}).items():
             if not name.startswith(('Thn','ServiceBinding','ProvisionThn','EnableThn')) and name!='EnvironmentName':
-                candidate['Parameters'][name]=item
+                candidate['Parameters'][name]=deepcopy(item)
         if CONFIG['service']=='hub' and purpose=='state' and set(imported.TARGETS) <= set(old['Resources']):
             # The imported Registry policy must bind the recreated mutation
             # role. Keep every other imported property and the public API.
@@ -319,7 +319,7 @@ def candidate_for_scope(candidate,baseline,purpose):
             candidate['Resources'][logical]=transitioned
             for logical in (*[name for name in imported.TARGETS if name!='ServiceBindingRegistryV2Table'],
                             'ContentHubApi'):
-                candidate['Resources'][logical]=old['Resources'][logical]
+                candidate['Resources'][logical]=deepcopy(old['Resources'][logical])
     return candidate
 
 def review(session,args,source,identity,permissions):
