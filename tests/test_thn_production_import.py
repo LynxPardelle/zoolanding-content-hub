@@ -169,6 +169,15 @@ class ImportInventoryTests(unittest.TestCase):
 
 
 class LiveResourceTests(unittest.TestCase):
+    def test_sdk_decodes_s3_blocked_encryption_types(self):
+        import botocore.session
+
+        model = botocore.session.get_session().get_service_model('s3')
+        rules = (model.operation_model('GetBucketEncryption').output_shape
+                 .members['ServerSideEncryptionConfiguration']
+                 .members['Rules'].member.members)
+        self.assertIn('BlockedEncryptionTypes', rules)
+
     def live(self):
         source = source_template()
         tables = {}
