@@ -4,7 +4,7 @@ Inputs are the live provider schema and processed templates, never a guessed
 universal policy. Unsupported KMS/network/import/metadata services stop review.
 The selected read/mutation/rollback actions remain a subset of that schema.
 """
-from tools.thn_production_release import require
+from tools.thn_production_release import require, stable_simulation_evaluations
 
 def selected_actions(kind,handlers,changes,template,previous=None):
     actions=set();old=(previous or {}).get('Resources',{});new=template.get('Resources',{})
@@ -66,3 +66,50 @@ def selected_actions(kind,handlers,changes,template,previous=None):
         require(required and all(__import__('re').fullmatch(r'[a-z0-9-]+:[A-Za-z][A-Za-z0-9]*',a) for a in required),'production_native_handler_permissions_unavailable')
         actions.update(required)
     return actions
+
+
+def prove_event_rule_resources(iam,requests,execution_arn,actions,changes,template,stack):
+    """Simulate EventBridge grants against the physical names CloudFormation creates.
+
+    A simulation against an IAM wildcard string can succeed even when that
+    string cannot match a real generated rule. For unnamed rules CloudFormation
+    uses 25 characters from the stack and logical IDs plus a random suffix.
+    """
+    proofs=[]
+    for item in changes:
+        change=item['ResourceChange']
+        if change['ResourceType']!='AWS::Events::Rule':
+            continue
+        logical=change['LogicalResourceId']
+        properties=template['Resources'].get(logical,{}).get('Properties',{})
+        name=properties.get('Name')
+        require(name is None or isinstance(name,str),'production_event_rule_name_unreviewed')
+        if name is None:
+            prefix=f'{stack[:25]}-{logical[:25]}-'
+            pattern=f'arn:aws:events:us-east-1:765932874577:rule/{prefix}*'
+            physical=prefix+'A'*12 if change['Action']=='Add' else change.get('PhysicalResourceId')
+            require(isinstance(physical,str) and physical.startswith(prefix) and
+                    len(physical)==len(prefix)+12,'production_event_rule_physical_name_unreviewed')
+        else:
+            pattern=f'arn:aws:events:us-east-1:765932874577:rule/{name}'
+            physical=name if change['Action']=='Add' else change.get('PhysicalResourceId')
+            require(physical==name,'production_event_rule_physical_name_unreviewed')
+        concrete=f'arn:aws:events:us-east-1:765932874577:rule/{physical}'
+        request=next((row for row in requests if row.get('principalArn')==execution_arn and
+                      actions<=set(row.get('actions',[])) and pattern in row.get('resources',[])),None)
+        require(request is not None,'production_event_rule_resource_unproven')
+        result=iam.simulate_principal_policy(PolicySourceArn=execution_arn,
+            ActionNames=sorted(action.lower() for action in actions),ResourceArns=[concrete],
+            ContextEntries=request['context'])
+        evaluations=result.get('EvaluationResults',[])
+        require(result.get('IsTruncated') is not True and
+                {entry['EvalActionName'].lower() for entry in evaluations}=={a.lower() for a in actions} and
+                all(entry.get('EvalDecision')=='allowed' and not entry.get('MissingContextValues') and
+                    (entry.get('EvalResourceName')==concrete if not entry.get('ResourceSpecificResults') else all(
+                        row.get('EvalResourceName')==concrete and row.get('EvalResourceDecision')=='allowed' and
+                        not row.get('MissingContextValues') for row in entry['ResourceSpecificResults']))
+                    for entry in evaluations),'production_event_rule_effective_permission_denied')
+        proofs.append({'concreteResource':concrete,'actions':sorted(actions),
+                       'context':request['context'],
+                       'evaluation':stable_simulation_evaluations(evaluations)})
+    return proofs
