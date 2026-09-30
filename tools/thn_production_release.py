@@ -117,6 +117,8 @@ def review_inventory(changes,old,new,*,scope):
         resource=item.get('ResourceChange',{})
         logical=resource.get('LogicalResourceId');kind=resource.get('ResourceType')
         action=resource.get('Action');replacement=resource.get('Replacement','False')
+        if action=='Add' and replacement is None:
+            replacement='False'  # CloudFormation has no prior identity to replace.
         require(isinstance(logical,str) and logical not in seen and kind in RESOURCE_TYPES)
         seen.add(logical)
         if action=='Remove':
