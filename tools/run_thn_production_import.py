@@ -232,6 +232,13 @@ def parameters(baseline):
             for item in baseline['parameters']]
 
 
+def preview_parameters_match(actual, expected):
+    # DescribeChangeSet may reorder parameters; retain exact entry comparison.
+    return actual is None or (isinstance(actual, list) and len(actual) == len(expected)
+                              and sorted(actual, key=release.canonical) ==
+                              sorted(expected, key=release.canonical))
+
+
 def template_url(coordinate):
     return (f'https://{coordinate["bucket"]}.s3.{release.REGION}.amazonaws.com/'
             f'{quote(coordinate["key"])}?versionId={quote(coordinate["versionId"])}')
@@ -261,8 +268,8 @@ def create_preview(session, captured, coordinate, run_id, phase):
     # The exact four Import actions are checked by validate_import_inventory below.
     guard.require(preview.get('StackId') == captured['baseline']['stackId'] and
                   preview.get('ChangeSetType') in (None, 'IMPORT') and
-                  preview.get('Parameters') in (None,
-                                                captured['baseline']['parameters']),
+                  preview_parameters_match(preview.get('Parameters'),
+                                           captured['baseline']['parameters']),
                   'production_import_preview_baseline_changed')
     changes = guard.validate_import_inventory(preview['Changes'])
     original = release.parse_template(cf.get_template(
