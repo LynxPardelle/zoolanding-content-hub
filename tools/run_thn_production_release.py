@@ -19,6 +19,7 @@ import urllib.request
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 from tools import thn_production_release as release
+from tools import thn_production_import as imported
 from tools.thn_production_service import CONFIG
 
 def load_json(value):
@@ -212,6 +213,19 @@ def captured_baseline(session):
             fingerprints.append({'logicalId':resource['LogicalResourceId'],'physicalId':resource['PhysicalResourceId'],
                 'configurationSha256':release.sha(config),'codeSha256':config['CodeSha256']})
     baseline['lambdaFingerprints']=fingerprints
+    if CONFIG['service']=='hub' and os.environ.get('THN_PRODUCTION_SELECTED_PURPOSE')=='state':
+        from tools import thn_production_import as imported
+        from tools.run_thn_production_import import read_targets
+        parsed={**baseline,
+                'original':release.parse_template(baseline['original']),
+                'processed':release.parse_template(baseline['processed'])}
+        imported.validate_post_import_state_baseline(parsed)
+        targets=read_targets(session,parsed['original'])
+        imported.require(targets['policyRevision']=='1790716784435' and
+                         targets['policySha256']==
+                         '7a879e95713300b080111e7bf59aa81f550c6bed3dfc530a8b67ca857de5f54f',
+                         'production_post_import_registry_policy_changed')
+        baseline['postImportTargets']=targets
     if os.environ.get('THN_PRODUCTION_SELECTED_PURPOSE')=='activate':
         from tools.thn_production_prerequisites import capture
         baseline['prerequisites']=capture(session,load_json(os.environ.get('THN_PRODUCTION_PREREQUISITES_JSON','')),CONFIG['service'],os.environ['THN_PRODUCTION_SELECTED_SOURCE'])
@@ -276,6 +290,11 @@ def candidate_for_scope(candidate,baseline,purpose):
         for name,item in old.get('Parameters',{}).items():
             if not name.startswith(('Thn','ServiceBinding','ProvisionThn','EnableThn')) and name!='EnvironmentName':
                 candidate['Parameters'][name]=item
+        if CONFIG['service']=='hub' and purpose=='state' and set(imported.TARGETS) <= set(old['Resources']):
+            # Import already attached these resources. State only creates the
+            # remaining THN resources; the public API changes at activation.
+            for logical in (*imported.TARGETS,'ContentHubApi'):
+                candidate['Resources'][logical]=old['Resources'][logical]
     return candidate
 
 def review(session,args,source,identity,permissions):
@@ -340,6 +359,8 @@ def review(session,args,source,identity,permissions):
     original=release.parse_template(cf.get_template(ChangeSetName=arn,TemplateStage='Original')['TemplateBody'])
     processed=release.parse_template(cf.get_template(ChangeSetName=arn,TemplateStage='Processed')['TemplateBody'])
     release.review_inventory(preview['Changes'],release.parse_template(baseline['processed']),processed,scope=args.purpose)
+    if CONFIG['service']=='hub' and args.purpose=='state':
+        imported.validate_post_import_state_inventory(preview['Changes'],baseline)
     # Native provider handler schemas supply their actual required actions.
     # A guessed action list is insufficient even when caller simulation passes.
     identity,permissions=identity_and_permissions(session,source,args.purpose,
@@ -356,6 +377,8 @@ def fresh_execute_authority(session,record,source,purpose,preview,processed):
     release.require(source_selection(source['sourceSha'])==source,'production_source_changed_before_execute')
     baseline=captured_baseline(session)
     release.require(release.sha(baseline)==record['baselineSha256'],'production_baseline_changed_before_execute')
+    if CONFIG['service']=='hub' and purpose=='state' and 'postImportTargets' in baseline:
+        imported.validate_post_import_state_inventory(preview['Changes'],baseline)
     identity,permissions=identity_and_permissions(session,source,purpose,preview['Changes'],processed,
         release.parse_template(baseline['processed']))
     release.require(release.sha(identity)==record['identitySha256'] and

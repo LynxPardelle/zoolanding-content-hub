@@ -73,6 +73,69 @@ def validate_stack_baseline(baseline):
     return baseline
 
 
+def validate_post_import_state_baseline(baseline):
+    """Accept only the protected, complete import as the first Hub state base."""
+    require(isinstance(baseline, dict) and isinstance(baseline.get('stackId'), str)
+            and baseline['stackId'].startswith(
+                'arn:aws:cloudformation:us-east-1:765932874577:stack/zoolanding-content-hub-prod/')
+            and baseline.get('status') == 'IMPORT_COMPLETE'
+            and baseline.get('terminationProtection') is True
+            and baseline.get('roleArn') ==
+                'arn:aws:iam::765932874577:role/zoolanding-deployer-content-hub-production-cfn-exec'
+            and baseline.get('tags') == [], 'production_post_import_stack_changed')
+    original = baseline.get('original')
+    processed = baseline.get('processed')
+    resources = baseline.get('resources')
+    parameters = baseline.get('parameters')
+    require(isinstance(original, dict) and isinstance(processed, dict)
+            and isinstance(resources, list) and isinstance(parameters, list)
+            and original.get('Transform') == 'AWS::Serverless-2016-10-31'
+            and len(original.get('Resources', {})) == 14
+            and len(processed.get('Resources', {})) == 21
+            and len(resources) == 21
+            and {r.get('LogicalResourceId') for r in resources} == set(processed['Resources'])
+            and {p.get('ParameterKey') for p in parameters} ==
+                set(original.get('Parameters', {})),
+            'production_post_import_shape_changed')
+    by_logical = {row.get('LogicalResourceId'): row for row in resources}
+    for logical, (kind, physical) in TARGETS.items():
+        item = original['Resources'].get(logical)
+        native = processed['Resources'].get(logical)
+        row = by_logical.get(logical)
+        name_key = 'BucketName' if kind == 'AWS::S3::Bucket' else 'TableName'
+        declared_name = item.get('Properties', {}).get(name_key) if isinstance(item, dict) else None
+        if kind == 'AWS::S3::Bucket':
+            approved_names = (physical, {'Fn::Sub':
+                'zlp-thn-ch-production-private-${AWS::AccountId}-${AWS::Region}'})
+        else:
+            approved_names = (physical,)
+        require(isinstance(item, dict) and isinstance(native, dict) and isinstance(row, dict)
+                and item.get('Type') == kind and native.get('Type') == kind
+                and item.get('DeletionPolicy') == 'Retain'
+                and item.get('UpdateReplacePolicy') == 'Retain'
+                and declared_name in approved_names
+                and row.get('ResourceType') == kind
+                and row.get('PhysicalResourceId') == physical,
+                'production_post_import_identity_changed')
+    return baseline
+
+
+def validate_post_import_state_inventory(changes, baseline):
+    """Initial state may add THN resources; the imported 21 stay untouched."""
+    require(isinstance(changes, list) and isinstance(baseline, dict)
+            and isinstance(baseline.get('resources'), list),
+            'production_post_import_inventory_invalid')
+    previous = {row.get('LogicalResourceId') for row in baseline['resources']}
+    for item in changes:
+        change = item.get('ResourceChange', {})
+        logical = change.get('LogicalResourceId')
+        require(change.get('Action') == 'Add' and change.get('Replacement') in (None, 'False')
+                and isinstance(logical, str) and logical not in previous
+                and logical.startswith(('Thn', 'ServiceBinding')),
+                'production_post_import_existing_resource_changed')
+    return changes
+
+
 def build_import_template(current_original, production_source):
     """Append four import declarations without changing any existing definition."""
     require(isinstance(current_original, dict) and isinstance(production_source, dict))
