@@ -257,8 +257,10 @@ def create_preview(session, captured, coordinate, run_id, phase):
     cf.get_waiter('change_set_create_complete').wait(ChangeSetName=arn,
                                                        WaiterConfig={'Delay': 5, 'MaxAttempts': 120})
     preview = release.describe_preview(cf, arn)
+    # DescribeChangeSet omits ChangeSetType even for a successful IMPORT request.
+    # The exact four Import actions are checked by validate_import_inventory below.
     guard.require(preview.get('StackId') == captured['baseline']['stackId'] and
-                  preview.get('ChangeSetType') == 'IMPORT' and
+                  preview.get('ChangeSetType') in (None, 'IMPORT') and
                   preview.get('Parameters') in (None,
                                                 captured['baseline']['parameters']),
                   'production_import_preview_baseline_changed')
