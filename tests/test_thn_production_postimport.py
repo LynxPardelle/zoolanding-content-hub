@@ -38,6 +38,134 @@ def post_import_baseline():
 
 
 class PostImportStateTests(unittest.TestCase):
+    def test_operator_patch_workflow_skips_source_build_but_keeps_protected_release(self):
+        from pathlib import Path
+        import yaml
+        workflow = yaml.safe_load((Path(__file__).resolve().parents[1] /
+            '.github/workflows/deploy-thn-production.yml').read_text())
+        options = workflow[True]['workflow_dispatch']['inputs']['purpose']['options']
+        self.assertIn('operator-patch', options)
+        steps = {step['name']: step for step in workflow['jobs']['release']['steps']
+                 if 'name' in step}
+        for name in ('Set up SAM for review only', 'Validate and build closed production source',
+                     'Package new candidate only for review'):
+            self.assertIn("inputs.purpose != 'operator-patch'", steps[name]['if'])
+        self.assertEqual(workflow['jobs']['release']['environment'], 'production')
+        self.assertIn('preflight', steps['Verify effective permissions and live baseline before package writes']['run'])
+        self.assertIn('test_thn_production_postimport.py',
+            next(step['run'] for step in workflow['jobs']['validate']['steps']
+                 if step.get('name') == 'Run offline guards'))
+
+    def test_operator_patch_uses_reviewed_parameters_without_state_secret(self):
+        with patch.dict(os.environ, {'THN_PRODUCTION_PARAMETERS_JSON': '{invalid'}):
+            self.assertEqual(driver.selected_parameter_overrides('operator-patch'),
+                             driver.release.OPERATOR_PARAMETERS)
+            with self.assertRaises(ValueError):
+                driver.selected_parameter_overrides('state')
+
+    def test_operator_patch_preview_preserves_all_other_parameters(self):
+        previous = [
+            {'ParameterKey': 'ProvisionThnProductionRegistryOperator', 'ParameterValue': 'false'},
+            {'ParameterKey': 'ThnProductionRegistryHumanPrincipalArn', 'ParameterValue': 'BLOCKED'},
+            {'ParameterKey': 'EnableThnContentHubV2', 'ParameterValue': 'false'},
+            {'ParameterKey': 'ThnProductionOwnerPoolId', 'ParameterValue': '****'},
+        ]
+        reviewed = copy.deepcopy(previous)
+        reviewed[0]['ParameterValue'] = 'true'
+        reviewed[1]['ParameterValue'] = driver.release.OPERATOR_PRINCIPAL
+        driver.validate_operator_patch_preview_parameters(reviewed, previous)
+        changed = copy.deepcopy(reviewed)
+        changed[2]['ParameterValue'] = 'true'
+        with self.assertRaises(driver.release.ReleaseError):
+            driver.validate_operator_patch_preview_parameters(changed, previous)
+
+    def test_operator_patch_completion_preserves_existing_identities_and_closed_routes(self):
+        before = {'status': 'UPDATE_COMPLETE', 'terminationProtection': True,
+                  'stackId': 'arn:aws:cloudformation:us-east-1:765932874577:stack/zoolanding-content-hub-prod/id',
+                  'roleArn': 'arn:aws:iam::765932874577:role/zoolanding-deployer-content-hub-production-cfn-exec',
+                  'original': {'Resources': {}}, 'processed': {'Resources': {}},
+                  'resources': [{'LogicalResourceId': f'Existing{i}', 'PhysicalResourceId': f'id-{i}',
+                                 'ResourceType': 'AWS::IAM::Role'} for i in range(57)],
+                  'parameters': [{'ParameterKey': 'EnableThnContentHubV2', 'ParameterValue': 'false'},
+                                 {'ParameterKey': 'ProvisionThnProductionRegistryOperator', 'ParameterValue': 'false'},
+                                 {'ParameterKey': 'ThnProductionRegistryHumanPrincipalArn', 'ParameterValue': 'BLOCKED'}]}
+        after = copy.deepcopy(before)
+        after['resources'] += [{'LogicalResourceId': name, 'PhysicalResourceId': f'new-{name}',
+                                'ResourceStatus': 'CREATE_COMPLETE',
+                                'ResourceType': kind} for name, kind in driver.release.OPERATOR_RESOURCES.items()]
+        after['resources'][57]['PhysicalResourceId'] = 'zoolanding-thn-registry-production-operator'
+        after['parameters'][1]['ParameterValue'] = 'true'
+        after['parameters'][2]['ParameterValue'] = driver.release.OPERATOR_PRINCIPAL
+        driver.validate_operator_patch_completion(before, after)
+        after['resources'][0]['PhysicalResourceId'] = 'replaced'
+        with self.assertRaises(driver.release.ReleaseError):
+            driver.validate_operator_patch_completion(before, after)
+
+    def test_operator_patch_invocation_policy_requires_exact_mfa_role(self):
+        statement = {'Effect': 'Allow', 'Action': 'lambda:InvokeFunction',
+                     'Principal': {'AWS': 'arn:aws:iam::765932874577:role/zoolanding-thn-registry-production-operator'},
+                     'Resource': 'arn:aws:lambda:us-east-1:765932874577:function:zoolanding-content-hub-prod-ThnServiceBindingRegistryV2Mutation'}
+        driver.validate_operator_patch_invoke_policy(__import__('json').dumps({'Statement': [statement]}))
+        statement['Principal']['AWS'] = 'arn:aws:iam::765932874577:role/other'
+        with self.assertRaises(driver.release.ReleaseError):
+            driver.validate_operator_patch_invoke_policy(__import__('json').dumps({'Statement': [statement]}))
+
+    def test_operator_patch_waits_for_policy_propagation(self):
+        import json
+        valid={'Statement':[{'Effect':'Allow','Action':'lambda:InvokeFunction',
+            'Principal':{'AWS':'arn:aws:iam::765932874577:role/zoolanding-thn-registry-production-operator'},
+            'Resource':'arn:aws:lambda:us-east-1:765932874577:function:zoolanding-content-hub-prod-ThnServiceBindingRegistryV2Mutation'}]}
+        client=Mock()
+        client.get_policy.side_effect=[{'Policy':json.dumps({'Statement':[]})},
+                                       {'Policy':json.dumps(valid)}]
+        with patch.object(driver.time,'sleep') as sleep:
+            driver.wait_for_operator_invoke_policy(client)
+        self.assertEqual(client.get_policy.call_count,2)
+        sleep.assert_called_once_with(2)
+
+    def test_operator_patch_baseline_requires_57_closed_resources_and_dormant_definitions(self):
+        from pathlib import Path
+        import yaml
+        from tools.prepare_thn_production_template import prepare_template
+        source = prepare_template(yaml.safe_load((Path(__file__).resolve().parents[1] / 'template.yaml').read_text()))
+        expected = driver.release.OPERATOR_RESOURCES
+        template = {'Resources': {name: source['Resources'][name] for name in expected}}
+        baseline = {'status': 'UPDATE_COMPLETE', 'terminationProtection': True,
+                    'roleArn': 'arn:aws:iam::765932874577:role/zoolanding-deployer-content-hub-production-cfn-exec',
+                    'parameters': [{'ParameterKey': name, 'ParameterValue': value} for name, value in {
+                        'ProvisionThnServiceBindingRegistryV2State': 'true',
+                        'ProvisionThnContentHubV2State': 'true',
+                        'ProvisionThnProductionRegistryOperator': 'false',
+                        'ThnProductionRegistryHumanPrincipalArn': 'BLOCKED',
+                        'EnableThnContentHubV2': 'false',
+                        'ThnProductionDependencyGate': 'BLOCKED',
+                    }.items()],
+                    'resources': [{'LogicalResourceId': f'Existing{i}',
+                                   'PhysicalResourceId': f'physical-{i}',
+                                   'ResourceType': 'AWS::IAM::Role'} for i in range(57)],
+                    'original': copy.deepcopy(template), 'processed': copy.deepcopy(template)}
+        driver.validate_operator_patch_baseline(baseline)
+        for changed in ('count', 'status', 'protection', 'active-role', 'definition'):
+            invalid = copy.deepcopy(baseline)
+            if changed == 'count': invalid['resources'].pop()
+            elif changed == 'status': invalid['status'] = 'UPDATE_ROLLBACK_COMPLETE'
+            elif changed == 'protection': invalid['terminationProtection'] = False
+            elif changed == 'active-role': invalid['resources'][0]['LogicalResourceId'] = next(iter(expected))
+            else: invalid['original']['Resources'].pop(next(iter(expected)))
+            with self.subTest(changed=changed), self.assertRaises(driver.release.ReleaseError):
+                driver.validate_operator_patch_baseline(invalid)
+
+    def test_operator_patch_uses_the_deployed_template_without_repeating_state_transition(self):
+        baseline, _ = post_import_baseline()
+        baseline['original']['Resources']['ThnProductionRegistryHumanOperatorRole'] = {
+            'Type': 'AWS::IAM::Role', 'Condition': 'HasServiceBindingRegistryOperatorRole',
+            'Properties': {'RoleName': 'zoolanding-thn-registry-production-operator'}}
+        candidate = {'Resources': {'ServiceBindingRegistryV2Table': {
+            'Type': 'AWS::DynamoDB::Table', 'Properties': {'ResourcePolicy': 'unreviewed'}}}}
+        selected = driver.candidate_for_scope(candidate, baseline, 'operator-patch')
+        self.assertEqual(selected, baseline['original'])
+        self.assertNotEqual(selected, candidate)
+
     def test_release_failure_code_reports_only_closed_guard_reasons(self):
         self.assertEqual(driver.safe_failure_code(imported.ImportError(
             "production_post_import_registry_policy_changed")),
