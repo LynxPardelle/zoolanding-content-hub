@@ -356,7 +356,7 @@ def review(session,args,source,identity,permissions):
     prefix=f'thn/production/{CONFIG["service"]}/{source["sourceSha"]}/{os.environ["GITHUB_RUN_ID"]}/{os.environ["GITHUB_RUN_ATTEMPT"]}/'
     recovery=[]
     if not baseline.get('absent'):
-        original=release.parse_template(baseline['original'])
+        original=deepcopy(release.parse_template(baseline['original']))
         historical=[]
         functions={r['LogicalResourceId']:r for r in baseline['resources'] if r.get('ResourceType')=='AWS::Lambda::Function'}
         for logical,item in original['Resources'].items():
@@ -404,6 +404,8 @@ def review(session,args,source,identity,permissions):
         stack_id=preview['StackId'],change_set_arn=arn,created_at=int(time.time()),baseline=baseline,
         original=original,processed=processed,parameters=preview.get('Parameters',[]),packages=packages,
         changes=preview['Changes'],recovery=recovery,permissions=permissions,identity=identity,source_package=source)
+    release.require(release.sha(captured_baseline(session))==record['baselineSha256'],
+                    'production_baseline_changed_during_review')
     Path(args.record).write_text(json.dumps(record,sort_keys=True,indent=2)+'\n')
     # Public identities, inventory and digests only. No template/parameter/config dump.
     print(json.dumps({'digest':record['digest'],'changeSetArn':arn,'changes':record['changes'],'expiresAt':record['expiresAt']}))
