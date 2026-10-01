@@ -7,6 +7,23 @@ from tools.prepare_thn_production_template import prepare_template
 ROOT=Path(__file__).resolve().parents[1]
 class ProductionTemplateTests(unittest.TestCase):
     def source(self): return yaml.safe_load((ROOT/'template.yaml').read_text())
+    def test_writer_dependency_policy_names_actual_auth_and_dedicated_api_functions(self):
+        result=prepare_template(self.source())
+        role=result['Resources']['ServiceBindingRegistryV2MutationRole']
+        statements=role['Properties']['Policies'][0]['PolicyDocument']['Statement']
+        row=next(item for item in statements if item.get('Sid')=='ReadExactProductionWriterServices')
+        names=[item['Fn::Sub'].split(':function:')[1] for item in row['Resource']]
+        for name in ('zoolanding-auth-admin-prod-ThnAuthAdminV2Function',
+                     'zoolanding-auth-prod-ThnV2OriginAuthorizer'):
+            self.assertIn(name,names)
+            self.assertNotIn(name+':production',names)
+        for name in ('zoolanding-content-hub-prod-ThnContentHubV2Authoring',
+                     'zoolanding-image-upload-production-ThnImageUploadV2',
+                     'zlp-thn-auth-runtime-production'):
+            self.assertIn(name,names)
+            self.assertIn(name+':production',names)
+        self.assertEqual(len(names),8)
+        self.assertFalse(any('ThnAuthRuntimeV2Function-*' in name for name in names))
     def test_registry_policy_uses_actual_production_deployment_role(self):
         result=prepare_template(self.source())
         policy=result['Resources']['ServiceBindingRegistryV2Table']['Properties']['ResourcePolicy']['PolicyDocument']

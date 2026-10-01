@@ -565,6 +565,20 @@ def _resource(template, logical_id):
 
 
 class EmergencyWithdrawalInfrastructureTests(unittest.TestCase):
+    def test_initial_registry_read_is_exact_and_requires_a_present_key(self):
+        import yaml
+        from tools.prepare_thn_production_template import prepare_template
+        source=yaml.safe_load((PROJECT_ROOT / "template.yaml").read_text(encoding="utf-8"))
+        for environment,template in (("test",source),("production",prepare_template(source))):
+            role=template["Resources"]["ThnContentHubV2EmergencyWithdrawRole"]
+            statements=role["Properties"]["Policies"][0]["PolicyDocument"]["Statement"]
+            reads=[row for row in statements if row.get("Sid")=="ReadExactThnBindingBeforeWithdrawal"]
+            self.assertEqual(len(reads),1)
+            self.assertEqual(reads[0]["Action"],["dynamodb:GetItem"])
+            self.assertEqual(reads[0]["Condition"],{
+                "ForAllValues:StringEquals":{"dynamodb:LeadingKeys":[f"SERVICE_BINDING#{environment}#thn-journal-{environment}-v2"]},
+                "Null":{"dynamodb:LeadingKeys":"false"},
+            })
     def test_function_is_alias_only_and_has_no_http_or_schedule_route(self):
         template = (PROJECT_ROOT / "template.yaml").read_text(encoding="utf-8")
         function = _resource(template, "ThnContentHubV2EmergencyWithdrawFunction")
