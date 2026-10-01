@@ -49,7 +49,8 @@ class PostImportStateTests(unittest.TestCase):
                  if 'name' in step}
         for name in ('Set up SAM for review only', 'Validate and build closed production source',
                      'Package new candidate only for review'):
-            self.assertIn("inputs.purpose != 'operator-patch'", steps[name]['if'])
+            self.assertIn('!contains(fromJSON(', steps[name]['if'])
+            self.assertIn('operator-patch', steps[name]['if'])
         self.assertEqual(workflow['jobs']['release']['environment'], 'production')
         self.assertIn('preflight', steps['Verify effective permissions and live baseline before package writes']['run'])
         self.assertIn('test_thn_production_postimport.py',

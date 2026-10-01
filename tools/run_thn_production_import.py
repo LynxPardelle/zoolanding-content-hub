@@ -90,6 +90,12 @@ def pinned_candidate(session):
     return candidate
 
 
+def registry_policy_fingerprint(policy):
+    """Ignore AWS list ordering while retaining exact policy semantics."""
+    normalized=guard.normalize_registry_policy(policy)
+    return normalized, release.sha(normalized)
+
+
 def read_targets(session, import_template, *, include_policy=False):
     dynamodb = session.client('dynamodb')
     tables = {}
@@ -127,12 +133,12 @@ def read_targets(session, import_template, *, include_policy=False):
                   and re.fullmatch(r'[0-9]+', registry.get('RevisionId', '')),
                   'production_import_registry_policy_invalid')
     identities = guard.validate_live_resource_settings(import_template, tables, bucket)
+    normalized,policy_sha=registry_policy_fingerprint(policy)
     result={'identities': identities, 'tables': tables, 'bucket': bucket,
-            'policyRevision': registry['RevisionId'], 'policySha256': release.sha(policy)}
+            'policyRevision': registry['RevisionId'], 'policySha256': policy_sha}
     if include_policy:
-        normalized=guard.normalize_registry_policy(policy)
         result.pop('policySha256')
-        result['policySemanticSha256']=release.sha(normalized)
+        result['policySemanticSha256']=policy_sha
         result['policyDocument']=normalized
     return result
 

@@ -1593,6 +1593,18 @@ Resources:
                     dynamodb:EnclosingOperation: TransactWriteItems
                   StringEqualsIfExists:
                     dynamodb:ReturnValues: NONE
+              - Sid: ReadExactThnBindingBeforeWithdrawal
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                Resource:
+                  Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-content-hub-test-ServiceBindingRegistryV2
+                Condition:
+                  ForAllValues:StringEquals:
+                    dynamodb:LeadingKeys:
+                      - SERVICE_BINDING#test#thn-journal-test-v2
+                  'Null':
+                    dynamodb:LeadingKeys: 'false'
               - Sid: CheckExactThnBindingBeforeWithdrawal
                 Effect: Allow
                 Action:

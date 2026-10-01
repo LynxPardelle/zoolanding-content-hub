@@ -65,6 +65,23 @@ def import_changes():
 
 
 class ImportTemplateTests(unittest.TestCase):
+    def test_registry_policy_fingerprint_is_stable_across_aws_principal_order(self):
+        policy = {'Version': '2012-10-17', 'Statement': [
+            {'Sid': f'Rule{i}', 'Effect': 'Deny',
+             'Principal': {'AWS': ['arn:aws:iam::765932874577:role/First',
+                                   'arn:aws:iam::765932874577:role/Second']},
+             'Action': 'dynamodb:GetItem',
+             'Resource': 'arn:aws:dynamodb:us-east-1:765932874577:table/Registry'}
+            for i in range(26)]}
+        normalized, expected = runner.registry_policy_fingerprint(policy)
+        reordered = deepcopy(policy)
+        reordered['Statement'].reverse()
+        reordered['Statement'][0]['Principal']['AWS'].reverse()
+        self.assertEqual(runner.registry_policy_fingerprint(reordered), (normalized, expected))
+        altered = deepcopy(reordered)
+        altered['Statement'][0]['Principal']['AWS'][0] = 'arn:aws:iam::765932874577:role/Other'
+        self.assertNotEqual(runner.registry_policy_fingerprint(altered)[1], expected)
+
     def test_adds_four_retained_resources_without_mutating_current_template(self):
         current = current_template()
         original = deepcopy(current)
