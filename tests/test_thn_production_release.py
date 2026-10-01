@@ -61,19 +61,24 @@ class RetainedProductionReleaseTests(unittest.TestCase):
             with self.subTest(changed=changed), self.assertRaises(ReleaseError):
                 select_parameters(definitions, current, changed, purpose='operator-patch')
 
-    def test_operator_patch_inventory_is_exactly_three_nonreplacing_adds(self):
+    def test_operator_patch_inventory_is_two_adds_with_only_dormant_permission_removed(self):
         resources = {
             'ThnProductionRegistryHumanOperatorRole': 'AWS::IAM::Role',
             'ServiceBindingRegistryOperatorInvokePolicy': 'AWS::IAM::Policy',
-            'ServiceBindingRegistryOperatorInvokePermission': 'AWS::Lambda::Permission',
         }
         old = {'Resources': {'ServiceBindingRegistryV2MutationFunction': {'Type': 'AWS::Lambda::Function'},
+                             'ServiceBindingRegistryOperatorInvokePermission': {'Type': 'AWS::Lambda::Permission', 'Condition': 'HasServiceBindingRegistryOperatorRole'},
                              **{name: {'Type': kind, 'Condition': 'HasServiceBindingRegistryOperatorRole'}
                                 for name, kind in resources.items()}}}
         new = copy.deepcopy(old)
+        del new['Resources']['ServiceBindingRegistryOperatorInvokePermission']
         changes = [{'Type': 'Resource', 'ResourceChange': {'Action': 'Add', 'LogicalResourceId': name,
                     'ResourceType': kind, 'Replacement': 'False'}} for name, kind in resources.items()]
         review_inventory(changes, old, new, scope='operator-patch')
+        changed=copy.deepcopy(new)
+        changed['Resources']['ServiceBindingRegistryV2MutationFunction']['Metadata']={'unexpected':True}
+        with self.assertRaises(ReleaseError):
+            review_inventory(changes,old,changed,scope='operator-patch')
         for invalid in (changes[:-1], [*changes, {'ResourceChange': {
                 'Action': 'Modify', 'LogicalResourceId': 'ServiceBindingRegistryV2MutationFunction',
                 'ResourceType': 'AWS::Lambda::Function', 'Replacement': 'False'}}],
