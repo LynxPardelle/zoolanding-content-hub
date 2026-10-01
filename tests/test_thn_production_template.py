@@ -115,6 +115,8 @@ class ProductionTemplateTests(unittest.TestCase):
             self.assertEqual(dangling,set())
     def test_registry_operator_human_role_is_closed_and_separate(self):
         candidate=prepare_template(self.source())
+        self.assertIn('ServiceBindingRegistryOperatorInvokePermission', self.source()['Resources'])
+        self.assertNotIn('ServiceBindingRegistryOperatorInvokePermission', candidate['Resources'])
         role=candidate['Resources']['ThnProductionRegistryHumanOperatorRole']
         self.assertEqual(role['Properties']['RoleName'],'zoolanding-thn-registry-production-operator')
         self.assertEqual(role['Properties']['AssumeRolePolicyDocument']['Statement'][0]['Condition']['Bool'],{'aws:MultiFactorAuthPresent':'true'})

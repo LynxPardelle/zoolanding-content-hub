@@ -27,8 +27,17 @@ OPERATOR_PARAMETERS = {
 OPERATOR_RESOURCES = {
     'ThnProductionRegistryHumanOperatorRole': 'AWS::IAM::Role',
     'ServiceBindingRegistryOperatorInvokePolicy': 'AWS::IAM::Policy',
-    'ServiceBindingRegistryOperatorInvokePermission': 'AWS::Lambda::Permission',
 }
+OPERATOR_DORMANT_PERMISSION = 'ServiceBindingRegistryOperatorInvokePermission'
+
+def operator_candidate_template(old):
+    """Preserve every deployed template node except the dormant grant."""
+    result=deepcopy(old)
+    require(isinstance(result,dict) and isinstance(result.get('Resources'),dict) and
+        result['Resources'].get(OPERATOR_DORMANT_PERMISSION,{}).get('Type')=='AWS::Lambda::Permission',
+        'production_operator_dormant_permission_missing')
+    del result['Resources'][OPERATOR_DORMANT_PERMISSION]
+    return result
 SERVICES = frozenset({'auth','api','hub','image'})
 DEPENDENCIES = frozenset({'AWS::Lambda::Permission','AWS::Lambda::Url',
     'AWS::Lambda::ResourcePolicy'})
@@ -123,7 +132,8 @@ def review_inventory(changes,old,new,*,scope):
     require(scope in PURPOSES and isinstance(changes,list))
     previous=old.get('Resources',{});candidate=new.get('Resources',{})
     if scope=='operator-patch':
-        require(canonical(old)==canonical(new) and len(changes)==len(OPERATOR_RESOURCES),
+        require(canonical(operator_candidate_template(old))==canonical(new) and
+                len(changes)==len(OPERATOR_RESOURCES),
                 'production_operator_template_or_inventory_changed')
         seen=set()
         for item in changes:

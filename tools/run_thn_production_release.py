@@ -299,7 +299,7 @@ def candidate_for_scope(candidate,baseline,purpose):
     if purpose=='operator-patch':
         release.require(CONFIG['service']=='hub' and not baseline.get('absent'),
                         'production_operator_stack_missing')
-        return deepcopy(old)
+        return release.operator_candidate_template(old)
     if purpose in {'state','activate'} and not baseline.get('absent'):
         for logical,item in old['Resources'].items():
             if not logical.startswith(('Thn','ServiceBinding')) and logical!='ContentHubApi':
@@ -338,14 +338,21 @@ def candidate_for_scope(candidate,baseline,purpose):
     return candidate
 
 def validate_operator_patch_baseline(baseline):
+    status=baseline.get('status')
+    if status=='UPDATE_ROLLBACK_COMPLETE':
+        normalized={**baseline,'status':'UPDATE_COMPLETE'}
+        release.require(release.sha(normalized)==
+            '06d5ee8e96c46ccd9e5a52d6305289829075eb8867d2fa95e76ca43c3472efb8',
+            'production_operator_rollback_baseline_changed')
     release.require(CONFIG['service']=='hub' and not baseline.get('absent') and
-        baseline.get('status')=='UPDATE_COMPLETE' and
+        status in {'UPDATE_COMPLETE','UPDATE_ROLLBACK_COMPLETE'} and
         baseline.get('terminationProtection') is True and
         baseline.get('roleArn')==f'arn:aws:iam::{release.ACCOUNT}:role/{CONFIG["executionRole"]}' and
         len(baseline.get('resources',[]))==57,
         'production_operator_baseline_invalid')
     active={item['LogicalResourceId'] for item in baseline['resources']}
-    release.require(len(active)==57 and not active.intersection(release.OPERATOR_RESOURCES),
+    release.require(len(active)==57 and not active.intersection(
+        set(release.OPERATOR_RESOURCES)|{release.OPERATOR_DORMANT_PERMISSION}),
         'production_operator_already_active')
     expected_properties={
         'ThnProductionRegistryHumanOperatorRole': {
@@ -379,6 +386,11 @@ def validate_operator_patch_baseline(baseline):
             resources[name].get('Properties')==expected_properties[name]
             for name,kind in release.OPERATOR_RESOURCES.items()),
             'production_operator_definitions_missing')
+        permission=resources.get(release.OPERATOR_DORMANT_PERMISSION,{})
+        release.require(permission.get('Type')=='AWS::Lambda::Permission' and
+            permission.get('Condition')=='HasServiceBindingRegistryOperatorRole' and
+            permission.get('Properties')==expected_properties[release.OPERATOR_DORMANT_PERMISSION],
+            'production_operator_dormant_permission_changed')
         role=resources['ThnProductionRegistryHumanOperatorRole']
         release.require(role.get('DeletionPolicy')=='Retain' and
             role.get('UpdateReplacePolicy')=='Retain',
@@ -419,13 +431,13 @@ def validate_operator_patch_completion(before,after):
         after.get('terminationProtection') is True and
         after.get('roleArn')==before.get('roleArn') and
         after.get('stackId')==before.get('stackId') and
-        len(after.get('resources',[]))==60,
+        len(after.get('resources',[]))==59,
         'production_operator_completion_invalid')
     old={row['LogicalResourceId']:(row['PhysicalResourceId'],row['ResourceType'])
          for row in before['resources']}
     new={row['LogicalResourceId']:(row['PhysicalResourceId'],row['ResourceType'])
          for row in after['resources']}
-    release.require(len(old)==57 and len(new)==60 and all(new.get(name)==identity
+    release.require(len(old)==57 and len(new)==59 and all(new.get(name)==identity
         for name,identity in old.items()) and
         set(new)-set(old)==set(release.OPERATOR_RESOURCES) and
         all(new[name][0] and new[name][1]==kind for name,kind in release.OPERATOR_RESOURCES.items()),
@@ -437,40 +449,93 @@ def validate_operator_patch_completion(before,after):
         'production_operator_resource_incomplete')
     validate_operator_patch_preview_parameters(after['parameters'],before['parameters'])
     release.require(release.canonical(release.parse_template(after['original']))==
-        release.canonical(release.parse_template(before['original'])) and
+        release.canonical(release.operator_candidate_template(release.parse_template(before['original']))) and
         release.canonical(release.parse_template(after['processed']))==
-        release.canonical(release.parse_template(before['processed'])),
+        release.canonical(release.operator_candidate_template(release.parse_template(before['processed']))),
         'production_operator_template_changed')
 
-def validate_operator_patch_invoke_policy(policy):
-    value=load_json(policy)
-    function='arn:aws:lambda:us-east-1:765932874577:function:zoolanding-content-hub-prod-ThnServiceBindingRegistryV2Mutation'
-    matched=[statement for statement in value.get('Statement',[]) if
-        statement.get('Principal') in ({'AWS':f'arn:aws:iam::{release.ACCOUNT}:role/zoolanding-thn-registry-production-operator'},
-                                       f'arn:aws:iam::{release.ACCOUNT}:role/zoolanding-thn-registry-production-operator')]
-    release.require(len(matched)==1 and matched[0].get('Effect')=='Allow' and
-        matched[0].get('Action')=='lambda:InvokeFunction' and
-        matched[0].get('Resource')==function and not matched[0].get('Condition'),
-        'production_operator_invoke_policy_invalid')
+def validate_operator_iam_policy(role,policy,inline_names,attached_policies):
+    name='zoolanding-thn-registry-production-operator'
+    expected_trust={'Version':'2012-10-17','Statement':[{
+        'Effect':'Allow','Action':'sts:AssumeRole',
+        'Principal':{'AWS':release.OPERATOR_PRINCIPAL},
+        'Condition':{'Bool':{'aws:MultiFactorAuthPresent':'true'},
+            'NumericLessThanEquals':{'aws:MultiFactorAuthAge':'300'}}}]}
+    expected_policy={'Version':'2012-10-17','Statement':[{
+        'Sid':'InvokeExactPrivateRegistryMutation','Effect':'Allow',
+        'Action':['lambda:InvokeFunction'],
+        'Resource':f'arn:aws:lambda:{release.REGION}:{release.ACCOUNT}:function:zoolanding-content-hub-prod-ThnServiceBindingRegistryV2Mutation'}]}
+    release.require(role.get('RoleName')==name and
+        role.get('Arn')==f'arn:aws:iam::{release.ACCOUNT}:role/{name}' and
+        role.get('MaxSessionDuration')==3600 and
+        role.get('AssumeRolePolicyDocument')==expected_trust and
+        policy==expected_policy and
+        inline_names==['InvokeExactThnRegistryMutation'] and
+        attached_policies==[],
+        'production_operator_iam_policy_invalid')
 
-def wait_for_operator_invoke_policy(client):
+def validate_operator_lambda_policy_absent(client):
     function='zoolanding-content-hub-prod-ThnServiceBindingRegistryV2Mutation'
+    try:
+        client.get_policy(FunctionName=function)
+    except Exception as error:
+        if getattr(error,'response',{}).get('Error',{}).get('Code')=='ResourceNotFoundException':
+            return
+        raise
+    raise release.ReleaseError('production_operator_lambda_policy_changed')
+
+def validate_operator_iam_effective_state(client):
+    name='zoolanding-thn-registry-production-operator'
+    role=client.get_role(RoleName=name)['Role']
+    policy=client.get_role_policy(RoleName=name,PolicyName='InvokeExactThnRegistryMutation')['PolicyDocument']
+    inline=client.list_role_policies(RoleName=name)
+    attached=client.list_attached_role_policies(RoleName=name)
+    release.require(inline.get('IsTruncated') is not True and attached.get('IsTruncated') is not True,
+        'production_operator_iam_policy_truncated')
+    validate_operator_iam_policy(role,policy,inline['PolicyNames'],attached['AttachedPolicies'])
+
+def validate_operator_effective_scope(result):
+    exact=f'arn:aws:lambda:{release.REGION}:{release.ACCOUNT}:function:zoolanding-content-hub-prod-ThnServiceBindingRegistryV2Mutation'
+    other=f'arn:aws:lambda:{release.REGION}:{release.ACCOUNT}:function:zoolanding-content-hub-prod-ThnContentHubV2Authoring'
+    expected={'lambda:invokefunction':{exact:'allowed',other:'implicitDeny'},
+              'lambda:deletefunction':{exact:'implicitDeny',other:'implicitDeny'}}
+    release.require(result.get('IsTruncated') is not True and
+        len(result.get('EvaluationResults',[]))==len(expected),
+        'production_operator_effective_scope_invalid')
+    seen=set()
+    for row in result['EvaluationResults']:
+        action=row.get('EvalActionName','').lower()
+        parts=row.get('ResourceSpecificResults',[])
+        release.require(action in expected and action not in seen and
+            not row.get('MissingContextValues') and len(parts)==2 and
+            {part.get('EvalResourceName'):part.get('EvalResourceDecision') for part in parts}==expected[action] and
+            all(not part.get('MissingContextValues') for part in parts),
+            'production_operator_effective_scope_invalid')
+        seen.add(action)
+
+def verify_operator_effective_scope(client):
+    name='zoolanding-thn-registry-production-operator'
+    resources=[f'arn:aws:lambda:{release.REGION}:{release.ACCOUNT}:function:zoolanding-content-hub-prod-{suffix}'
+        for suffix in ('ThnServiceBindingRegistryV2Mutation','ThnContentHubV2Authoring')]
     for attempt in range(16):
         try:
-            policy=client.get_policy(FunctionName=function)['Policy']
-            validate_operator_patch_invoke_policy(policy)
+            result=client.simulate_principal_policy(
+                PolicySourceArn=f'arn:aws:iam::{release.ACCOUNT}:role/{name}',
+                ActionNames=['lambda:invokefunction','lambda:deletefunction'],
+                ResourceArns=resources)
+            validate_operator_effective_scope(result)
             return
-        except release.ReleaseError:
-            if attempt==15: raise
         except Exception as error:
-            if getattr(error,'response',{}).get('Error',{}).get('Code')!='ResourceNotFoundException' or attempt==15:
+            if getattr(error,'response',{}).get('Error',{}).get('Code')!='NoSuchEntity' or attempt==15:
                 raise
         time.sleep(2)
 
 def review(session,args,source,identity,permissions):
     cf=session.client('cloudformation');s3=session.client('s3')
     baseline=captured_baseline(session)
-    if args.purpose=='operator-patch': validate_operator_patch_baseline(baseline)
+    if args.purpose=='operator-patch':
+        validate_operator_patch_baseline(baseline)
+        validate_operator_lambda_policy_absent(session.client('lambda'))
     release.require(not baseline.get('absent') or args.purpose=='activate',
         'production_dedicated_runtime_requires_verified_activation')
     packaged=None
@@ -568,6 +633,7 @@ def fresh_execute_authority(session,record,source,purpose,preview,processed):
     if purpose=='operator-patch':
         validate_operator_patch_baseline(baseline)
         validate_operator_patch_preview_parameters(preview.get('Parameters',[]),baseline['parameters'])
+        validate_operator_lambda_policy_absent(session.client('lambda'))
     if CONFIG['service']=='hub' and purpose=='state':
         imported.require('postImportTargets' in baseline,
                          'production_post_import_targets_missing')
@@ -621,7 +687,9 @@ def main(argv=None):
         identity,permissions=identity_and_permissions(session,source,args.purpose)
         if args.operation=='preflight':
             baseline=captured_baseline(session)
-            if args.purpose=='operator-patch': validate_operator_patch_baseline(baseline)
+            if args.purpose=='operator-patch':
+                validate_operator_patch_baseline(baseline)
+                validate_operator_lambda_policy_absent(session.client('lambda'))
             s3=session.client('s3')
             release.require(s3.get_bucket_versioning(Bucket=CONFIG['bucket']).get('Status')=='Enabled')
             block=s3.get_public_access_block(Bucket=CONFIG['bucket'])['PublicAccessBlockConfiguration']
@@ -635,7 +703,9 @@ def main(argv=None):
                 release.cleanup_retained(session.client('cloudformation'),record,service=CONFIG['service'],source_sha=record['sourceSha'])
             else:
                 baseline=captured_baseline(session)
-                if args.purpose=='operator-patch': validate_operator_patch_baseline(baseline)
+                if args.purpose=='operator-patch':
+                    validate_operator_patch_baseline(baseline)
+                    validate_operator_lambda_policy_absent(session.client('lambda'))
                 preview=release.describe_preview(session.client('cloudformation'),record['changeSetArn'])
                 if args.purpose=='operator-patch':
                     validate_operator_patch_preview_parameters(preview.get('Parameters',[]),baseline['parameters'])
@@ -676,7 +746,8 @@ def main(argv=None):
                     after=captured_baseline(session)
                 if args.purpose=='operator-patch':
                     validate_operator_patch_completion(baseline,after)
-                    wait_for_operator_invoke_policy(session.client('lambda'))
+                    verify_operator_effective_scope(session.client('iam'))
+                    validate_operator_lambda_policy_absent(session.client('lambda'))
                 before={r['LogicalResourceId']:r['PhysicalResourceId'] for r in baseline.get('resources',[])}
                 current={r['LogicalResourceId']:r['PhysicalResourceId'] for r in after['resources']}
                 release.require(all(current.get(k)==v for k,v in before.items() if not k.startswith('Thn') or 'Version' not in k),
