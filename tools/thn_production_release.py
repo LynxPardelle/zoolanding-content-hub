@@ -18,7 +18,17 @@ FIELDS = frozenset({'schemaVersion','contract','environment','service','purpose'
     'originalTemplateSha256','processedTemplateSha256','parametersSha256',
     'permissionSha256','identitySha256','sourcePackageSha256','packageManifest',
     'changes','nativeInventorySha256','recoveryCoordinates','digest'})
-PURPOSES = frozenset({'state','activate','general','recover'})
+PURPOSES = frozenset({'state','activate','general','recover','operator-patch'})
+OPERATOR_PRINCIPAL = 'arn:aws:iam::765932874577:user/Hector-admin'
+OPERATOR_PARAMETERS = {
+    'ProvisionThnProductionRegistryOperator': 'true',
+    'ThnProductionRegistryHumanPrincipalArn': OPERATOR_PRINCIPAL,
+}
+OPERATOR_RESOURCES = {
+    'ThnProductionRegistryHumanOperatorRole': 'AWS::IAM::Role',
+    'ServiceBindingRegistryOperatorInvokePolicy': 'AWS::IAM::Policy',
+    'ServiceBindingRegistryOperatorInvokePermission': 'AWS::Lambda::Permission',
+}
 SERVICES = frozenset({'auth','api','hub','image'})
 DEPENDENCIES = frozenset({'AWS::Lambda::Permission','AWS::Lambda::Url',
     'AWS::Lambda::ResourcePolicy'})
@@ -112,6 +122,27 @@ def verify_review_record(record,*,approved_digest,now,service,source_sha):
 def review_inventory(changes,old,new,*,scope):
     require(scope in PURPOSES and isinstance(changes,list))
     previous=old.get('Resources',{});candidate=new.get('Resources',{})
+    if scope=='operator-patch':
+        require(canonical(old)==canonical(new) and len(changes)==len(OPERATOR_RESOURCES),
+                'production_operator_template_or_inventory_changed')
+        seen=set()
+        for item in changes:
+            require(isinstance(item,dict) and item.get('Type')=='Resource',
+                    'production_operator_inventory_invalid')
+            change=item.get('ResourceChange',{})
+            logical=change.get('LogicalResourceId')
+            require(logical in OPERATOR_RESOURCES and logical not in seen and
+                    change.get('Action')=='Add' and
+                    change.get('ResourceType')==OPERATOR_RESOURCES[logical] and
+                    change.get('Replacement') in (None,'False') and
+                    not change.get('PhysicalResourceId') and
+                    not change.get('Scope') and not change.get('Details') and
+                    candidate.get(logical,{}).get('Type')==OPERATOR_RESOURCES[logical] and
+                    candidate[logical].get('Condition')=='HasServiceBindingRegistryOperatorRole',
+                    'production_operator_inventory_invalid')
+            seen.add(logical)
+        require(seen==set(OPERATOR_RESOURCES),'production_operator_inventory_invalid')
+        return sorted(deepcopy(changes),key=canonical)
     seen=set()
     for item in changes:
         resource=item.get('ResourceChange',{})
@@ -159,6 +190,16 @@ def review_inventory(changes,old,new,*,scope):
 def select_parameters(definitions,current,overrides,*,purpose):
     require(purpose in PURPOSES and isinstance(overrides,dict) and not(set(overrides)-set(definitions)))
     previous={item['ParameterKey']:item for item in current}
+    if purpose=='operator-patch':
+        require(set(overrides)==set(OPERATOR_PARAMETERS) and overrides==OPERATOR_PARAMETERS and
+                set(previous)==set(definitions) and
+                previous['ProvisionThnProductionRegistryOperator'].get('ParameterValue')=='false' and
+                previous['ThnProductionRegistryHumanPrincipalArn'].get('ParameterValue')=='BLOCKED' and
+                previous['ProvisionThnServiceBindingRegistryV2State'].get('ParameterValue')=='true' and
+                previous['ProvisionThnContentHubV2State'].get('ParameterValue')=='true' and
+                previous['EnableThnContentHubV2'].get('ParameterValue')=='false' and
+                previous['ThnProductionDependencyGate'].get('ParameterValue')=='BLOCKED',
+                'production_operator_parameter_selection_invalid')
     parameters=[]
     for name,definition in definitions.items():
         if name in overrides:
