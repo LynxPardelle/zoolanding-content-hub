@@ -70,10 +70,13 @@ class PostImportStateTests(unittest.TestCase):
             {'ParameterKey': 'EnableThnContentHubV2', 'ParameterValue': 'false'},
             {'ParameterKey': 'ThnProductionOwnerPoolId', 'ParameterValue': '****'},
         ]
+        previous += [{'ParameterKey': f'Preserved{i:02d}', 'ParameterValue': f'value-{i}'}
+                     for i in range(16)]
         reviewed = copy.deepcopy(previous)
         reviewed[0]['ParameterValue'] = 'true'
         reviewed[1]['ParameterValue'] = driver.release.OPERATOR_PRINCIPAL
         driver.validate_operator_patch_preview_parameters(reviewed, previous)
+        self.assertEqual(len(reviewed),20)
         changed = copy.deepcopy(reviewed)
         changed[2]['ParameterValue'] = 'true'
         with self.assertRaises(driver.release.ReleaseError):
@@ -89,7 +92,11 @@ class PostImportStateTests(unittest.TestCase):
                   'parameters': [{'ParameterKey': 'EnableThnContentHubV2', 'ParameterValue': 'false'},
                                  {'ParameterKey': 'ProvisionThnProductionRegistryOperator', 'ParameterValue': 'false'},
                                  {'ParameterKey': 'ThnProductionRegistryHumanPrincipalArn', 'ParameterValue': 'BLOCKED'}]}
-        after = copy.deepcopy(before)
+        before['original']['Resources']['ServiceBindingRegistryOperatorInvokePermission']={'Type':'AWS::Lambda::Permission'}
+        before['processed']['Resources']['ServiceBindingRegistryOperatorInvokePermission']={'Type':'AWS::Lambda::Permission'}
+        after=copy.deepcopy(before)
+        del after['original']['Resources']['ServiceBindingRegistryOperatorInvokePermission']
+        del after['processed']['Resources']['ServiceBindingRegistryOperatorInvokePermission']
         after['resources'] += [{'LogicalResourceId': name, 'PhysicalResourceId': f'new-{name}',
                                 'ResourceStatus': 'CREATE_COMPLETE',
                                 'ResourceType': kind} for name, kind in driver.release.OPERATOR_RESOURCES.items()]
@@ -101,27 +108,61 @@ class PostImportStateTests(unittest.TestCase):
         with self.assertRaises(driver.release.ReleaseError):
             driver.validate_operator_patch_completion(before, after)
 
-    def test_operator_patch_invocation_policy_requires_exact_mfa_role(self):
-        statement = {'Effect': 'Allow', 'Action': 'lambda:InvokeFunction',
-                     'Principal': {'AWS': 'arn:aws:iam::765932874577:role/zoolanding-thn-registry-production-operator'},
-                     'Resource': 'arn:aws:lambda:us-east-1:765932874577:function:zoolanding-content-hub-prod-ThnServiceBindingRegistryV2Mutation'}
-        driver.validate_operator_patch_invoke_policy(__import__('json').dumps({'Statement': [statement]}))
-        statement['Principal']['AWS'] = 'arn:aws:iam::765932874577:role/other'
-        with self.assertRaises(driver.release.ReleaseError):
-            driver.validate_operator_patch_invoke_policy(__import__('json').dumps({'Statement': [statement]}))
-
-    def test_operator_patch_waits_for_policy_propagation(self):
-        import json
-        valid={'Statement':[{'Effect':'Allow','Action':'lambda:InvokeFunction',
-            'Principal':{'AWS':'arn:aws:iam::765932874577:role/zoolanding-thn-registry-production-operator'},
+    def test_operator_patch_requires_exact_iam_role_trust_and_inline_invoke(self):
+        role={'RoleName':'zoolanding-thn-registry-production-operator',
+            'Arn':'arn:aws:iam::765932874577:role/zoolanding-thn-registry-production-operator',
+            'MaxSessionDuration':3600,
+            'AssumeRolePolicyDocument':{'Version':'2012-10-17','Statement':[{
+                'Effect':'Allow','Action':'sts:AssumeRole',
+                'Principal':{'AWS':driver.release.OPERATOR_PRINCIPAL},
+                'Condition':{'Bool':{'aws:MultiFactorAuthPresent':'true'},
+                    'NumericLessThanEquals':{'aws:MultiFactorAuthAge':'300'}}}]}}
+        policy={'Version':'2012-10-17','Statement':[{
+            'Sid':'InvokeExactPrivateRegistryMutation','Effect':'Allow',
+            'Action':['lambda:InvokeFunction'],
             'Resource':'arn:aws:lambda:us-east-1:765932874577:function:zoolanding-content-hub-prod-ThnServiceBindingRegistryV2Mutation'}]}
+        driver.validate_operator_iam_policy(role,policy,['InvokeExactThnRegistryMutation'],[])
+        changed=copy.deepcopy(policy)
+        changed['Statement'][0]['Resource']='*'
+        with self.assertRaises(driver.release.ReleaseError):
+            driver.validate_operator_iam_policy(role,changed,['InvokeExactThnRegistryMutation'],[])
+        changed=copy.deepcopy(role)
+        changed['AssumeRolePolicyDocument']['Statement'][0]['Condition'].pop('NumericLessThanEquals')
+        with self.assertRaises(driver.release.ReleaseError):
+            driver.validate_operator_iam_policy(changed,policy,['InvokeExactThnRegistryMutation'],[])
+        with self.assertRaises(driver.release.ReleaseError):
+            driver.validate_operator_iam_policy(role,policy,['InvokeExactThnRegistryMutation','Extra'],[])
+
+    def test_operator_patch_keeps_lambda_resource_policy_absent(self):
+        missing=Exception('missing')
+        missing.response={'Error':{'Code':'ResourceNotFoundException'}}
         client=Mock()
-        client.get_policy.side_effect=[{'Policy':json.dumps({'Statement':[]})},
-                                       {'Policy':json.dumps(valid)}]
-        with patch.object(driver.time,'sleep') as sleep:
-            driver.wait_for_operator_invoke_policy(client)
-        self.assertEqual(client.get_policy.call_count,2)
-        sleep.assert_called_once_with(2)
+        client.get_policy.side_effect=missing
+        driver.validate_operator_lambda_policy_absent(client)
+        client.get_policy.side_effect=None
+        client.get_policy.return_value={'Policy':'{"Statement":[]}'}
+        with self.assertRaises(driver.release.ReleaseError):
+            driver.validate_operator_lambda_policy_absent(client)
+
+    def test_operator_patch_effective_role_scope_is_one_lambda_invoke(self):
+        exact='arn:aws:lambda:us-east-1:765932874577:function:zoolanding-content-hub-prod-ThnServiceBindingRegistryV2Mutation'
+        other='arn:aws:lambda:us-east-1:765932874577:function:zoolanding-content-hub-prod-ThnContentHubV2Authoring'
+        result={'IsTruncated':False,'EvaluationResults':[
+            {'EvalActionName':'lambda:invokefunction','ResourceSpecificResults':[
+                {'EvalResourceName':exact,'EvalResourceDecision':'allowed'},
+                {'EvalResourceName':other,'EvalResourceDecision':'implicitDeny'}]},
+            {'EvalActionName':'lambda:deletefunction','ResourceSpecificResults':[
+                {'EvalResourceName':exact,'EvalResourceDecision':'implicitDeny'},
+                {'EvalResourceName':other,'EvalResourceDecision':'implicitDeny'}]}]}
+        driver.validate_operator_effective_scope(result)
+        changed=copy.deepcopy(result)
+        changed['EvaluationResults'][0]['ResourceSpecificResults'][1]['EvalResourceDecision']='allowed'
+        with self.assertRaises(driver.release.ReleaseError):
+            driver.validate_operator_effective_scope(changed)
+        changed=copy.deepcopy(result)
+        changed['EvaluationResults'][0]['ResourceSpecificResults'][0]['MissingContextValues']=['aws:MultiFactorAuthPresent']
+        with self.assertRaises(driver.release.ReleaseError):
+            driver.validate_operator_effective_scope(changed)
 
     def test_operator_patch_baseline_requires_57_closed_resources_and_dormant_definitions(self):
         from pathlib import Path
@@ -130,6 +171,11 @@ class PostImportStateTests(unittest.TestCase):
         source = prepare_template(yaml.safe_load((Path(__file__).resolve().parents[1] / 'template.yaml').read_text()))
         expected = driver.release.OPERATOR_RESOURCES
         template = {'Resources': {name: source['Resources'][name] for name in expected}}
+        template['Resources']['ServiceBindingRegistryOperatorInvokePermission']={
+            'Type':'AWS::Lambda::Permission','Condition':'HasServiceBindingRegistryOperatorRole',
+            'Properties':{'Action':'lambda:InvokeFunction',
+                'FunctionName':{'Ref':'ServiceBindingRegistryV2MutationFunction'},
+                'Principal':{'Fn::Sub':'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/zoolanding-thn-registry-production-operator'}}}
         baseline = {'status': 'UPDATE_COMPLETE', 'terminationProtection': True,
                     'roleArn': 'arn:aws:iam::765932874577:role/zoolanding-deployer-content-hub-production-cfn-exec',
                     'parameters': [{'ParameterKey': name, 'ParameterValue': value} for name, value in {
@@ -145,25 +191,47 @@ class PostImportStateTests(unittest.TestCase):
                                    'ResourceType': 'AWS::IAM::Role'} for i in range(57)],
                     'original': copy.deepcopy(template), 'processed': copy.deepcopy(template)}
         driver.validate_operator_patch_baseline(baseline)
-        for changed in ('count', 'status', 'protection', 'active-role', 'definition'):
+        rolled=copy.deepcopy(baseline)
+        rolled['status']='UPDATE_ROLLBACK_COMPLETE'
+        reviewed_hash='06d5ee8e96c46ccd9e5a52d6305289829075eb8867d2fa95e76ca43c3472efb8'
+        real_sha=driver.release.sha
+        def pinned_sha(value):
+            if isinstance(value,dict) and value.get('status')=='UPDATE_COMPLETE' and value==baseline:
+                return reviewed_hash
+            return real_sha(value)
+        with patch.object(driver.release,'sha',side_effect=pinned_sha):
+            driver.validate_operator_patch_baseline(rolled)
+        rolled['resources'][0]['PhysicalResourceId']='changed'
+        with self.assertRaises(driver.release.ReleaseError):
+            driver.validate_operator_patch_baseline(rolled)
+        for changed in ('count', 'status', 'protection', 'active-role', 'active-permission', 'definition'):
             invalid = copy.deepcopy(baseline)
             if changed == 'count': invalid['resources'].pop()
             elif changed == 'status': invalid['status'] = 'UPDATE_ROLLBACK_COMPLETE'
             elif changed == 'protection': invalid['terminationProtection'] = False
             elif changed == 'active-role': invalid['resources'][0]['LogicalResourceId'] = next(iter(expected))
+            elif changed == 'active-permission': invalid['resources'][0]['LogicalResourceId'] = 'ServiceBindingRegistryOperatorInvokePermission'
             else: invalid['original']['Resources'].pop(next(iter(expected)))
             with self.subTest(changed=changed), self.assertRaises(driver.release.ReleaseError):
                 driver.validate_operator_patch_baseline(invalid)
+
+    def test_operator_patch_rejects_missing_dormant_permission_definition(self):
+        baseline,_=post_import_baseline()
+        with self.assertRaises(driver.release.ReleaseError):
+            driver.candidate_for_scope(None,baseline,'operator-patch')
 
     def test_operator_patch_uses_the_deployed_template_without_repeating_state_transition(self):
         baseline, _ = post_import_baseline()
         baseline['original']['Resources']['ThnProductionRegistryHumanOperatorRole'] = {
             'Type': 'AWS::IAM::Role', 'Condition': 'HasServiceBindingRegistryOperatorRole',
             'Properties': {'RoleName': 'zoolanding-thn-registry-production-operator'}}
+        baseline['original']['Resources']['ServiceBindingRegistryOperatorInvokePermission'] = {
+            'Type':'AWS::Lambda::Permission','Condition':'HasServiceBindingRegistryOperatorRole'}
         candidate = {'Resources': {'ServiceBindingRegistryV2Table': {
             'Type': 'AWS::DynamoDB::Table', 'Properties': {'ResourcePolicy': 'unreviewed'}}}}
         selected = driver.candidate_for_scope(candidate, baseline, 'operator-patch')
-        self.assertEqual(selected, baseline['original'])
+        self.assertEqual(selected['Resources'], {name: value for name, value in baseline['original']['Resources'].items()
+                                                 if name!='ServiceBindingRegistryOperatorInvokePermission'})
         self.assertNotEqual(selected, candidate)
 
     def test_release_failure_code_reports_only_closed_guard_reasons(self):
