@@ -21,6 +21,67 @@ class SimulationFingerprintTests(unittest.TestCase):
         self.assertNotEqual(sha(stable),sha(stable_simulation_evaluations([changed_policy])))
 
 class RetainedProductionReleaseTests(unittest.TestCase):
+    def test_operator_patch_record_has_no_new_lambda_package(self):
+        record = make_review_record(service='hub', purpose='operator-patch', source_sha='a'*40,
+            stack_id='arn:aws:cloudformation:us-east-1:765932874577:stack/zoolanding-content-hub-prod/id',
+            change_set_arn='arn:aws:cloudformation:us-east-1:765932874577:changeSet/thn-production-hub-operator-patch/id',
+            created_at=1000, baseline={'resources': []}, original={'Resources': {}},
+            processed={'Resources': {}}, parameters=[], packages=[], changes=[], recovery=[])
+        self.assertEqual(record['packageManifest'], [])
+        verify_review_record(record, approved_digest=record['digest'], now=1001,
+            service='hub', source_sha='a'*40)
+
+    def test_operator_patch_selects_only_the_mfa_operator_and_preserves_closed_state(self):
+        definitions = {name: {'Type': 'String'} for name in (
+            'ProvisionThnServiceBindingRegistryV2State', 'ProvisionThnContentHubV2State',
+            'ProvisionThnProductionRegistryOperator', 'ThnProductionRegistryHumanPrincipalArn',
+            'EnableThnContentHubV2', 'ThnProductionDependencyGate', 'ThnProductionOwnerPoolArn')}
+        current = [{'ParameterKey': name, 'ParameterValue': value} for name, value in {
+            'ProvisionThnServiceBindingRegistryV2State': 'true',
+            'ProvisionThnContentHubV2State': 'true',
+            'ProvisionThnProductionRegistryOperator': 'false',
+            'ThnProductionRegistryHumanPrincipalArn': 'BLOCKED',
+            'EnableThnContentHubV2': 'false',
+            'ThnProductionDependencyGate': 'BLOCKED',
+            'ThnProductionOwnerPoolArn': '****',
+        }.items()]
+        overrides = {
+            'ProvisionThnProductionRegistryOperator': 'true',
+            'ThnProductionRegistryHumanPrincipalArn': 'arn:aws:iam::765932874577:user/Hector-admin',
+        }
+        result = select_parameters(definitions, current, overrides, purpose='operator-patch')
+        self.assertEqual([item for item in result if 'ParameterValue' in item], [
+            {'ParameterKey': name, 'ParameterValue': overrides[name]} for name in overrides])
+        self.assertEqual(len([item for item in result if item.get('UsePreviousValue')]), 5)
+        for changed in (
+            {**overrides, 'EnableThnContentHubV2': 'true'},
+            {**overrides, 'ThnProductionRegistryHumanPrincipalArn': 'arn:aws:iam::765932874577:user/Other'},
+            {'ProvisionThnProductionRegistryOperator': 'true'},
+        ):
+            with self.subTest(changed=changed), self.assertRaises(ReleaseError):
+                select_parameters(definitions, current, changed, purpose='operator-patch')
+
+    def test_operator_patch_inventory_is_exactly_three_nonreplacing_adds(self):
+        resources = {
+            'ThnProductionRegistryHumanOperatorRole': 'AWS::IAM::Role',
+            'ServiceBindingRegistryOperatorInvokePolicy': 'AWS::IAM::Policy',
+            'ServiceBindingRegistryOperatorInvokePermission': 'AWS::Lambda::Permission',
+        }
+        old = {'Resources': {'ServiceBindingRegistryV2MutationFunction': {'Type': 'AWS::Lambda::Function'},
+                             **{name: {'Type': kind, 'Condition': 'HasServiceBindingRegistryOperatorRole'}
+                                for name, kind in resources.items()}}}
+        new = copy.deepcopy(old)
+        changes = [{'Type': 'Resource', 'ResourceChange': {'Action': 'Add', 'LogicalResourceId': name,
+                    'ResourceType': kind, 'Replacement': 'False'}} for name, kind in resources.items()]
+        review_inventory(changes, old, new, scope='operator-patch')
+        for invalid in (changes[:-1], [*changes, {'ResourceChange': {
+                'Action': 'Modify', 'LogicalResourceId': 'ServiceBindingRegistryV2MutationFunction',
+                'ResourceType': 'AWS::Lambda::Function', 'Replacement': 'False'}}],
+                [{**changes[0], 'ResourceChange': {**changes[0]['ResourceChange'],
+                    'Replacement': 'Conditional'}}, *changes[1:]]):
+            with self.subTest(invalid=invalid), self.assertRaises(ReleaseError):
+                review_inventory(invalid, old, new, scope='operator-patch')
+
     def record(self):
         return make_review_record(service='auth',purpose='state',source_sha='a'*40,stack_id='arn:aws:cloudformation:us-east-1:765932874577:stack/zoolanding-auth-admin-prod/id',change_set_arn='arn:aws:cloudformation:us-east-1:765932874577:changeSet/thn-production-auth-state/id',created_at=1000,baseline={'resources':[]},original={'Resources':{}},processed={'Resources':{}},parameters=[],packages=[{'bucket':'bucket','key':'key','versionId':'v1','sha256':'b'*64}],changes=[],recovery=[])
     def test_sealed_exact_review_all_fields_and_expiry(self):
