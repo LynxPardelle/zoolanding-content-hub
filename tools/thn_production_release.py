@@ -18,10 +18,48 @@ FIELDS = frozenset({'schemaVersion','contract','environment','service','purpose'
     'originalTemplateSha256','processedTemplateSha256','parametersSha256',
     'permissionSha256','identitySha256','sourcePackageSha256','packageManifest',
     'changes','nativeInventorySha256','recoveryCoordinates','digest'})
-PURPOSES = frozenset({'state','activate','general','recover','operator-patch','registry-reader-patch'})
+IAM_PATCHES = {
+    'writer-iam-patch': ('ServiceBindingRegistryV2MutationRole', 'ReadExactProductionWriterServices'),
+    'emergency-iam-patch': ('ThnContentHubV2EmergencyWithdrawRole', 'ReadExactThnBindingBeforeWithdrawal'),
+}
+PURPOSES = frozenset({'state','activate','general','recover','operator-patch','registry-reader-patch', *IAM_PATCHES})
+
+
+def iam_patch_candidate_template(old, source, purpose):
+    """Copy one reviewed IAM statement from source into the live template."""
+    require(purpose in IAM_PATCHES, 'production_iam_patch_purpose_invalid')
+    logical, sid = IAM_PATCHES[purpose]
+    result = deepcopy(old)
+    def statements(template):
+        role = template.get('Resources', {}).get(logical, {})
+        require(role.get('Type') == 'AWS::IAM::Role' and
+                len(role.get('Properties', {}).get('Policies', [])) == 1,
+                'production_iam_patch_role_changed')
+        return role['Properties']['Policies'][0]['PolicyDocument']['Statement']
+    current = statements(result)
+    proposed = [item for item in statements(source) if item.get('Sid') == sid]
+    existing = [index for index, item in enumerate(current) if item.get('Sid') == sid]
+    require(len(proposed) == 1 and len(existing) == (1 if purpose == 'writer-iam-patch' else 0),
+            'production_iam_patch_statement_changed')
+    statement = deepcopy(proposed[0])
+    require(statement.get('Effect') == 'Allow' and
+            (statement.get('Action') == ['lambda:GetFunctionConfiguration', 'lambda:GetAlias']
+             if purpose == 'writer-iam-patch' else
+             statement.get('Action') == ['dynamodb:GetItem']),
+            'production_iam_patch_statement_invalid')
+    if existing:
+        require(canonical(current[existing[0]]) != canonical(statement),
+                'production_iam_patch_already_applied')
+        current[existing[0]] = statement
+    else:
+        current.append(statement)
+    return result
 REGISTRY_READER_TABLE = 'ServiceBindingRegistryV2Table'
 REGISTRY_READER_TABLE_NAME = 'zoolanding-content-hub-prod-ServiceBindingRegistryV2'
 REGISTRY_READER_ROLE = 'arn:aws:iam::765932874577:role/zoolanding-deployer-thn-auth-runtime-production-github-deploy'
+REGISTRY_AUTH_DEPLOY_ROLE = 'arn:aws:iam::765932874577:role/zoolanding-auth-admin-production-deploy'
+REGISTRY_RUNTIME_ROLE = 'arn:aws:iam::765932874577:role/zlp-thn-auth-runtime-prod-role'
+REGISTRY_STALE_TEST_RUNTIME = 'arn:aws:iam::765932874577:role/zoolanding-thn-auth-runti-ThnAuthRuntimeV2FunctionR-0nd3Hd8ToVOo'
 REGISTRY_DEPLOY_READERS = (
     'arn:aws:iam::765932874577:role/zoolanding-content-hub-production-deploy',
     'arn:aws:iam::765932874577:role/zoolanding-deployer-image-upload-production-github-deploy',
@@ -34,7 +72,7 @@ REGISTRY_READER_SIDS = (
 
 
 def registry_reader_candidate_template(old):
-    """Add one exact API role to three policy lists, preserving all other nodes."""
+    """Admit the exact production readers and remove the stale TEST exception."""
     result=deepcopy(old)
     table=result.get('Resources',{}).get(REGISTRY_READER_TABLE,{})
     require(table.get('Type')=='AWS::DynamoDB::Table',
@@ -50,19 +88,20 @@ def registry_reader_candidate_template(old):
                 for sid in REGISTRY_READER_SIDS),
             'production_registry_reader_statements_changed')
     broad,other,missing=matches
-    def principal(value):
+    def principal(value, role):
         if isinstance(value,dict) and value.get('Fn::Sub')==(
-                'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/'+REGISTRY_READER_ROLE.split('/')[-1]):
+                'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/'+role.split('/')[-1]):
             return True
-        return value==REGISTRY_READER_ROLE
-    api={'Fn::Sub':'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/'+
-         REGISTRY_READER_ROLE.split('/')[-1]} if any(isinstance(v,dict) for v in
-         broad.get('Condition',{}).get('ArnNotEquals',{}).get('aws:PrincipalArn',[])) else REGISTRY_READER_ROLE
+        return value==role
+    def encoded(role,values):
+        return {'Fn::Sub':'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/'+role.split('/')[-1]} if any(isinstance(v,dict) for v in values) else role
     readers=broad.get('Condition',{}).get('ArnNotEquals',{}).get('aws:PrincipalArn')
     require(broad.get('Effect')=='Deny' and broad.get('Principal')=='*' and
             broad.get('Action')==['dynamodb:GetItem'] and isinstance(readers,list) and
             len(readers)==13 and len({canonical(v) for v in readers})==13 and
-            not any(principal(v) for v in readers),
+            sum(principal(v,REGISTRY_STALE_TEST_RUNTIME) for v in readers)==1 and
+            not any(principal(v,role) for v in readers for role in
+                (REGISTRY_AUTH_DEPLOY_ROLE,REGISTRY_READER_ROLE,REGISTRY_RUNTIME_ROLE)),
             'production_registry_reader_approved_consumers_changed')
     for row,condition,expected in (
             (other,'ForAnyValue:StringNotEquals',
@@ -77,8 +116,12 @@ def registry_reader_candidate_template(old):
                 set(normalized)==set(REGISTRY_DEPLOY_READERS) and
                 row.get('Condition')=={condition:{'dynamodb:LeadingKeys':expected}},
                 'production_registry_reader_deployment_fence_changed')
-        values.append(deepcopy(api))
-    readers.append(deepcopy(api))
+        values.extend(encoded(role,values) for role in
+                      (REGISTRY_AUTH_DEPLOY_ROLE,REGISTRY_READER_ROLE))
+    reader_encoding=[encoded(role,readers) for role in
+                     (REGISTRY_AUTH_DEPLOY_ROLE,REGISTRY_READER_ROLE,REGISTRY_RUNTIME_ROLE)]
+    readers[:]=[value for value in readers if not principal(value,REGISTRY_STALE_TEST_RUNTIME)]
+    readers.extend(reader_encoding)
     return result
 OPERATOR_PRINCIPAL = 'arn:aws:iam::765932874577:user/Hector-admin'
 OPERATOR_PARAMETERS = {
@@ -192,6 +235,22 @@ def verify_review_record(record,*,approved_digest,now,service,source_sha):
 def review_inventory(changes,old,new,*,scope):
     require(scope in PURPOSES and isinstance(changes,list))
     previous=old.get('Resources',{});candidate=new.get('Resources',{})
+    if scope in IAM_PATCHES:
+        logical, _ = IAM_PATCHES[scope]
+        require(len(changes)==1 and isinstance(changes[0],dict) and
+                changes[0].get('Type')=='Resource', 'production_iam_patch_inventory_invalid')
+        change=changes[0].get('ResourceChange',{})
+        details=change.get('Details')
+        require(change.get('LogicalResourceId')==logical and
+                change.get('ResourceType')=='AWS::IAM::Role' and
+                change.get('Action')=='Modify' and change.get('Replacement')=='False' and
+                change.get('Scope')==['Properties'] and isinstance(details,list) and details and
+                all(isinstance(item,dict) and item.get('ChangeSource')=='DirectModification' and
+                    item.get('Target',{}).get('Attribute')=='Properties' and
+                    item['Target'].get('Name')=='Policies' and
+                    item['Target'].get('RequiresRecreation','Never')=='Never'
+                    for item in details), 'production_iam_patch_inventory_invalid')
+        return deepcopy(changes)
     if scope=='registry-reader-patch':
         require(canonical(registry_reader_candidate_template(old))==canonical(new) and
                 len(changes)==1 and isinstance(changes[0],dict) and
@@ -283,9 +342,9 @@ def review_inventory(changes,old,new,*,scope):
 def select_parameters(definitions,current,overrides,*,purpose):
     require(purpose in PURPOSES and isinstance(overrides,dict) and not(set(overrides)-set(definitions)))
     previous={item['ParameterKey']:item for item in current}
-    if purpose=='registry-reader-patch':
+    if purpose=='registry-reader-patch' or purpose in IAM_PATCHES:
         require(not overrides and set(previous)==set(definitions),
-                'production_registry_reader_parameters_changed')
+                'production_source_free_parameters_changed')
     if purpose=='operator-patch':
         require(set(overrides)==set(OPERATOR_PARAMETERS) and overrides==OPERATOR_PARAMETERS and
                 set(previous)==set(definitions) and

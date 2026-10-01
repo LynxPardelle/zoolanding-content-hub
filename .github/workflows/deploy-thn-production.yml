@@ -9,7 +9,7 @@ on:
       purpose:
         type: choice
         required: true
-        options: [state, activate, general, recover, operator-patch, registry-reader-patch]
+        options: [state, activate, general, recover, operator-patch, registry-reader-patch, writer-iam-patch, emergency-iam-patch]
       source_sha:
         type: string
         required: true
@@ -66,6 +66,7 @@ jobs:
           python -m unittest discover -s tests -p 'test_thn_production_oidc.py'
           python -m unittest discover -s tests -p 'test_thn_production_postimport.py'
           python -m unittest discover -s tests -p 'test_thn_production_registry_reader_patch.py'
+          python -m unittest discover -s tests -p 'test_thn_production_iam_patch.py'
   release:
     needs: validate
     runs-on: ubuntu-24.04
@@ -130,14 +131,14 @@ jobs:
             cp retained-review/production-review.json production-review.json
           fi
       - name: Set up SAM for review only
-        if: inputs.operation == 'review' && inputs.purpose != 'recover' && inputs.purpose != 'operator-patch' && inputs.purpose != 'registry-reader-patch'
+        if: inputs.operation == 'review' && !contains(fromJSON('["recover","operator-patch","registry-reader-patch","writer-iam-patch","emergency-iam-patch"]'), inputs.purpose)
         uses: aws-actions/setup-sam@89ddb14d60e682855e3fea4be85b3c56485de310 # v3
         with:
           version: '1.163.0'
           use-installer: true
           token: ${{ github.token }}
       - name: Validate and build closed production source
-        if: inputs.operation == 'review' && inputs.purpose != 'recover' && inputs.purpose != 'operator-patch' && inputs.purpose != 'registry-reader-patch'
+        if: inputs.operation == 'review' && !contains(fromJSON('["recover","operator-patch","registry-reader-patch","writer-iam-patch","emergency-iam-patch"]'), inputs.purpose)
         shell: bash
         run: |
           set -euo pipefail
@@ -159,7 +160,7 @@ jobs:
         shell: bash
         run: python tools/run_thn_production_release.py preflight --source-sha "$SOURCE_SHA" --purpose "$PURPOSE"
       - name: Package new candidate only for review
-        if: inputs.operation == 'review' && inputs.purpose != 'recover' && inputs.purpose != 'operator-patch' && inputs.purpose != 'registry-reader-patch'
+        if: inputs.operation == 'review' && !contains(fromJSON('["recover","operator-patch","registry-reader-patch","writer-iam-patch","emergency-iam-patch"]'), inputs.purpose)
         shell: bash
         run: |
           set -euo pipefail

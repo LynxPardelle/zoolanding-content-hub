@@ -14,6 +14,9 @@ import yaml
 
 
 API_ROLE = "arn:aws:iam::765932874577:role/zoolanding-deployer-thn-auth-runtime-production-github-deploy"
+AUTH_ROLE = "arn:aws:iam::765932874577:role/zoolanding-auth-admin-production-deploy"
+RUNTIME_ROLE = "arn:aws:iam::765932874577:role/zlp-thn-auth-runtime-prod-role"
+STALE_TEST_RUNTIME = "arn:aws:iam::765932874577:role/zoolanding-thn-auth-runti-ThnAuthRuntimeV2FunctionR-0nd3Hd8ToVOo"
 HUB_ROLE = "arn:aws:iam::765932874577:role/zoolanding-content-hub-production-deploy"
 IMAGE_ROLE = "arn:aws:iam::765932874577:role/zoolanding-deployer-image-upload-production-github-deploy"
 TABLE = "ServiceBindingRegistryV2Table"
@@ -24,7 +27,8 @@ def fixture():
         {"Sid": "DenyRegistryGetItemOutsideApprovedConsumers", "Effect": "Deny",
          "Principal": "*", "Action": ["dynamodb:GetItem"], "Resource": "registry",
          "Condition": {"ArnNotEquals": {"aws:PrincipalArn": [
-             "arn:aws:iam::765932874577:role/existing-%02d" % i for i in range(13)
+             *["arn:aws:iam::765932874577:role/existing-%02d" % i for i in range(12)],
+             STALE_TEST_RUNTIME,
          ]}}},
     ]
     statements.extend(
@@ -62,7 +66,8 @@ class RegistryReaderPatchTests(unittest.TestCase):
         steps={step['name']:step for step in workflow['jobs']['release']['steps'] if 'name' in step}
         for name in ('Set up SAM for review only','Validate and build closed production source',
                      'Package new candidate only for review'):
-            self.assertIn("inputs.purpose != 'registry-reader-patch'",steps[name]['if'])
+            self.assertIn("!contains(fromJSON(",steps[name]['if'])
+            self.assertIn('registry-reader-patch',steps[name]['if'])
         self.assertEqual(workflow['jobs']['release']['environment'],'production')
         self.assertIn('test_thn_production_registry_reader_patch.py',
             next(step['run'] for step in workflow['jobs']['validate']['steps']
@@ -76,11 +81,14 @@ class RegistryReaderPatchTests(unittest.TestCase):
         self.assertEqual(proposed["Resources"]["Other"], old["Resources"]["Other"])
         statements = {row["Sid"]: row for row in proposed["Resources"][TABLE]
                       ["Properties"]["ResourcePolicy"]["PolicyDocument"]["Statement"]}
-        self.assertEqual(statements["DenyRegistryGetItemOutsideApprovedConsumers"]
-                         ["Condition"]["ArnNotEquals"]["aws:PrincipalArn"][-1], API_ROLE)
+        broad=statements["DenyRegistryGetItemOutsideApprovedConsumers"]
+        readers=broad["Condition"]["ArnNotEquals"]["aws:PrincipalArn"]
+        self.assertEqual(len(readers),15)
+        self.assertNotIn(STALE_TEST_RUNTIME,readers)
+        self.assertEqual(readers[-3:],[AUTH_ROLE,API_ROLE,RUNTIME_ROLE])
         for sid in ("DenyRegistryDeploymentReadOutsideBinding",
                     "DenyRegistryDeploymentReadMissingKeys"):
-            self.assertEqual(statements[sid]["Principal"]["AWS"], [HUB_ROLE, IMAGE_ROLE, API_ROLE])
+            self.assertEqual(statements[sid]["Principal"]["AWS"], [HUB_ROLE, IMAGE_ROLE, AUTH_ROLE, API_ROLE])
         self.assertEqual(release.PURPOSES.intersection({"registry-reader-patch"}),
                          {"registry-reader-patch"})
 
@@ -227,17 +235,31 @@ class RegistryReaderPatchTests(unittest.TestCase):
 
     def test_full_policy_simulation_requires_exact_allow_and_two_explicit_denies(self):
         iam = Mock()
+        roles = (release.REGISTRY_AUTH_DEPLOY_ROLE, release.REGISTRY_READER_ROLE,
+                 release.REGISTRY_RUNTIME_ROLE, *release.REGISTRY_DEPLOY_READERS,
+                 release.REGISTRY_STALE_TEST_RUNTIME)
+        expected = ["allowed", "explicitDeny", "explicitDeny"]
         iam.simulate_principal_policy.side_effect = [
             {"EvaluationResults": [{"EvalActionName": "dynamodb:GetItem",
                                      "EvalResourceName": driver.REGISTRY_READER_ARN,
-                                     "EvalDecision": decision}]}
-            for decision in ("allowed", "explicitDeny", "explicitDeny")]
+                                     "EvalDecision": decision,
+                                     "MissingContextValues": ['dynamodb:LeadingKeys']
+                                        if role == release.REGISTRY_RUNTIME_ROLE and index == 2 else []}]}
+            for role in roles for index, decision in enumerate(
+                ["explicitDeny"] * 3 if role == release.REGISTRY_STALE_TEST_RUNTIME else
+                expected if role != release.REGISTRY_RUNTIME_ROLE else
+                ["allowed", "implicitDeny", "implicitDeny"])]
         self.assertEqual(driver.simulate_registry_reader_policy(iam, {"Version": "2012-10-17",
                                                                   "Statement": []}),
-                         {"binding": "allowed", "other": "explicitDeny", "missing": "explicitDeny"})
-        self.assertEqual(iam.simulate_principal_policy.call_count, 3)
+                         {role.split('/')[-1] + ':' + label: decision
+                          for role in roles for label, decision in zip(
+                              ('binding', 'other', 'missing'),
+                              ('explicitDeny',) * 3 if role == release.REGISTRY_STALE_TEST_RUNTIME else
+                              expected if role != release.REGISTRY_RUNTIME_ROLE else
+                              ('allowed', 'implicitDeny', 'implicitDeny'))})
+        self.assertEqual(iam.simulate_principal_policy.call_count, 18)
         first = iam.simulate_principal_policy.call_args_list[0].kwargs
-        self.assertEqual(first["PolicySourceArn"], API_ROLE)
+        self.assertEqual(first["PolicySourceArn"], release.REGISTRY_AUTH_DEPLOY_ROLE)
         self.assertIn("ResourcePolicy", first)
         iam.reset_mock()
         iam.simulate_principal_policy.side_effect = [

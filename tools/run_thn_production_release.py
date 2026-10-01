@@ -37,7 +37,7 @@ def load_json(value):
 def selected_parameter_overrides(purpose):
     if purpose=='operator-patch':
         return deepcopy(release.OPERATOR_PARAMETERS)
-    if purpose=='registry-reader-patch':
+    if purpose=='registry-reader-patch' or purpose in release.IAM_PATCHES:
         return {}
     return load_json(os.environ.get('THN_PRODUCTION_PARAMETERS_JSON','{}'))
 
@@ -131,11 +131,20 @@ def identity_and_permissions(session,source,purpose,native_changes=None,native_t
     if purpose=='registry-reader-patch':
         required={'dynamodb:GetResourcePolicy','dynamodb:GetItem','iam:SimulatePrincipalPolicy'}
         release.require(required<=caller_actions and
-            any(request.get('principalArn')==role['Arn'] and
-                'iam:SimulatePrincipalPolicy' in request.get('actions',[]) and
-                release.REGISTRY_READER_ROLE in request.get('resources',[])
-                for request in plan['requests']),
+            all(any(request.get('principalArn')==role['Arn'] and
+                    'iam:SimulatePrincipalPolicy' in request.get('actions',[]) and
+                    target in request.get('resources',[])
+                    for request in plan['requests'])
+                for target in (release.REGISTRY_AUTH_DEPLOY_ROLE,release.REGISTRY_READER_ROLE,
+                    release.REGISTRY_RUNTIME_ROLE,*release.REGISTRY_DEPLOY_READERS,
+                    release.REGISTRY_STALE_TEST_RUNTIME)),
             'production_registry_reader_permission_coverage_incomplete')
+    if purpose in release.IAM_PATCHES:
+        release.require(any(request.get('principalArn')==role['Arn'] and
+            'dynamodb:GetResourcePolicy' in request.get('actions',[]) and
+            REGISTRY_READER_ARN in request.get('resources',[])
+            for request in plan['requests']),
+            'production_iam_patch_registry_read_permission_missing')
     schemas=[];required_execution=set()
     from tools.thn_production_native_permissions import selected_actions, prove_event_rule_resources
     by_type={};selected_by_type={}
@@ -238,6 +247,8 @@ def captured_baseline(session):
     baseline['lambdaFingerprints']=fingerprints
     if CONFIG['service']=='hub' and os.environ.get('THN_PRODUCTION_SELECTED_PURPOSE')=='registry-reader-patch':
         baseline['registryReaderPolicy']=capture_registry_reader_policy(session,baseline)
+    if CONFIG['service']=='hub' and os.environ.get('THN_PRODUCTION_SELECTED_PURPOSE') in release.IAM_PATCHES:
+        baseline['iamPatchRegistryPolicy']=capture_iam_patch_registry_policy(session,baseline)
     if CONFIG['service']=='hub' and os.environ.get('THN_PRODUCTION_SELECTED_PURPOSE')=='state':
         from tools import thn_production_import as imported
         from tools.run_thn_production_import import read_targets
@@ -258,7 +269,7 @@ def captured_baseline(session):
 
 
 def post_execution_snapshot(session,purpose):
-    if purpose=='registry-reader-patch':
+    if purpose=='registry-reader-patch' or purpose in release.IAM_PATCHES:
         return release.snapshot(session.client('cloudformation'),CONFIG['stack'])
     return captured_baseline(session)
 
@@ -321,6 +332,9 @@ def candidate_for_scope(candidate,baseline,purpose):
     if purpose=='registry-reader-patch':
         validate_registry_reader_patch_baseline(baseline)
         return release.registry_reader_candidate_template(old)
+    if purpose in release.IAM_PATCHES:
+        validate_iam_patch_baseline(baseline,purpose)
+        return release.iam_patch_candidate_template(old,iam_patch_source(),purpose)
     if purpose in {'state','activate'} and not baseline.get('absent'):
         for logical,item in old['Resources'].items():
             if not logical.startswith(('Thn','ServiceBinding')) and logical!='ContentHubApi':
@@ -363,6 +377,101 @@ REGISTRY_READER_BASELINE_POLICY_SHA256='05fb21a569275a8221d64c5eb611a6702bebc373
 REGISTRY_READER_BASELINE_REVISION='1790818911396'
 REGISTRY_READER_ARN=(f'arn:aws:dynamodb:{release.REGION}:{release.ACCOUNT}:table/'
                      f'{release.REGISTRY_READER_TABLE_NAME}')
+
+IAM_PATCH_BASELINE_STATEMENTS={
+    'writer-iam-patch':'f83ca3c3d7938d38eab8256ac4afaff3f902fd1ad34919df6b41f87651c8a505',
+    'emergency-iam-patch':release.sha({}),
+}
+
+
+def iam_patch_source():
+    import yaml
+    from tools.prepare_thn_production_template import prepare_template
+    return prepare_template(yaml.safe_load((ROOT/'template.yaml').read_text(encoding='utf-8')))
+
+
+def iam_patch_statement(template,purpose):
+    logical,sid=release.IAM_PATCHES[purpose]
+    role=template['Resources'][logical]
+    matches=[item for policy in role['Properties']['Policies']
+             for item in policy['PolicyDocument']['Statement'] if item.get('Sid')==sid]
+    release.require(len(matches)<=1,'production_iam_patch_statement_changed')
+    return matches[0] if matches else {}
+
+
+def validate_iam_patch_baseline(baseline,purpose):
+    release.require(CONFIG['service']=='hub' and purpose in release.IAM_PATCHES and
+        not baseline.get('absent') and baseline.get('status')=='UPDATE_COMPLETE' and
+        baseline.get('terminationProtection') is True and
+        baseline.get('roleArn')==f'arn:aws:iam::{release.ACCOUNT}:role/{CONFIG["executionRole"]}' and
+        len(baseline.get('resources',[]))==59,
+        'production_iam_patch_baseline_invalid')
+    for stage in ('original','processed'):
+        template=release.parse_template(baseline[stage])
+        release.require(release.sha(iam_patch_statement(template,purpose))==
+                        IAM_PATCH_BASELINE_STATEMENTS[purpose],
+                        'production_iam_patch_baseline_statement_changed')
+    policy=baseline.get('iamPatchRegistryPolicy')
+    release.require(isinstance(policy,dict) and
+                    release._sha(policy.get('sha256')) and
+                    isinstance(policy.get('revision'),str),
+                    'production_iam_patch_registry_policy_changed')
+
+
+def capture_iam_patch_registry_policy(session,baseline):
+    response=session.client('dynamodb').get_resource_policy(ResourceArn=REGISTRY_READER_ARN)
+    actual=imported.normalize_registry_policy(load_json(response['Policy']))
+    source=(release.parse_template(baseline['original'])['Resources'][release.REGISTRY_READER_TABLE]
+            ['Properties']['ResourcePolicy']['PolicyDocument'])
+    expected=imported.normalize_registry_policy(imported.resolve_registry_policy(
+        source,imported.MUTATION_ROLE_ARN))
+    release.require(actual==expected and isinstance(response.get('RevisionId'),str),
+                    'production_iam_patch_registry_policy_changed')
+    return {'revision':response['RevisionId'],'sha256':release.sha(actual)}
+
+
+def validate_iam_patch_preview(preview,baseline,purpose,original,processed):
+    validate_registry_reader_patch_preview_parameters(preview.get('Parameters',[]),
+                                                      baseline['parameters'])
+    source=iam_patch_source()
+    for stage,candidate in (('original',original),('processed',processed)):
+        expected=release.iam_patch_candidate_template(
+            release.parse_template(baseline[stage]),source,purpose)
+        release.require(release.canonical(candidate)==release.canonical(expected),
+                        'production_iam_patch_preview_template_changed')
+    logical,_=release.IAM_PATCHES[purpose]
+    physical=next((row['PhysicalResourceId'] for row in baseline['resources']
+                   if row['LogicalResourceId']==logical and
+                   row['ResourceType']=='AWS::IAM::Role'),None)
+    change=preview['Changes'][0]['ResourceChange']
+    release.require(isinstance(physical,str) and physical==change.get('PhysicalResourceId'),
+                    'production_iam_patch_identity_changed')
+    release.review_inventory(preview['Changes'],release.parse_template(baseline['processed']),
+                             processed,scope=purpose)
+
+
+def validate_iam_patch_completion(before,after,purpose):
+    release.require(after.get('status')=='UPDATE_COMPLETE' and
+        after.get('terminationProtection') is True and
+        after.get('stackId')==before.get('stackId') and
+        after.get('roleArn')==before.get('roleArn') and
+        release.canonical(after.get('parameters'))==release.canonical(before.get('parameters')) and
+        release.canonical(after.get('tags'))==release.canonical(before.get('tags')) and
+        release.canonical(after.get('outputs'))==release.canonical(before.get('outputs')),
+        'production_iam_patch_completion_changed')
+    old={(row['LogicalResourceId'],row['ResourceType']):row['PhysicalResourceId']
+         for row in before['resources']}
+    new={(row['LogicalResourceId'],row['ResourceType']):row['PhysicalResourceId']
+         for row in after.get('resources',[])}
+    release.require(len(old)==len(new)==59 and new==old,
+                    'production_iam_patch_identity_changed')
+    source=iam_patch_source()
+    for stage in ('original','processed'):
+        expected=release.iam_patch_candidate_template(
+            release.parse_template(before[stage]),source,purpose)
+        release.require(release.canonical(release.parse_template(after[stage]))==
+                        release.canonical(expected),
+                        'production_iam_patch_deployed_template_changed')
 
 
 def validate_registry_reader_patch_baseline(baseline):
@@ -414,17 +523,11 @@ def capture_registry_reader_policy(session,baseline):
         release.parse_template(baseline['original']))['Resources'][release.REGISTRY_READER_TABLE]\
         ['Properties']['ResourcePolicy']['PolicyDocument']
     candidate=imported.resolve_registry_policy(template_candidate,imported.MUTATION_ROLE_ARN)
-    live_candidate=deepcopy(actual)
-    by_sid={row['Sid']:row for row in live_candidate['Statement']}
-    for sid in release.REGISTRY_READER_SIDS:
-        if sid==release.REGISTRY_READER_SIDS[0]:
-            by_sid[sid]['Condition']['ArnNotEquals']['aws:PrincipalArn'].append(
-                release.REGISTRY_READER_ROLE)
-        else:
-            by_sid[sid]['Principal']['AWS'].append(release.REGISTRY_READER_ROLE)
-    release.require(imported.normalize_registry_policy(live_candidate)==
-        imported.normalize_registry_policy(candidate),
-        'production_registry_reader_candidate_policy_changed')
+    # The candidate compiler validates the exact old principal lists and owns
+    # the complete delta. Rebuilding its older one-reader delta here caused a
+    # false preflight failure when Auth and the runtime role were added.
+    release.require(imported.normalize_registry_policy(candidate)!=actual,
+                    'production_registry_reader_candidate_policy_unchanged')
     decisions=simulate_registry_reader_policy(session.client('iam'),candidate)
     binding=session.client('dynamodb').get_item(TableName=release.REGISTRY_READER_TABLE_NAME,
         Key={'pk':{'S':'SERVICE_BINDING#production#thn-journal-production-v2'},
@@ -437,26 +540,34 @@ def capture_registry_reader_policy(session,baseline):
 
 def simulate_registry_reader_policy(iam,policy):
     decisions={}
-    for label,keys,expected in (
-            ('binding',['SERVICE_BINDING#production#thn-journal-production-v2'],'allowed'),
-            ('other',['SERVICE_BINDING#production#other'],'explicitDeny'),
-            ('missing',[],'explicitDeny')):
-        kwargs={'PolicySourceArn':release.REGISTRY_READER_ROLE,
-                'ActionNames':['dynamodb:GetItem'],
-                'ResourceArns':[REGISTRY_READER_ARN],
-                'ResourcePolicy':json.dumps(policy,separators=(',',':'))}
-        if keys:
-            kwargs['ContextEntries']=[{'ContextKeyName':'dynamodb:LeadingKeys',
-                                       'ContextKeyType':'string','ContextKeyValues':keys}]
-        result=iam.simulate_principal_policy(**kwargs)
-        evaluations=result.get('EvaluationResults',[])
-        release.require(result.get('IsTruncated') is not True and len(evaluations)==1 and
-            evaluations[0].get('EvalActionName','').lower()=='dynamodb:getitem' and
-            evaluations[0].get('EvalResourceName')==REGISTRY_READER_ARN and
-            evaluations[0].get('EvalDecision')==expected and
-            not evaluations[0].get('MissingContextValues'),
-            'production_registry_reader_simulation_denied')
-        decisions[label]=expected
+    roles=(release.REGISTRY_AUTH_DEPLOY_ROLE,release.REGISTRY_READER_ROLE,
+           release.REGISTRY_RUNTIME_ROLE,*release.REGISTRY_DEPLOY_READERS,
+           release.REGISTRY_STALE_TEST_RUNTIME)
+    for role in roles:
+        for label,keys in (
+                ('binding',['SERVICE_BINDING#production#thn-journal-production-v2']),
+                ('other',['SERVICE_BINDING#production#other']),('missing',[])):
+            expected=('explicitDeny' if role==release.REGISTRY_STALE_TEST_RUNTIME else
+                      'allowed' if label=='binding' else
+                      'implicitDeny' if role==release.REGISTRY_RUNTIME_ROLE else
+                      'explicitDeny')
+            kwargs={'PolicySourceArn':role,'ActionNames':['dynamodb:GetItem'],
+                    'ResourceArns':[REGISTRY_READER_ARN],
+                    'ResourcePolicy':json.dumps(policy,separators=(',',':'))}
+            if keys:
+                kwargs['ContextEntries']=[{'ContextKeyName':'dynamodb:LeadingKeys',
+                                           'ContextKeyType':'string','ContextKeyValues':keys}]
+            result=iam.simulate_principal_policy(**kwargs)
+            evaluations=result.get('EvaluationResults',[])
+            release.require(result.get('IsTruncated') is not True and len(evaluations)==1 and
+                evaluations[0].get('EvalActionName','').lower()=='dynamodb:getitem' and
+                evaluations[0].get('EvalResourceName')==REGISTRY_READER_ARN and
+                evaluations[0].get('EvalDecision')==expected and
+                evaluations[0].get('MissingContextValues',[]) ==
+                    (['dynamodb:LeadingKeys'] if role==release.REGISTRY_RUNTIME_ROLE and
+                     label=='missing' else []),
+                'production_registry_reader_simulation_denied')
+            decisions[role.split('/')[-1]+':'+label]=expected
     return decisions
 
 
@@ -749,7 +860,7 @@ def review(session,args,source,identity,permissions):
         packaged=release.parse_template(release.verify_object(s3,prior['recoveryCoordinates'][0]).decode())
         packages=prior['recoveryCoordinates'][1:]
         for coordinate in packages: release.verify_object(s3,coordinate)
-    elif args.purpose in {'operator-patch','registry-reader-patch'}:
+    elif args.purpose in {'operator-patch','registry-reader-patch',*release.IAM_PATCHES}:
         packaged=candidate_for_scope(None,baseline,args.purpose)
         packages=[]
     else:
@@ -815,7 +926,10 @@ def review(session,args,source,identity,permissions):
     if args.purpose=='registry-reader-patch':
         release.require(release.canonical(original)==release.canonical(packaged),
                         'production_registry_reader_preview_template_changed')
-    release.review_inventory(preview['Changes'],release.parse_template(baseline['processed']),processed,scope=args.purpose)
+    if args.purpose in release.IAM_PATCHES:
+        validate_iam_patch_preview(preview,baseline,args.purpose,original,processed)
+    else:
+        release.review_inventory(preview['Changes'],release.parse_template(baseline['processed']),processed,scope=args.purpose)
     if CONFIG['service']=='hub' and args.purpose=='state':
         imported.validate_post_import_state_inventory(preview['Changes'],baseline)
     # Native provider handler schemas supply their actual required actions.
@@ -849,6 +963,11 @@ def fresh_execute_authority(session,record,source,purpose,preview,processed):
         release.require(release.canonical(original)==release.canonical(
             release.registry_reader_candidate_template(release.parse_template(baseline['original']))),
             'production_registry_reader_preview_template_changed')
+    if purpose in release.IAM_PATCHES:
+        validate_iam_patch_baseline(baseline,purpose)
+        original=release.parse_template(session.client('cloudformation').get_template(
+            ChangeSetName=record['changeSetArn'],TemplateStage='Original')['TemplateBody'])
+        validate_iam_patch_preview(preview,baseline,purpose,original,processed)
     if CONFIG['service']=='hub' and purpose=='state':
         imported.require('postImportTargets' in baseline,
                          'production_post_import_targets_missing')
@@ -907,6 +1026,8 @@ def main(argv=None):
                 validate_operator_lambda_policy_absent(session.client('lambda'))
             if args.purpose=='registry-reader-patch':
                 validate_registry_reader_patch_baseline(baseline)
+            if args.purpose in release.IAM_PATCHES:
+                validate_iam_patch_baseline(baseline,args.purpose)
             s3=session.client('s3')
             release.require(s3.get_bucket_versioning(Bucket=CONFIG['bucket']).get('Status')=='Enabled')
             block=s3.get_public_access_block(Bucket=CONFIG['bucket'])['PublicAccessBlockConfiguration']
@@ -925,12 +1046,20 @@ def main(argv=None):
                     validate_operator_lambda_policy_absent(session.client('lambda'))
                 if args.purpose=='registry-reader-patch':
                     validate_registry_reader_patch_baseline(baseline)
+                if args.purpose in release.IAM_PATCHES:
+                    validate_iam_patch_baseline(baseline,args.purpose)
                 preview=release.describe_preview(session.client('cloudformation'),record['changeSetArn'])
                 if args.purpose=='operator-patch':
                     validate_operator_patch_preview_parameters(preview.get('Parameters',[]),baseline['parameters'])
                 if args.purpose=='registry-reader-patch':
                     validate_registry_reader_patch_preview_parameters(preview.get('Parameters',[]),
                                                              baseline['parameters'])
+                if args.purpose in release.IAM_PATCHES:
+                    validate_iam_patch_preview(preview,baseline,args.purpose,
+                        release.parse_template(session.client('cloudformation').get_template(
+                            ChangeSetName=record['changeSetArn'],TemplateStage='Original')['TemplateBody']),
+                        release.parse_template(session.client('cloudformation').get_template(
+                            ChangeSetName=record['changeSetArn'],TemplateStage='Processed')['TemplateBody']))
                 identity,permissions=identity_and_permissions(session,source,args.purpose,
                     preview['Changes'],release.parse_template(session.client('cloudformation').get_template(ChangeSetName=record['changeSetArn'],TemplateStage='Processed')['TemplateBody']),release.parse_template(baseline['processed']))
                 release.execute_retained(session.client('cloudformation'),session.client('s3'),record,
@@ -973,6 +1102,11 @@ def main(argv=None):
                 if args.purpose=='registry-reader-patch':
                     validate_registry_reader_patch_completion(baseline,after)
                     verify_registry_reader_patch_live_policy(session,baseline,after)
+                if args.purpose in release.IAM_PATCHES:
+                    validate_iam_patch_completion(baseline,after,args.purpose)
+                    release.require(capture_iam_patch_registry_policy(session,after)==
+                                    baseline['iamPatchRegistryPolicy'],
+                                    'production_iam_patch_registry_policy_changed')
                 before={r['LogicalResourceId']:r['PhysicalResourceId'] for r in baseline.get('resources',[])}
                 current={r['LogicalResourceId']:r['PhysicalResourceId'] for r in after['resources']}
                 release.require(all(current.get(k)==v for k,v in before.items() if not k.startswith('Thn') or 'Version' not in k),
