@@ -256,6 +256,12 @@ def captured_baseline(session):
         baseline['prerequisites']=capture(session,load_json(os.environ.get('THN_PRODUCTION_PREREQUISITES_JSON','')),CONFIG['service'],os.environ['THN_PRODUCTION_SELECTED_SOURCE'])
     return baseline
 
+
+def post_execution_snapshot(session,purpose):
+    if purpose=='registry-reader-patch':
+        return release.snapshot(session.client('cloudformation'),CONFIG['stack'])
+    return captured_baseline(session)
+
 def sealed_packages(session,template):
     s3=session.client('s3');manifest=[]
     for logical,item in template['Resources'].items():
@@ -497,18 +503,33 @@ def validate_registry_reader_patch_completion(before,after):
 
 
 def verify_registry_reader_patch_live_policy(session,before,after):
-    response=session.client('dynamodb').get_resource_policy(ResourceArn=REGISTRY_READER_ARN)
-    live=load_json(response['Policy'])
+    dynamodb=session.client('dynamodb')
     proposed=release.parse_template(after['original'])['Resources'][release.REGISTRY_READER_TABLE]\
         ['Properties']['ResourcePolicy']['PolicyDocument']
+    prior_revision=before['registryReaderPolicy'].get('revision')
+    for attempt in range(6):
+        try:
+            response=dynamodb.get_resource_policy(ResourceArn=REGISTRY_READER_ARN)
+        except Exception as error:
+            if (getattr(error,'response',{}).get('Error',{}).get('Code')=='PolicyNotFoundException'
+                    and attempt<5):
+                time.sleep(5)
+                continue
+            raise
+        revision=response.get('RevisionId')
+        release.require(isinstance(revision,str) and re.fullmatch('[0-9]+',revision),
+                        'production_registry_reader_deployed_policy_changed')
+        if revision==prior_revision and attempt<5:
+            time.sleep(5)
+            continue
+        live=load_json(response['Policy'])
+        break
     release.require(imported.normalize_registry_policy(live)==
         imported.normalize_registry_policy(imported.resolve_registry_policy(
             proposed,imported.MUTATION_ROLE_ARN)) and
-        isinstance(response.get('RevisionId'),str) and
-        re.fullmatch('[0-9]+',response['RevisionId']) and
-        response.get('RevisionId')!=before['registryReaderPolicy'].get('revision'),
+        revision!=prior_revision,
         'production_registry_reader_deployed_policy_changed')
-    binding=session.client('dynamodb').get_item(TableName=release.REGISTRY_READER_TABLE_NAME,
+    binding=dynamodb.get_item(TableName=release.REGISTRY_READER_TABLE_NAME,
         Key={'pk':{'S':'SERVICE_BINDING#production#thn-journal-production-v2'},
              'sk':{'S':'REGISTRY#V2'}},ConsistentRead=True).get('Item')
     release.require(release.sha(binding)==before['registryReaderPolicy']['bindingSha256'],
@@ -944,7 +965,7 @@ def main(argv=None):
                             ['Properties']['ResourcePolicy']['PolicyDocument'],
                         imported.MUTATION_ROLE_ARN)
                 else:
-                    after=captured_baseline(session)
+                    after=post_execution_snapshot(session,args.purpose)
                 if args.purpose=='operator-patch':
                     validate_operator_patch_completion(baseline,after)
                     verify_operator_effective_scope(session.client('iam'))

@@ -216,6 +216,15 @@ class RegistryReaderPatchTests(unittest.TestCase):
             with self.subTest(mutation=mutation), self.assertRaises(release.ReleaseError):
                 driver.validate_registry_reader_patch_completion(before, changed)
 
+    def test_post_execution_snapshot_does_not_require_old_registry_policy(self):
+        session = Mock()
+        current = {"status": "UPDATE_COMPLETE", "resources": []}
+        with patch.object(driver.release, "snapshot", return_value=current) as snapshot, \
+                patch.object(driver, "captured_baseline") as capture:
+            self.assertIs(driver.post_execution_snapshot(session, "registry-reader-patch"), current)
+        snapshot.assert_called_once_with(session.client("cloudformation"), driver.CONFIG["stack"])
+        capture.assert_not_called()
+
     def test_full_policy_simulation_requires_exact_allow_and_two_explicit_denies(self):
         iam = Mock()
         iam.simulate_principal_policy.side_effect = [
@@ -267,6 +276,30 @@ class RegistryReaderPatchTests(unittest.TestCase):
             session.client("dynamodb").get_item.return_value = {"Item": {"changed": {"S": "yes"}}}
             with self.assertRaises(release.ReleaseError):
                 driver.verify_registry_reader_patch_live_policy(session, before, after)
+
+    def test_live_completion_tolerates_one_stale_dynamodb_policy_read(self):
+        old = fixture()
+        candidate = release.registry_reader_candidate_template(old)
+        old_policy = old["Resources"][TABLE]["Properties"]["ResourcePolicy"]["PolicyDocument"]
+        new_policy = candidate["Resources"][TABLE]["Properties"]["ResourcePolicy"]["PolicyDocument"]
+        binding = {"pk": {"S": "SERVICE_BINDING#production#thn-journal-production-v2"}}
+        before = {"registryReaderPolicy": {"revision": "100",
+                                           "bindingSha256": release.sha(binding)},
+                  "original": old}
+        after = {"original": candidate}
+        session = Mock()
+        session.client("dynamodb").get_resource_policy.side_effect = [
+            {"Policy": json.dumps(old_policy), "RevisionId": "100"},
+            {"Policy": json.dumps(new_policy), "RevisionId": "101"},
+        ]
+        session.client("dynamodb").get_item.return_value = {"Item": binding}
+        with patch.object(driver.imported, "normalize_registry_policy", side_effect=lambda value: value), \
+                patch.object(driver.imported, "resolve_registry_policy", side_effect=lambda value, role: value), \
+                patch.object(driver, "simulate_registry_reader_policy", return_value={"binding": "allowed"}), \
+                patch.object(driver.time, "sleep") as sleep:
+            driver.verify_registry_reader_patch_live_policy(session, before, after)
+        self.assertEqual(session.client("dynamodb").get_resource_policy.call_count, 2)
+        sleep.assert_called_once()
 
 
 if __name__ == "__main__":
