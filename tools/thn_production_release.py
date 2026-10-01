@@ -18,7 +18,68 @@ FIELDS = frozenset({'schemaVersion','contract','environment','service','purpose'
     'originalTemplateSha256','processedTemplateSha256','parametersSha256',
     'permissionSha256','identitySha256','sourcePackageSha256','packageManifest',
     'changes','nativeInventorySha256','recoveryCoordinates','digest'})
-PURPOSES = frozenset({'state','activate','general','recover','operator-patch'})
+PURPOSES = frozenset({'state','activate','general','recover','operator-patch','registry-reader-patch'})
+REGISTRY_READER_TABLE = 'ServiceBindingRegistryV2Table'
+REGISTRY_READER_TABLE_NAME = 'zoolanding-content-hub-prod-ServiceBindingRegistryV2'
+REGISTRY_READER_ROLE = 'arn:aws:iam::765932874577:role/zoolanding-deployer-thn-auth-runtime-production-github-deploy'
+REGISTRY_DEPLOY_READERS = (
+    'arn:aws:iam::765932874577:role/zoolanding-content-hub-production-deploy',
+    'arn:aws:iam::765932874577:role/zoolanding-deployer-image-upload-production-github-deploy',
+)
+REGISTRY_READER_SIDS = (
+    'DenyRegistryGetItemOutsideApprovedConsumers',
+    'DenyRegistryDeploymentReadOutsideBinding',
+    'DenyRegistryDeploymentReadMissingKeys',
+)
+
+
+def registry_reader_candidate_template(old):
+    """Add one exact API role to three policy lists, preserving all other nodes."""
+    result=deepcopy(old)
+    table=result.get('Resources',{}).get(REGISTRY_READER_TABLE,{})
+    require(table.get('Type')=='AWS::DynamoDB::Table',
+            'production_registry_reader_table_changed')
+    policy=table.get('Properties',{}).get('ResourcePolicy',{}).get('PolicyDocument',{})
+    statements=policy.get('Statement')
+    require(policy.get('Version')=='2012-10-17' and isinstance(statements,list),
+            'production_registry_reader_policy_changed')
+    matches=[next((row for row in statements if isinstance(row,dict) and row.get('Sid')==sid),None)
+             for sid in REGISTRY_READER_SIDS]
+    require(all(row is not None for row in matches) and
+            all(sum(isinstance(row,dict) and row.get('Sid')==sid for row in statements)==1
+                for sid in REGISTRY_READER_SIDS),
+            'production_registry_reader_statements_changed')
+    broad,other,missing=matches
+    def principal(value):
+        if isinstance(value,dict) and value.get('Fn::Sub')==(
+                'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/'+REGISTRY_READER_ROLE.split('/')[-1]):
+            return True
+        return value==REGISTRY_READER_ROLE
+    api={'Fn::Sub':'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/'+
+         REGISTRY_READER_ROLE.split('/')[-1]} if any(isinstance(v,dict) for v in
+         broad.get('Condition',{}).get('ArnNotEquals',{}).get('aws:PrincipalArn',[])) else REGISTRY_READER_ROLE
+    readers=broad.get('Condition',{}).get('ArnNotEquals',{}).get('aws:PrincipalArn')
+    require(broad.get('Effect')=='Deny' and broad.get('Principal')=='*' and
+            broad.get('Action')==['dynamodb:GetItem'] and isinstance(readers,list) and
+            len(readers)==13 and len({canonical(v) for v in readers})==13 and
+            not any(principal(v) for v in readers),
+            'production_registry_reader_approved_consumers_changed')
+    for row,condition,expected in (
+            (other,'ForAnyValue:StringNotEquals',
+             ['SERVICE_BINDING#production#thn-journal-production-v2']),
+            (missing,'Null','true')):
+        values=row.get('Principal',{}).get('AWS') if isinstance(row.get('Principal'),dict) else None
+        resolved=[v.get('Fn::Sub','') if isinstance(v,dict) else v for v in values or []]
+        normalized=[value.replace('${AWS::Partition}','aws').replace('${AWS::AccountId}',ACCOUNT)
+                    for value in resolved]
+        require(row.get('Effect')=='Deny' and row.get('Action')==['dynamodb:GetItem'] and
+                isinstance(values,list) and len(values)==2 and
+                set(normalized)==set(REGISTRY_DEPLOY_READERS) and
+                row.get('Condition')=={condition:{'dynamodb:LeadingKeys':expected}},
+                'production_registry_reader_deployment_fence_changed')
+        values.append(deepcopy(api))
+    readers.append(deepcopy(api))
+    return result
 OPERATOR_PRINCIPAL = 'arn:aws:iam::765932874577:user/Hector-admin'
 OPERATOR_PARAMETERS = {
     'ProvisionThnProductionRegistryOperator': 'true',
@@ -131,6 +192,28 @@ def verify_review_record(record,*,approved_digest,now,service,source_sha):
 def review_inventory(changes,old,new,*,scope):
     require(scope in PURPOSES and isinstance(changes,list))
     previous=old.get('Resources',{});candidate=new.get('Resources',{})
+    if scope=='registry-reader-patch':
+        require(canonical(registry_reader_candidate_template(old))==canonical(new) and
+                len(changes)==1 and isinstance(changes[0],dict) and
+                changes[0].get('Type')=='Resource',
+                'production_registry_reader_template_or_inventory_changed')
+        change=changes[0].get('ResourceChange',{})
+        details=change.get('Details')
+        require(change.get('Action')=='Modify' and
+                change.get('LogicalResourceId')==REGISTRY_READER_TABLE and
+                change.get('PhysicalResourceId')==REGISTRY_READER_TABLE_NAME and
+                change.get('ResourceType')=='AWS::DynamoDB::Table' and
+                change.get('Replacement')=='False' and
+                change.get('Scope')==['Properties'] and
+                isinstance(details,list) and details and
+                all(isinstance(item,dict) and
+                    item.get('Target',{}).get('Attribute')=='Properties' and
+                    item['Target'].get('Name')=='ResourcePolicy' and
+                    item['Target'].get('RequiresRecreation','Never')=='Never'
+                    and item.get('ChangeSource')=='DirectModification'
+                    for item in details),
+                'production_registry_reader_inventory_invalid')
+        return deepcopy(changes)
     if scope=='operator-patch':
         require(canonical(operator_candidate_template(old))==canonical(new) and
                 len(changes)==len(OPERATOR_RESOURCES),
@@ -200,6 +283,9 @@ def review_inventory(changes,old,new,*,scope):
 def select_parameters(definitions,current,overrides,*,purpose):
     require(purpose in PURPOSES and isinstance(overrides,dict) and not(set(overrides)-set(definitions)))
     previous={item['ParameterKey']:item for item in current}
+    if purpose=='registry-reader-patch':
+        require(not overrides and set(previous)==set(definitions),
+                'production_registry_reader_parameters_changed')
     if purpose=='operator-patch':
         require(set(overrides)==set(OPERATOR_PARAMETERS) and overrides==OPERATOR_PARAMETERS and
                 set(previous)==set(definitions) and

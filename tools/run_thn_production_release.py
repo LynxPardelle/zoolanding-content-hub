@@ -37,6 +37,8 @@ def load_json(value):
 def selected_parameter_overrides(purpose):
     if purpose=='operator-patch':
         return deepcopy(release.OPERATOR_PARAMETERS)
+    if purpose=='registry-reader-patch':
+        return {}
     return load_json(os.environ.get('THN_PRODUCTION_PARAMETERS_JSON','{}'))
 
 def production_environment():
@@ -126,6 +128,14 @@ def identity_and_permissions(session,source,purpose,native_changes=None,native_t
             f'arn:aws:lambda:{release.REGION}:{release.ACCOUNT}:function:zoolanding-content-hub-prod-ThnServiceBindingRegistryV2Mutation'
                 in request.get('resources',[]) for request in plan['requests']),
             'production_operator_policy_read_permission_missing')
+    if purpose=='registry-reader-patch':
+        required={'dynamodb:GetResourcePolicy','dynamodb:GetItem','iam:SimulatePrincipalPolicy'}
+        release.require(required<=caller_actions and
+            any(request.get('principalArn')==role['Arn'] and
+                'iam:SimulatePrincipalPolicy' in request.get('actions',[]) and
+                release.REGISTRY_READER_ROLE in request.get('resources',[])
+                for request in plan['requests']),
+            'production_registry_reader_permission_coverage_incomplete')
     schemas=[];required_execution=set()
     from tools.thn_production_native_permissions import selected_actions, prove_event_rule_resources
     by_type={};selected_by_type={}
@@ -226,6 +236,8 @@ def captured_baseline(session):
             fingerprints.append({'logicalId':resource['LogicalResourceId'],'physicalId':resource['PhysicalResourceId'],
                 'configurationSha256':release.sha(config),'codeSha256':config['CodeSha256']})
     baseline['lambdaFingerprints']=fingerprints
+    if CONFIG['service']=='hub' and os.environ.get('THN_PRODUCTION_SELECTED_PURPOSE')=='registry-reader-patch':
+        baseline['registryReaderPolicy']=capture_registry_reader_policy(session,baseline)
     if CONFIG['service']=='hub' and os.environ.get('THN_PRODUCTION_SELECTED_PURPOSE')=='state':
         from tools import thn_production_import as imported
         from tools.run_thn_production_import import read_targets
@@ -300,6 +312,9 @@ def candidate_for_scope(candidate,baseline,purpose):
         release.require(CONFIG['service']=='hub' and not baseline.get('absent'),
                         'production_operator_stack_missing')
         return release.operator_candidate_template(old)
+    if purpose=='registry-reader-patch':
+        validate_registry_reader_patch_baseline(baseline)
+        return release.registry_reader_candidate_template(old)
     if purpose in {'state','activate'} and not baseline.get('absent'):
         for logical,item in old['Resources'].items():
             if not logical.startswith(('Thn','ServiceBinding')) and logical!='ContentHubApi':
@@ -336,6 +351,169 @@ def candidate_for_scope(candidate,baseline,purpose):
                             'ContentHubApi'):
                 candidate['Resources'][logical]=deepcopy(old['Resources'][logical])
     return candidate
+
+
+REGISTRY_READER_BASELINE_POLICY_SHA256='05fb21a569275a8221d64c5eb611a6702bebc3737f9b3019bea1a33d5d12c38f'
+REGISTRY_READER_BASELINE_REVISION='1790818911396'
+REGISTRY_READER_ARN=(f'arn:aws:dynamodb:{release.REGION}:{release.ACCOUNT}:table/'
+                     f'{release.REGISTRY_READER_TABLE_NAME}')
+
+
+def validate_registry_reader_patch_baseline(baseline):
+    """Fence the exact protected 59-resource production baseline."""
+    release.require(CONFIG['service']=='hub' and not baseline.get('absent') and
+        baseline.get('status')=='UPDATE_COMPLETE' and
+        baseline.get('terminationProtection') is True and
+        baseline.get('roleArn')==f'arn:aws:iam::{release.ACCOUNT}:role/{CONFIG["executionRole"]}' and
+        isinstance(baseline.get('resources'),list) and len(baseline['resources'])==59,
+        'production_registry_reader_baseline_invalid')
+    resources={row['LogicalResourceId']:row for row in baseline['resources']}
+    release.require(len(resources)==59 and
+        resources.get(release.REGISTRY_READER_TABLE,{}).get('PhysicalResourceId')==
+            release.REGISTRY_READER_TABLE_NAME and
+        resources[release.REGISTRY_READER_TABLE].get('ResourceType')=='AWS::DynamoDB::Table',
+        'production_registry_reader_table_changed')
+    values={row['ParameterKey']:row.get('ParameterValue') for row in baseline.get('parameters',[])}
+    release.require(values.get('ProvisionThnServiceBindingRegistryV2State')=='true' and
+        values.get('ProvisionThnContentHubV2State')=='true' and
+        values.get('ProvisionThnProductionRegistryOperator')=='true' and
+        all(value=='false' for name,value in values.items() if name.startswith('EnableThn')),
+        'production_registry_reader_parameters_changed')
+    original=release.parse_template(baseline['original'])
+    processed=release.parse_template(baseline['processed'])
+    release.registry_reader_candidate_template(original)
+    release.registry_reader_candidate_template(processed)
+    prior=baseline.get('registryReaderPolicy')
+    if prior is not None:
+        release.require(prior.get('revision')==REGISTRY_READER_BASELINE_REVISION and
+            prior.get('semanticSha256')==REGISTRY_READER_BASELINE_POLICY_SHA256 and
+            release._sha(prior.get('bindingSha256')),
+            'production_registry_reader_policy_changed')
+
+
+def capture_registry_reader_policy(session,baseline):
+    validate_registry_reader_patch_baseline(baseline)
+    response=session.client('dynamodb').get_resource_policy(ResourceArn=REGISTRY_READER_ARN)
+    live=load_json(response['Policy'])
+    proposed=release.parse_template(baseline['original'])['Resources'][release.REGISTRY_READER_TABLE]\
+        ['Properties']['ResourcePolicy']['PolicyDocument']
+    actual=imported.normalize_registry_policy(live)
+    expected=imported.normalize_registry_policy(imported.resolve_registry_policy(
+        proposed,imported.MUTATION_ROLE_ARN))
+    release.require(actual==expected and
+        release.sha(actual)==REGISTRY_READER_BASELINE_POLICY_SHA256 and
+        response.get('RevisionId')==REGISTRY_READER_BASELINE_REVISION,
+        'production_registry_reader_policy_changed')
+    template_candidate=release.registry_reader_candidate_template(
+        release.parse_template(baseline['original']))['Resources'][release.REGISTRY_READER_TABLE]\
+        ['Properties']['ResourcePolicy']['PolicyDocument']
+    candidate=imported.resolve_registry_policy(template_candidate,imported.MUTATION_ROLE_ARN)
+    live_candidate=deepcopy(actual)
+    by_sid={row['Sid']:row for row in live_candidate['Statement']}
+    for sid in release.REGISTRY_READER_SIDS:
+        if sid==release.REGISTRY_READER_SIDS[0]:
+            by_sid[sid]['Condition']['ArnNotEquals']['aws:PrincipalArn'].append(
+                release.REGISTRY_READER_ROLE)
+        else:
+            by_sid[sid]['Principal']['AWS'].append(release.REGISTRY_READER_ROLE)
+    release.require(imported.normalize_registry_policy(live_candidate)==
+        imported.normalize_registry_policy(candidate),
+        'production_registry_reader_candidate_policy_changed')
+    decisions=simulate_registry_reader_policy(session.client('iam'),candidate)
+    binding=session.client('dynamodb').get_item(TableName=release.REGISTRY_READER_TABLE_NAME,
+        Key={'pk':{'S':'SERVICE_BINDING#production#thn-journal-production-v2'},
+             'sk':{'S':'REGISTRY#V2'}},ConsistentRead=True).get('Item')
+    release.require(isinstance(binding,dict) and binding,
+                    'production_registry_reader_binding_missing')
+    return {'revision':response['RevisionId'],'semanticSha256':release.sha(actual),
+            'bindingSha256':release.sha(binding),'candidateDecisions':decisions}
+
+
+def simulate_registry_reader_policy(iam,policy):
+    decisions={}
+    for label,keys,expected in (
+            ('binding',['SERVICE_BINDING#production#thn-journal-production-v2'],'allowed'),
+            ('other',['SERVICE_BINDING#production#other'],'explicitDeny'),
+            ('missing',[],'explicitDeny')):
+        kwargs={'PolicySourceArn':release.REGISTRY_READER_ROLE,
+                'ActionNames':['dynamodb:GetItem'],
+                'ResourceArns':[REGISTRY_READER_ARN],
+                'ResourcePolicy':json.dumps(policy,separators=(',',':'))}
+        if keys:
+            kwargs['ContextEntries']=[{'ContextKeyName':'dynamodb:LeadingKeys',
+                                       'ContextKeyType':'string','ContextKeyValues':keys}]
+        result=iam.simulate_principal_policy(**kwargs)
+        evaluations=result.get('EvaluationResults',[])
+        release.require(result.get('IsTruncated') is not True and len(evaluations)==1 and
+            evaluations[0].get('EvalActionName','').lower()=='dynamodb:getitem' and
+            evaluations[0].get('EvalResourceName')==REGISTRY_READER_ARN and
+            evaluations[0].get('EvalDecision')==expected and
+            not evaluations[0].get('MissingContextValues'),
+            'production_registry_reader_simulation_denied')
+        decisions[label]=expected
+    return decisions
+
+
+def validate_registry_reader_patch_preview_parameters(preview,previous):
+    release.require(isinstance(preview,list) and isinstance(previous,list) and
+        all(isinstance(row,dict) and isinstance(row.get('ParameterKey'),str)
+            for row in preview+previous),
+        'production_registry_reader_preview_parameters_invalid')
+    old={row['ParameterKey']:row for row in previous}
+    new={row['ParameterKey']:row for row in preview}
+    release.require(len(old)==len(previous) and len(new)==len(preview) and
+        set(old)==set(new),
+        'production_registry_reader_preview_parameters_changed')
+    for name,proposed in new.items():
+        prior=old[name]
+        release.require(proposed.get('UsePreviousValue') is True or
+            (proposed.get('UsePreviousValue') is not True and
+             proposed.get('ParameterValue')==prior.get('ParameterValue')),
+            'production_registry_reader_preview_parameters_changed')
+
+
+def validate_registry_reader_patch_completion(before,after):
+    release.require(after.get('status')=='UPDATE_COMPLETE' and
+        after.get('terminationProtection') is True and
+        after.get('stackId')==before.get('stackId') and
+        after.get('roleArn')==before.get('roleArn') and
+        release.canonical(after.get('tags'))==release.canonical(before.get('tags')) and
+        release.canonical(after.get('outputs'))==release.canonical(before.get('outputs')) and
+        release.canonical(after.get('parameters'))==release.canonical(before.get('parameters')),
+        'production_registry_reader_completion_changed')
+    old={row['LogicalResourceId']:(row['PhysicalResourceId'],row['ResourceType'])
+         for row in before['resources']}
+    new={row['LogicalResourceId']:(row['PhysicalResourceId'],row['ResourceType'])
+         for row in after.get('resources',[])}
+    release.require(len(old)==len(new)==59 and
+        len(after.get('resources',[]))==59 and new==old,
+        'production_registry_reader_identity_changed')
+    for stage in ('original','processed'):
+        expected=release.registry_reader_candidate_template(
+            release.parse_template(before[stage]))
+        release.require(release.canonical(release.parse_template(after[stage]))==
+                        release.canonical(expected),
+                        'production_registry_reader_template_changed')
+
+
+def verify_registry_reader_patch_live_policy(session,before,after):
+    response=session.client('dynamodb').get_resource_policy(ResourceArn=REGISTRY_READER_ARN)
+    live=load_json(response['Policy'])
+    proposed=release.parse_template(after['original'])['Resources'][release.REGISTRY_READER_TABLE]\
+        ['Properties']['ResourcePolicy']['PolicyDocument']
+    release.require(imported.normalize_registry_policy(live)==
+        imported.normalize_registry_policy(imported.resolve_registry_policy(
+            proposed,imported.MUTATION_ROLE_ARN)) and
+        isinstance(response.get('RevisionId'),str) and
+        re.fullmatch('[0-9]+',response['RevisionId']) and
+        response.get('RevisionId')!=before['registryReaderPolicy'].get('revision'),
+        'production_registry_reader_deployed_policy_changed')
+    binding=session.client('dynamodb').get_item(TableName=release.REGISTRY_READER_TABLE_NAME,
+        Key={'pk':{'S':'SERVICE_BINDING#production#thn-journal-production-v2'},
+             'sk':{'S':'REGISTRY#V2'}},ConsistentRead=True).get('Item')
+    release.require(release.sha(binding)==before['registryReaderPolicy']['bindingSha256'],
+                    'production_registry_reader_binding_changed')
+    simulate_registry_reader_policy(session.client('iam'),live)
 
 def validate_operator_patch_baseline(baseline):
     status=baseline.get('status')
@@ -536,6 +714,8 @@ def review(session,args,source,identity,permissions):
     if args.purpose=='operator-patch':
         validate_operator_patch_baseline(baseline)
         validate_operator_lambda_policy_absent(session.client('lambda'))
+    if args.purpose=='registry-reader-patch':
+        validate_registry_reader_patch_baseline(baseline)
     release.require(not baseline.get('absent') or args.purpose=='activate',
         'production_dedicated_runtime_requires_verified_activation')
     packaged=None
@@ -548,7 +728,7 @@ def review(session,args,source,identity,permissions):
         packaged=release.parse_template(release.verify_object(s3,prior['recoveryCoordinates'][0]).decode())
         packages=prior['recoveryCoordinates'][1:]
         for coordinate in packages: release.verify_object(s3,coordinate)
-    elif args.purpose=='operator-patch':
+    elif args.purpose in {'operator-patch','registry-reader-patch'}:
         packaged=candidate_for_scope(None,baseline,args.purpose)
         packages=[]
     else:
@@ -607,8 +787,13 @@ def review(session,args,source,identity,permissions):
     preview=release.describe_preview(cf,arn)
     if args.purpose=='operator-patch':
         validate_operator_patch_preview_parameters(preview.get('Parameters',[]),baseline['parameters'])
+    if args.purpose=='registry-reader-patch':
+        validate_registry_reader_patch_preview_parameters(preview.get('Parameters',[]),baseline['parameters'])
     original=release.parse_template(cf.get_template(ChangeSetName=arn,TemplateStage='Original')['TemplateBody'])
     processed=release.parse_template(cf.get_template(ChangeSetName=arn,TemplateStage='Processed')['TemplateBody'])
+    if args.purpose=='registry-reader-patch':
+        release.require(release.canonical(original)==release.canonical(packaged),
+                        'production_registry_reader_preview_template_changed')
     release.review_inventory(preview['Changes'],release.parse_template(baseline['processed']),processed,scope=args.purpose)
     if CONFIG['service']=='hub' and args.purpose=='state':
         imported.validate_post_import_state_inventory(preview['Changes'],baseline)
@@ -634,6 +819,15 @@ def fresh_execute_authority(session,record,source,purpose,preview,processed):
         validate_operator_patch_baseline(baseline)
         validate_operator_patch_preview_parameters(preview.get('Parameters',[]),baseline['parameters'])
         validate_operator_lambda_policy_absent(session.client('lambda'))
+    if purpose=='registry-reader-patch':
+        validate_registry_reader_patch_baseline(baseline)
+        validate_registry_reader_patch_preview_parameters(preview.get('Parameters',[]),
+                                                         baseline['parameters'])
+        original=release.parse_template(session.client('cloudformation').get_template(
+            ChangeSetName=record['changeSetArn'],TemplateStage='Original')['TemplateBody'])
+        release.require(release.canonical(original)==release.canonical(
+            release.registry_reader_candidate_template(release.parse_template(baseline['original']))),
+            'production_registry_reader_preview_template_changed')
     if CONFIG['service']=='hub' and purpose=='state':
         imported.require('postImportTargets' in baseline,
                          'production_post_import_targets_missing')
@@ -690,6 +884,8 @@ def main(argv=None):
             if args.purpose=='operator-patch':
                 validate_operator_patch_baseline(baseline)
                 validate_operator_lambda_policy_absent(session.client('lambda'))
+            if args.purpose=='registry-reader-patch':
+                validate_registry_reader_patch_baseline(baseline)
             s3=session.client('s3')
             release.require(s3.get_bucket_versioning(Bucket=CONFIG['bucket']).get('Status')=='Enabled')
             block=s3.get_public_access_block(Bucket=CONFIG['bucket'])['PublicAccessBlockConfiguration']
@@ -706,9 +902,14 @@ def main(argv=None):
                 if args.purpose=='operator-patch':
                     validate_operator_patch_baseline(baseline)
                     validate_operator_lambda_policy_absent(session.client('lambda'))
+                if args.purpose=='registry-reader-patch':
+                    validate_registry_reader_patch_baseline(baseline)
                 preview=release.describe_preview(session.client('cloudformation'),record['changeSetArn'])
                 if args.purpose=='operator-patch':
                     validate_operator_patch_preview_parameters(preview.get('Parameters',[]),baseline['parameters'])
+                if args.purpose=='registry-reader-patch':
+                    validate_registry_reader_patch_preview_parameters(preview.get('Parameters',[]),
+                                                             baseline['parameters'])
                 identity,permissions=identity_and_permissions(session,source,args.purpose,
                     preview['Changes'],release.parse_template(session.client('cloudformation').get_template(ChangeSetName=record['changeSetArn'],TemplateStage='Processed')['TemplateBody']),release.parse_template(baseline['processed']))
                 release.execute_retained(session.client('cloudformation'),session.client('s3'),record,
@@ -748,6 +949,9 @@ def main(argv=None):
                     validate_operator_patch_completion(baseline,after)
                     verify_operator_effective_scope(session.client('iam'))
                     validate_operator_lambda_policy_absent(session.client('lambda'))
+                if args.purpose=='registry-reader-patch':
+                    validate_registry_reader_patch_completion(baseline,after)
+                    verify_registry_reader_patch_live_policy(session,baseline,after)
                 before={r['LogicalResourceId']:r['PhysicalResourceId'] for r in baseline.get('resources',[])}
                 current={r['LogicalResourceId']:r['PhysicalResourceId'] for r in after['resources']}
                 release.require(all(current.get(k)==v for k,v in before.items() if not k.startswith('Thn') or 'Version' not in k),
