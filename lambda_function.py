@@ -159,6 +159,12 @@ class ContentHubNotFound(ContentHubError):
     public_message = "Content hub item not found"
 
 
+class ContentHubConflict(ContentHubError):
+    status_code = 409
+    error_code = "revision_conflict"
+    public_message = "El artículo cambió. Vuelve a abrir el editor antes de guardar."
+
+
 class ContentHubConfigError(ContentHubError):
     status_code = 500
     error_code = "internal_error"
@@ -456,7 +462,10 @@ def _handle_read(
     store = _store()
     hub_id = hub["hubId"]
     if read_kind == "articleList":
-        return {"items": [_article_summary(item) for item in store.query_metadata(f"HUB#{hub_id}", "ARTICLE#")]}
+        return {
+            "items": [_article_summary(item) for item in store.query_metadata(f"HUB#{hub_id}", "ARTICLE#")],
+            **({"coverEditing": True} if _cover_editing_enabled(profile, hub) else {}),
+        }
     if read_kind == "articleDetail":
         article_id = _safe_id(binding.get("articleId") or _input_field(payload, "articleId"))
         if not article_id:
@@ -620,6 +629,9 @@ def _create_article(payload: dict[str, Any], session: dict[str, Any], profile: d
     }
     revision = _revision_item(hub["hubId"], article_id, revision_id, locale, now, session["subject"])
     package = _article_package(article, revision, payload, profile, hub)
+    cover = _cover_changes(payload, profile, hub, article)
+    article.update(cover)
+    package.update(cover)
     store = _store()
     store.put_metadata(article)
     _store_article_taxonomy(store, hub["hubId"], locale, category, tags, now)
@@ -682,6 +694,11 @@ def _update_package(
     article = store.get_metadata(f"HUB#{hub['hubId']}", f"ARTICLE#{article_id}")
     if not article:
         raise ContentHubNotFound()
+    expected_revision = _input_field(payload, "expectedRevisionId")
+    if expected_revision is not None:
+        expected_revision = _safe_id(expected_revision)
+        if expected_revision != article.get("latestRevisionId") or article.get("status") == "archived":
+            raise ContentHubConflict()
     previous_package = _latest_article_package(store, article)
     revision = _revision_item(hub["hubId"], article_id, revision_id, locale, now, session["subject"])
     package = _editable_article_package(
@@ -693,6 +710,9 @@ def _update_package(
         fallback=previous_package,
     )
     metadata_updates = _article_metadata_updates(payload)
+    cover = _cover_changes(payload, profile, hub, article)
+    saved_cover = _article_cover_fields({**article, **cover})
+    package.update(saved_cover)
     if metadata_updates:
         update_locale = _locale(metadata_updates.get("primaryLocale") or locale)
         _store_article_taxonomy(
@@ -705,14 +725,106 @@ def _update_package(
         )
     store.put_metadata(revision)
     store.put_json(revision["packageKey"], package)
-    store.update_metadata(f"HUB#{hub['hubId']}", f"ARTICLE#{article_id}", {
+    updates = {
         "latestRevisionId": revision_id,
         "status": "draft",
         "updatedAt": now,
         "updatedBy": session["subject"],
         **metadata_updates,
+        **cover,
+    }
+    if expected_revision is None:
+        store.update_metadata(f"HUB#{hub['hubId']}", f"ARTICLE#{article_id}", updates)
+    else:
+        store.update_metadata(f"HUB#{hub['hubId']}", f"ARTICLE#{article_id}", updates, expected_revision=expected_revision)
+    return {"revision": _revision_summary(revision), **saved_cover}
+
+
+def _cover_changes(payload: dict[str, Any], profile: dict[str, Any], hub: dict[str, Any], article: dict[str, Any]) -> dict[str, str]:
+    upload = _input_field(payload, "coverUpload")
+    if upload == []:
+        upload = None
+    if isinstance(upload, list) and len(upload) == 1:
+        upload = upload[0]
+    alt_input = _input_field(payload, "imageAlt")
+    if upload is None and (alt_input is None or alt_input == ""):
+        return {}
+    if not _cover_editing_enabled(profile, hub):
+        raise ContentHubForbidden()
+    alt = _safe_text(alt_input, max_length=180) if isinstance(alt_input, str) else ""
+    if not alt or len(alt_input.strip()) > 180 or UNSAFE_VALUE_RE.search(alt):
+        raise ContentHubError("Escribe un texto alternativo de 1 a 180 caracteres para la portada.")
+    if upload is None:
+        if not article.get("imageSrc"):
+            raise ContentHubError("Selecciona una imagen para la portada.")
+        return {"imageAlt": alt}
+    return {"imageSrc": _upload_cover(upload, profile["environment"]), "imageAlt": alt}
+
+
+def _cover_editing_enabled(profile: dict[str, Any], hub: dict[str, Any]) -> bool:
+    return profile["domain"] == hub["ownerDraftDomain"] == "zoositioweb.com.mx" and hub["hubId"] == "zoosite-main"
+
+
+def _article_cover_fields(source: dict[str, Any]) -> dict[str, str]:
+    return {
+        field: value for field in ("imageSrc", "imageAlt")
+        if isinstance(value := source.get(field), str) and value
+    }
+
+
+def _upload_cover(upload: Any, environment: str) -> str:
+    if not isinstance(upload, dict):
+        raise ContentHubError("Selecciona una sola imagen para la portada.")
+    mime = upload.get("mimeType")
+    extensions = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}
+    raw = upload.get("dataBase64")
+    limit = 2 * 1024 * 1024
+    if not isinstance(mime, str) or mime not in extensions or not isinstance(raw, str) or len(raw) > 4 * ((limit + 2) // 3):
+        raise ContentHubError("Usa una imagen JPEG, PNG o WebP de hasta 2 MB.")
+    try:
+        data = base64.b64decode(raw, validate=True)
+    except (ValueError, TypeError) as exc:
+        raise ContentHubError("No se pudo leer la imagen de portada.") from exc
+    actual_mime = (
+        "image/jpeg" if data.startswith(b"\xff\xd8\xff") else
+        "image/png" if data.startswith(b"\x89PNG\r\n\x1a\n") else
+        "image/webp" if data.startswith(b"RIFF") and data[8:12] == b"WEBP" else ""
+    )
+    if len(data) > limit or mime != actual_mime:
+        raise ContentHubError("El contenido de la portada no coincide con el formato de imagen.")
+    function = _env_required("CONTENT_HUB_COVER_UPLOAD_FUNCTION")
+    if environment not in {"test", "prod"}:
+        raise ContentHubConfigError()
+    domain = "zoositioweb.com.mx"
+    page = "blog-covers" if environment == "prod" else "blog-covers-test"
+    import boto3  # type: ignore
+    uploader = boto3.client("lambda")
+
+    def invoke(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        result = uploader.invoke(FunctionName=function, Payload=json.dumps(payload).encode())
+        envelope = json.load(result["Payload"])
+        if result.get("FunctionError"):
+            raise ContentHubConfigError()
+        return envelope["statusCode"], json.loads(envelope["body"])
+
+    status, grant = invoke({
+        "action": "issueUploadGrant", "domain": domain, "allowedPageIds": [page], "allowedAssetKinds": ["images"],
+        "allowedContentTypes": [mime], "maxBytes": len(data), "usageLimit": 1, "expiresInSeconds": 120,
+        "allowOverwrite": False, "allowPresignedPut": False, "issuedBy": "zoosite-editorial",
     })
-    return {"revision": _revision_summary(revision)}
+    if status != 200 or not grant.get("token"):
+        raise ContentHubConfigError()
+    asset_id = "cover-" + hashlib.sha256(data).hexdigest()[:32]
+    status, uploaded = invoke({"body": json.dumps({
+        "domain": domain, "pageId": page, "assetKind": "images", "assetId": asset_id,
+        "fileName": "cover." + extensions[mime], "contentType": mime, "imageBase64": raw, "uploadGrant": grant["token"],
+    })})
+    public_url = f"https://assets.zoolandingpage.com.mx/{domain}/{page}/images/{asset_id}.{extensions[mime]}"
+    if status == 409 and uploaded.get("code") == "asset_exists":
+        return public_url
+    if status != 200 or uploaded.get("publicUrl") != public_url:
+        raise ContentHubError("No se pudo guardar la portada. Intenta de nuevo.")
+    return public_url
 
 
 def _editable_article_package(
@@ -834,6 +946,7 @@ def _publish_article(
         "seoDescription": seo_description,
         "robots": robots_policy,
         "publishedBundleKey": key,
+        **_article_cover_fields(package),
         "updatedAt": now,
         "updatedBy": session["subject"],
     })
@@ -1354,11 +1467,15 @@ def _restore_revision(
     revision = store.get_metadata(f"ARTICLE#{article_id}", f"REVISION#{revision_id}")
     if not revision or revision.get("hubId") != hub["hubId"]:
         raise ContentHubNotFound("Revision not found")
+    cover = {}
+    if _article_cover_fields(article):
+        cover = _article_cover_fields(store.get_json(revision["packageKey"]))
     store.update_metadata(f"HUB#{hub['hubId']}", f"ARTICLE#{article_id}", {
         "latestRevisionId": revision_id,
         "status": "draft",
         "updatedBy": session["subject"],
         "updatedAt": _now_iso(),
+        **cover,
     })
     return {"articleId": article_id, "revisionId": revision_id, "status": "draft"}
 
@@ -1646,8 +1763,8 @@ class DynamoContentHubStore:
     def put_metadata(self, item: dict[str, Any]) -> None:
         self.table(self.metadata_table_name).put_item(Item=_without_empty(item))
 
-    def update_metadata(self, pk: str, sk: str, updates: dict[str, Any]) -> dict[str, Any]:
-        return _update_item(self.table(self.metadata_table_name), {"pk": pk, "sk": sk}, updates)
+    def update_metadata(self, pk: str, sk: str, updates: dict[str, Any], *, expected_revision: Optional[str] = None) -> dict[str, Any]:
+        return _update_item(self.table(self.metadata_table_name), {"pk": pk, "sk": sk}, updates, expected_revision=expected_revision)
 
     def delete_metadata(self, pk: str, sk: str) -> None:
         self.table(self.metadata_table_name).delete_item(Key={"pk": pk, "sk": sk})
@@ -1725,20 +1842,32 @@ def _query_items(table: Any, pk: str, sk_prefix: str) -> list[dict[str, Any]]:
             return items
 
 
-def _update_item(table: Any, key: dict[str, str], updates: dict[str, Any]) -> dict[str, Any]:
+def _update_item(table: Any, key: dict[str, str], updates: dict[str, Any], *, expected_revision: Optional[str] = None) -> dict[str, Any]:
     safe_updates = _without_empty(updates)
     if not safe_updates:
         return {}
     names = {f"#k{index}": field for index, field in enumerate(safe_updates)}
     values = {f":v{index}": value for index, value in enumerate(safe_updates.values())}
     expression = ", ".join(f"{name} = {value}" for name, value in zip(names, values))
-    response = table.update_item(
-        Key=key,
-        UpdateExpression=f"SET {expression}",
-        ExpressionAttributeNames=names,
-        ExpressionAttributeValues=values,
-        ReturnValues="ALL_NEW",
-    )
+    condition = {}
+    if expected_revision is not None:
+        condition["ConditionExpression"] = "latestRevisionId = :expectedRevision AND #articleStatus <> :archived"
+        names["#articleStatus"] = "status"
+        values[":expectedRevision"] = expected_revision
+        values[":archived"] = "archived"
+    try:
+        response = table.update_item(
+            Key=key,
+            UpdateExpression=f"SET {expression}",
+            ExpressionAttributeNames=names,
+            ExpressionAttributeValues=values,
+            ReturnValues="ALL_NEW",
+            **condition,
+        )
+    except Exception as exc:
+        if getattr(exc, "response", {}).get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            raise ContentHubConflict() from exc
+        raise
     return response.get("Attributes", {})
 
 
@@ -1930,6 +2059,8 @@ def _article_bundle(
         "previewedAt": timestamp if status == "preview" else "",
         "title": article.get("title"),
         "summary": article.get("summary"),
+        **_article_cover_fields(article),
+        **_article_cover_fields(package_payload),
         "slug": article.get("slug") or _slug(article.get("title") or article_id),
         "category": _taxonomy_ref(article.get("category")),
         "tags": _taxonomy_refs(article.get("tags")),
@@ -1993,6 +2124,8 @@ def _article_summary(item: dict[str, Any]) -> dict[str, Any]:
         "articleId": item.get("articleId"),
         "title": item.get("title"),
         "summary": item.get("summary"),
+        "imageSrc": item.get("imageSrc"),
+        "imageAlt": item.get("imageAlt"),
         "slug": item.get("slug"),
         "status": item.get("status"),
         "visibility": item.get("visibility"),

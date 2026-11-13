@@ -1,9 +1,11 @@
 import base64
 import json
+import io
 import os
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from types import SimpleNamespace
 
 import lambda_function as content_hub
 
@@ -134,8 +136,10 @@ class FakeStore:
     def put_metadata(self, item):
         self.metadata[(item["pk"], item["sk"])] = dict(item)
 
-    def update_metadata(self, pk, sk, updates):
+    def update_metadata(self, pk, sk, updates, *, expected_revision=None):
         item = self.metadata.setdefault((pk, sk), {"pk": pk, "sk": sk})
+        if expected_revision is not None and item.get("latestRevisionId") != expected_revision:
+            raise content_hub.ContentHubConflict()
         item.update(updates)
         return dict(item)
 
@@ -514,6 +518,77 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertEqual(body(detail)["data"]["item"]["title"], "Blog builder SEO")
         self.assertEqual(body(detail)["data"]["item"]["summary"], "Guía de SEO")
         self.assertNotIn("packageKey", detail["body"])
+
+    def test_article_cover_upload_and_alt_share_the_editorial_record(self):
+        upload = {"name": "cover.webp", "mimeType": "image/webp", "dataBase64": "UklGRgQAAABXRUJQ"}
+        image = "https://assets.zoolandingpage.com.mx/zoositioweb.com.mx/blog-covers-test/images/cover.webp"
+        with patch.object(content_hub, "_upload_cover", return_value=image) as uploader:
+            created = self.request("/features/content-hub/action", {"action": "createArticle"}, {
+                "title": "Con portada", "coverUpload": upload, "imageAlt": "Portada original",
+                "articleContent": {"ops": [{"insert": "Texto original\n"}]},
+            })
+        self.assertEqual(created["statusCode"], 200)
+        uploader.assert_called_once()
+        article = body(created)["data"]["article"]
+        self.assertEqual(article["imageSrc"], image)
+        self.assertEqual(article["imageAlt"], "Portada original")
+        article_id = article["articleId"]
+        edited = self.request("/features/content-hub/action", {"action": "updatePackage"}, {
+            "articleId": article_id, "imageAlt": "Nuevo texto alternativo", "expectedRevisionId": article["latestRevisionId"],
+        })
+        self.assertEqual(edited["statusCode"], 200)
+        stale = self.request("/features/content-hub/action", {"action": "updatePackage"}, {
+            "articleId": article_id, "imageAlt": "Cambio obsoleto", "expectedRevisionId": article["latestRevisionId"],
+        })
+        self.assertEqual(stale["statusCode"], 409)
+        self.assertEqual(self.request("/features/content-hub/action", {"action": "updatePackage"}, {
+            "articleId": article_id, "summary": "Otro cambio editorial", "category": "web",
+        })["statusCode"], 200)
+        detail = body(self.request("/features/content-hub/read", {"read": "articleDetail"}, {"articleId": article_id}, csrf=False))["data"]["item"]
+        self.assertEqual(detail["imageSrc"], image)
+        self.assertEqual(detail["imageAlt"], "Nuevo texto alternativo")
+        self.assertEqual(detail["articleContent"], {"ops": [{"insert": "Texto original\n"}]})
+        initial = self.request("/features/content-hub/read", {"read": "publicBundlePreview"}, {
+            "articleId": article_id, "revisionId": article["latestRevisionId"],
+        }, csrf=False)
+        self.assertEqual(initial["statusCode"], 200)
+        self.assertEqual(body(initial)["data"]["bundle"]["imageAlt"], "Portada original")
+        latest = self.request("/features/content-hub/read", {"read": "publicBundlePreview"}, {"articleId": article_id}, csrf=False)
+        self.assertEqual(latest["statusCode"], 200)
+        self.assertEqual(body(latest)["data"]["bundle"]["imageAlt"], "Nuevo texto alternativo")
+
+    def test_article_cover_rejects_unlabelled_uploads_and_alt_without_an_image(self):
+        for fields in ({"imageAlt": "Sin imagen"}, {"coverUpload": {"name": "cover.webp"}}):
+            with self.subTest(fields=fields):
+                result = self.request("/features/content-hub/action", {"action": "createArticle"}, {"title": "Prueba", **fields})
+                self.assertEqual(result["statusCode"], 400)
+        self.assertFalse(self.store.query_metadata("HUB#zoosite-main", "ARTICLE#"))
+
+    def test_article_cover_reuses_the_scoped_public_image_uploader(self):
+        import boto3
+        calls = []
+        def invoke(*, FunctionName, Payload):
+            self.assertEqual(FunctionName, "cover-upload-test")
+            request = json.loads(Payload)
+            calls.append(request)
+            if request.get("action") == "issueUploadGrant":
+                result = {"token": "synthetic-grant"}
+            else:
+                data = json.loads(request["body"])
+                result = {"publicUrl": f"https://assets.zoolandingpage.com.mx/{data['domain']}/{data['pageId']}/images/{data['assetId']}.webp"}
+            return {"Payload": io.BytesIO(json.dumps({"statusCode": 200, "body": json.dumps(result)}).encode())}
+
+        upload = {"mimeType": "image/webp", "dataBase64": "UklGRgQAAABXRUJQ"}
+        with patch.dict(os.environ, {"CONTENT_HUB_COVER_UPLOAD_FUNCTION": "cover-upload-test"}), patch.object(boto3, "client", return_value=SimpleNamespace(invoke=invoke)):
+            url = content_hub._upload_cover(upload, "test")
+            self.assertIn("/blog-covers-test/images/cover-", url)
+            with self.assertRaises(content_hub.ContentHubError):
+                content_hub._upload_cover({**upload, "mimeType": "image/png"}, "test")
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0]["allowedPageIds"], ["blog-covers-test"])
+        self.assertEqual(calls[0]["allowedContentTypes"], ["image/webp"])
+        self.assertEqual(calls[0]["usageLimit"], 1)
+        self.assertFalse(calls[0]["allowOverwrite"])
 
     def test_create_article_does_not_require_article_id(self):
         self.store.roles = ["zoosite-blog-editor"]
