@@ -742,7 +742,7 @@ def _update_package(
 
 def _cover_changes(payload: dict[str, Any], profile: dict[str, Any], hub: dict[str, Any], article: dict[str, Any]) -> dict[str, str]:
     upload = _input_field(payload, "coverUpload")
-    if upload == []:
+    if upload in ("", []):
         upload = None
     if isinstance(upload, list) and len(upload) == 1:
         upload = upload[0]
