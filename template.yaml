@@ -17,6 +17,11 @@ Parameters:
     Type: String
   AuthUserStateTableName:
     Type: String
+  BlogCoverUploadFunctionName:
+    Type: String
+    Default: zoolanding-image-upload-ImageUploadFunction-pZpzwdzo75XK
+    AllowedPattern: '^zoolanding-image-upload-ImageUploadFunction-[A-Za-z0-9]+$'
+    Description: Existing public image uploader used by the Zoositioweb editorial flow.
   LogLevel:
     Type: String
     Default: INFO
@@ -1975,6 +1980,11 @@ Resources:
                 Resource:
                   Fn::Sub: ${ContentHubPackagesBucket.Arn}/content-hubs/${EnvironmentName}/*
 
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource:
+                  Fn::Sub: arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${BlogCoverUploadFunctionName}
+
   ContentHubFunction:
     Type: AWS::Serverless::Function
     Metadata:
@@ -1993,6 +2003,8 @@ Resources:
         Variables:
           CONTENT_HUB_ENVIRONMENT:
             Ref: EnvironmentName
+          CONTENT_HUB_COVER_UPLOAD_FUNCTION:
+            Ref: BlogCoverUploadFunctionName
           CONTENT_HUB_CONFIG_JSON_BASE64:
             Ref: ContentHubConfigJsonBase64
           AUTH_SESSION_TABLE_NAME:

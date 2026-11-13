@@ -176,6 +176,7 @@ def build_parameters(env: Mapping[str, str]) -> tuple[dict[str, str], set[str]]:
         "ContentHubConfigJsonBase64": config,
         "AuthSessionTableName": session_table,
         "AuthUserStateTableName": user_table,
+        "BlogCoverUploadFunctionName": "zoolanding-image-upload-ImageUploadFunction-pZpzwdzo75XK",
         "LogLevel": "INFO",
         "FunctionMemorySize": "512",
         **_thn_parameters(env),
