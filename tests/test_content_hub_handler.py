@@ -519,6 +519,34 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertEqual(body(detail)["data"]["item"]["summary"], "Guía de SEO")
         self.assertNotIn("packageKey", detail["body"])
 
+    def test_article_primary_site_is_saved_with_the_published_revision(self):
+        created = self.request("/features/content-hub/action", {"action": "createArticle"}, {
+            "title": "Sitio principal", "category": "web", "primarySite": "zoositioweb.com.mx",
+            "articleContent": {"ops": [{"insert": "Texto original\n"}]},
+        })
+        self.assertEqual(created["statusCode"], 200)
+        article = body(created)["data"]["article"]
+        self.assertEqual(article["primarySite"], "zoositioweb.com.mx")
+        aid = article["articleId"]
+        revision = article["latestRevisionId"]
+        update = self.request("/features/content-hub/action", {"action": "updatePackage"}, {
+            "articleId": aid, "category": "web", "primarySite": "zooberiahsystems.com",
+            "expectedRevisionId": revision,
+        })
+        self.assertEqual(update["statusCode"], 200)
+        detail = body(self.request("/features/content-hub/read", {"read": "articleDetail"}, {"articleId": aid}, csrf=False))["data"]["item"]
+        self.assertEqual(detail["primarySite"], "zooberiahsystems.com")
+        self.assertEqual(detail["articleContent"], {"ops": [{"insert": "Texto original\n"}]})
+        self.assertEqual(self.request("/features/content-hub/action", {"action": "updatePackage"}, {
+            "articleId": aid, "category": "web", "primarySite": "https://external.example",
+        })["statusCode"], 400)
+        for action in ("submitReview", "approveArticle", "publish"):
+            response = self.request("/features/content-hub/action", {"action": action}, {"articleId": aid})
+            self.assertEqual(response["statusCode"], 200, action)
+        record = self.store.get_metadata("HUB#zoosite-main", f"ARTICLE#{aid}")
+        self.assertEqual(record["publishedPrimarySite"], "zooberiahsystems.com")
+        self.assertEqual(self.store.get_json(record["publishedBundleKey"])["primarySite"], "zooberiahsystems.com")
+
     def test_article_cover_upload_and_alt_share_the_editorial_record(self):
         upload = {"name": "cover.webp", "mimeType": "image/webp", "dataBase64": "UklGRgQAAABXRUJQ"}
         image = "https://assets.zoolandingpage.com.mx/zoositioweb.com.mx/blog-covers-test/images/cover.webp"

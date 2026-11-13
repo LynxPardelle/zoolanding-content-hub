@@ -628,7 +628,12 @@ def _create_article(payload: dict[str, Any], session: dict[str, Any], profile: d
         "updatedBy": session["subject"],
     }
     revision = _revision_item(hub["hubId"], article_id, revision_id, locale, now, session["subject"])
+    primary_site = _article_primary_site(payload, profile, hub)
+    if primary_site:
+        article["primarySite"] = primary_site
     package = _article_package(article, revision, payload, profile, hub)
+    if primary_site:
+        package["primarySite"] = primary_site
     cover = _cover_changes(payload, profile, hub, article)
     article.update(cover)
     package.update(cover)
@@ -710,6 +715,9 @@ def _update_package(
         fallback=previous_package,
     )
     metadata_updates = _article_metadata_updates(payload)
+    primary_site = _article_primary_site(payload, profile, hub, article.get("primarySite"))
+    if primary_site:
+        package["primarySite"] = primary_site
     cover = _cover_changes(payload, profile, hub, article)
     saved_cover = _article_cover_fields({**article, **cover})
     package.update(saved_cover)
@@ -731,6 +739,7 @@ def _update_package(
         "updatedAt": now,
         "updatedBy": session["subject"],
         **metadata_updates,
+        **({"primarySite": primary_site} if primary_site else {}),
         **cover,
     }
     if expected_revision is None:
@@ -763,6 +772,19 @@ def _cover_changes(payload: dict[str, Any], profile: dict[str, Any], hub: dict[s
 
 def _cover_editing_enabled(profile: dict[str, Any], hub: dict[str, Any]) -> bool:
     return profile["domain"] == hub["ownerDraftDomain"] == "zoositioweb.com.mx" and hub["hubId"] == "zoosite-main"
+
+
+def _article_primary_site(payload: dict[str, Any], profile: dict[str, Any], hub: dict[str, Any], existing: Any = None) -> str:
+    selected = _input_field(payload, "primarySite")
+    if not _cover_editing_enabled(profile, hub):
+        if selected is not None:
+            raise ContentHubError("Primary site is unavailable")
+        return ""
+    if selected is None:
+        return existing if existing in ("zoositioweb.com.mx", "zooberiahsystems.com") else "zooberiahsystems.com"
+    if selected not in ("zoositioweb.com.mx", "zooberiahsystems.com"):
+        raise ContentHubError("Invalid primary site")
+    return selected
 
 
 def _article_cover_fields(source: dict[str, Any]) -> dict[str, str]:
@@ -907,6 +929,7 @@ def _publish_article(
         raise ContentHubNotFound("Revision not found")
     _require_article_approved_for_publish(article)
     package = store.get_json(revision["packageKey"])
+    primary_site = _article_primary_site({}, profile, hub, package.get("primarySite"))
     path = _article_path(_input_field(payload, "path") or article.get("path") or f"/blog/{_slug(article.get('title') or article_id)}")
     canonical_mode = _canonical_mode(_input_field(payload, "canonicalMode") or article.get("canonicalMode") or "self")
     canonical_url = _safe_canonical_url(_input_field(payload, "canonicalUrl") or article.get("canonicalUrl") or "")
@@ -933,6 +956,8 @@ def _publish_article(
         robots_policy,
     )
     key = _published_bundle_key(profile, hub["hubId"], render_domain, locale, article_id, revision_id)
+    if primary_site:
+        bundle["primarySite"] = primary_site
     store.put_json(key, bundle)
     store.update_metadata(f"HUB#{hub['hubId']}", f"ARTICLE#{article_id}", {
         "status": "published",
@@ -946,6 +971,7 @@ def _publish_article(
         "seoDescription": seo_description,
         "robots": robots_policy,
         "publishedBundleKey": key,
+        **({"publishedPrimarySite": primary_site} if primary_site else {}),
         **_article_cover_fields(package),
         "updatedAt": now,
         "updatedBy": session["subject"],
@@ -2139,6 +2165,7 @@ def _article_summary(item: dict[str, Any]) -> dict[str, Any]:
         "contentSafety": _content_safety_from_value(item.get("contentSafety")),
         "interactions": _public_interactions_policy(item.get("interactions"), default_enabled=False),
         "canonicalMode": item.get("canonicalMode"),
+        **({"primarySite": item["primarySite"]} if item.get("primarySite") else {}),
         "canonicalUrl": item.get("canonicalUrl"),
         "primaryLocale": item.get("primaryLocale"),
         "latestRevisionId": item.get("latestRevisionId"),
