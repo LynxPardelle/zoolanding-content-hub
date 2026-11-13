@@ -534,7 +534,8 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertEqual(article["imageAlt"], "Portada original")
         article_id = article["articleId"]
         edited = self.request("/features/content-hub/action", {"action": "updatePackage"}, {
-            "articleId": article_id, "imageAlt": "Nuevo texto alternativo", "expectedRevisionId": article["latestRevisionId"],
+            "articleId": article_id, "coverUpload": "", "imageAlt": "Nuevo texto alternativo",
+            "expectedRevisionId": article["latestRevisionId"],
         })
         self.assertEqual(edited["statusCode"], 200)
         stale = self.request("/features/content-hub/action", {"action": "updatePackage"}, {
