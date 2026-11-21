@@ -933,6 +933,87 @@ class ContentHubHandlerTests(unittest.TestCase):
         self.assertEqual(bundle["analytics"]["piiPolicy"], "no-pii")
         self.assertNotIn("bucket", publish["body"].lower())
 
+    def test_first_publish_sets_publication_date_and_current_update_time(self):
+        created = self.request("/features/content-hub/action", {"action": "createArticle"}, {
+            "title": "Primera publicación", "category": "web",
+        })
+        article_id = body(created)["data"]["article"]["articleId"]
+        self.set_article_status(article_id, "approved")
+        published_at = "2026-11-10T12:00:00Z"
+
+        with patch.object(content_hub, "_now_iso", return_value=published_at):
+            published = self.request("/features/content-hub/action", {"action": "publish", "articleId": article_id})
+
+        self.assertEqual(published["statusCode"], 200)
+        article = self.store.get_metadata("HUB#zoosite-main", f"ARTICLE#{article_id}")
+        self.assertEqual(body(published)["data"]["publishedAt"], published_at)
+        self.assertEqual(article["publishedAt"], published_at)
+        self.assertEqual(article["updatedAt"], published_at)
+        self.assertEqual(self.store.get_json(article["publishedBundleKey"])["publishedAt"], published_at)
+
+    def test_cover_republish_preserves_original_date_and_updates_modification_time(self):
+        content = {"ops": [{"insert": "El cuerpo permanece igual.\n"}]}
+        upload = {"name": "cover.webp", "mimeType": "image/webp", "dataBase64": "UklGRgQAAABXRUJQ"}
+        first_image = "https://assets.zoolandingpage.com.mx/zoositioweb.com.mx/blog-covers-test/images/first.webp"
+        next_image = "https://assets.zoolandingpage.com.mx/zoositioweb.com.mx/blog-covers-test/images/next.webp"
+        with patch.object(content_hub, "_upload_cover", return_value=first_image):
+            created = self.request("/features/content-hub/action", {"action": "createArticle"}, {
+                "title": "Nueva portada", "category": "web", "articleContent": content,
+                "coverUpload": upload, "imageAlt": "Portada original",
+            })
+        initial = body(created)["data"]["article"]
+        article_id = initial["articleId"]
+        first_published_at = "2026-11-10T12:00:00Z"
+        republished_at = "2026-11-20T18:00:00Z"
+        self.set_article_status(article_id, "approved")
+        with patch.object(content_hub, "_now_iso", return_value=first_published_at):
+            first = self.request("/features/content-hub/action", {"action": "publish", "articleId": article_id})
+        self.assertEqual(first["statusCode"], 200)
+        previous_bundle_key = self.store.get_metadata("HUB#zoosite-main", f"ARTICLE#{article_id}")["publishedBundleKey"]
+
+        with patch.object(content_hub, "_upload_cover", return_value=next_image):
+            edited = self.request("/features/content-hub/action", {"action": "updatePackage"}, {
+                "articleId": article_id, "coverUpload": upload, "imageAlt": "Portada renovada",
+                "expectedRevisionId": initial["latestRevisionId"], "revisionId": "rev_cover_002",
+            })
+        self.assertEqual(edited["statusCode"], 200)
+        self.set_article_status(article_id, "approved")
+        with patch.object(content_hub, "_now_iso", return_value=republished_at):
+            published = self.request("/features/content-hub/action", {"action": "publish", "articleId": article_id})
+
+        self.assertEqual(published["statusCode"], 200)
+        article = self.store.get_metadata("HUB#zoosite-main", f"ARTICLE#{article_id}")
+        bundle = self.store.get_json(article["publishedBundleKey"])
+        self.assertEqual(body(published)["data"]["publishedAt"], first_published_at)
+        self.assertEqual(article["publishedAt"], first_published_at)
+        self.assertEqual(bundle["publishedAt"], first_published_at)
+        self.assertEqual(article["updatedAt"], republished_at)
+        self.assertEqual(article["latestRevisionId"], "rev_cover_002")
+        self.assertEqual(bundle["imageSrc"], next_image)
+        self.assertEqual(bundle["imageAlt"], "Portada renovada")
+        self.assertEqual(bundle["variables"]["articleContent"], content)
+        self.assertNotEqual(article["publishedBundleKey"], previous_bundle_key)
+        self.assertEqual(self.store.get_json(previous_bundle_key)["publishedAt"], first_published_at)
+
+    def test_unpublish_and_republish_preserves_first_publication_date(self):
+        created = self.request("/features/content-hub/action", {"action": "createArticle"}, {"title": "Regreso al blog"})
+        article_id = body(created)["data"]["article"]["articleId"]
+        first_published_at = "2026-11-10T12:00:00Z"
+        self.set_article_status(article_id, "approved")
+        with patch.object(content_hub, "_now_iso", return_value=first_published_at):
+            self.assertEqual(self.request("/features/content-hub/action", {"action": "publish", "articleId": article_id})["statusCode"], 200)
+        self.assertEqual(self.request("/features/content-hub/action", {"action": "unpublishArticle", "articleId": article_id})["statusCode"], 200)
+        self.set_article_status(article_id, "approved")
+        with patch.object(content_hub, "_now_iso", return_value="2026-11-20T18:00:00Z"):
+            published = self.request("/features/content-hub/action", {"action": "publish", "articleId": article_id})
+
+        self.assertEqual(published["statusCode"], 200)
+        article = self.store.get_metadata("HUB#zoosite-main", f"ARTICLE#{article_id}")
+        self.assertEqual(body(published)["data"]["publishedAt"], first_published_at)
+        self.assertEqual(article["publishedAt"], first_published_at)
+        self.assertEqual(self.store.get_json(article["publishedBundleKey"])["publishedAt"], first_published_at)
+        self.assertEqual(article["updatedAt"], "2026-11-20T18:00:00Z")
+
     def test_publish_preserves_top_level_article_content_in_public_variables(self):
         create = self.request(
             "/features/content-hub/action",
