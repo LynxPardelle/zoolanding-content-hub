@@ -117,6 +117,49 @@ function, uses an exact custom artifact allowlist. This prevents v2 handlers,
 tests, documentation, workflows, and unrelated repository files from entering a
 legacy or cross-function Lambda package.
 
+### Narrow v1 publication-date release
+
+The normal `feature -> dev -> test -> main` graph has one explicit compatible
+production mode, `v1-preserve-published-at`. The production selection JSON retains
+the exact `sourceSha`, `sourceTree`, `targetBaseSha` and `mergeTree` coordinates.
+This selection is necessary but insufficient: a credential-free AST guard
+reconstructs the four permitted `_publish_article` edits, compares the entire
+module, and rejects any other runtime, dependency, infrastructure or V2 change.
+Only the declared release-support files, tests and documentation may accompany it.
+The existing `thn-source-only` mode continues to perform no deployment.
+
+The production workflow rechecks the exact merge parents, current main/TEST
+heads and merge tree before credentials and again before execution. It shares
+the retained-production concurrency group and uses the existing production
+identity without changing IAM. The v1 entrypoint refuses execution outside this
+normal GitHub workflow.
+
+`tools/release_v1_publication_date.py` retrieves and checksum-verifies the current
+v1 Lambda ZIP, requires its source to match the selected base, and replaces only
+`lambda_function.py`. Every other ZIP member remains unchanged. The existing
+artifact boundary checker runs on the candidate. Recovery code, recovery
+template, candidate code, baseline templates and review are sealed with the
+existing private, versioned S3 primitives. No credentials, signed URLs or raw
+environment/parameter values enter the public receipt.
+
+The candidate CloudFormation template is composed from the **deployed** template,
+not the incoming SAM template. Both native original/processed previews must equal
+the deployed templates with only the existing `ContentHubFunction` Code changed.
+The native change set must contain one non-replacing Lambda modification, with
+static Code details only. Parameters, V2 resources, IAM, routes, environment,
+resource identities and all other template properties stay fixed. CodeSha256,
+Lambda revision/configuration, aliases, stack/source fingerprints and sealed
+objects are rechecked before `execute_change_set`; no direct Lambda update or
+broad SAM deployment exists in this path. Readback verifies the new ZIP checksum
+and unchanged configuration/templates/resources.
+
+The public workflow artifact contains fingerprints and the result only. The
+sealed private review under the run-specific `v1-publication-date` release prefix
+retains the versioned recovery ZIP/template coordinates for a separately reviewed
+native rollback if necessary; this mode does not automatically execute rollback.
+Missing existing permissions, drift, an invalid preview or a stale selection
+blocks the release rather than widening scope.
+
 The browser sends:
 
 - `X-ZLP-Domain`

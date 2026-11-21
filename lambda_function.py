@@ -935,6 +935,7 @@ def _publish_article(
     canonical_url = _safe_canonical_url(_input_field(payload, "canonicalUrl") or article.get("canonicalUrl") or "")
     _assert_public_slug_available(store, profile, render_domain, locale, path, article_id)
     now = _now_iso()
+    published_at = article.get("publishedAt") or now
     seo_title = _safe_text(_input_field(payload, "seoTitle") or article.get("seoTitle") or article.get("title") or article_id, max_length=160)
     seo_description = _safe_text(_input_field(payload, "seoDescription") or article.get("seoDescription") or article.get("summary") or "", max_length=320)
     robots_policy = _robots_policy(_input_field(payload, "robots") or article.get("robots") or "index,follow")
@@ -948,7 +949,7 @@ def _publish_article(
         locale,
         path,
         "published",
-        now,
+        published_at,
         seo_title,
         seo_description,
         canonical_mode,
@@ -962,7 +963,7 @@ def _publish_article(
     store.update_metadata(f"HUB#{hub['hubId']}", f"ARTICLE#{article_id}", {
         "status": "published",
         "visibility": "public",
-        "publishedAt": now,
+        "publishedAt": published_at,
         "latestRevisionId": revision_id,
         "path": path,
         "canonicalMode": canonical_mode,
@@ -987,7 +988,7 @@ def _publish_article(
         "publishedBundleKey": key,
         "updatedAt": now,
     })
-    return {"articleId": article_id, "revisionId": revision_id, "path": path, "publishedAt": now}
+    return {"articleId": article_id, "revisionId": revision_id, "path": path, "publishedAt": published_at}
 
 
 def _unpublish_article(
