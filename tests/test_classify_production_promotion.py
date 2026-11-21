@@ -1,11 +1,12 @@
 import json
 import unittest
 from tools.classify_production_promotion import classify_selection, PromotionSelectionError
+from test_v1_publication_date_patch import BEFORE, AFTER
 
 CONTEXT = dict(sourceSha="a"*40,sourceTree="b"*40,targetBaseSha="c"*40,mergeTree="d"*40)
 class ProductionPromotionSelectionTests(unittest.TestCase):
     def selection(self, **updates):
-        return json.dumps(dict(schemaVersion=1,mode="thn-source-only",**CONTEXT,**updates))
+        return json.dumps({"schemaVersion":1,"mode":"thn-source-only",**CONTEXT,**updates})
     def test_exact_source_only_selection(self):
         self.assertEqual(classify_selection(self.selection(), **CONTEXT), "thn-source-only")
     def test_missing_selection_never_deploys(self):
@@ -25,3 +26,16 @@ class ProductionPromotionSelectionTests(unittest.TestCase):
             with self.assertRaises(PromotionSelectionError): classify_selection(self.selection(), **context)
         value=json.loads(self.selection());value['schemaVersion']=True
         with self.assertRaises(PromotionSelectionError): classify_selection(json.dumps(value), **CONTEXT)
+
+    def test_compatible_v1_mode_requires_exact_semantics_and_source_scope(self):
+        selection=self.selection(mode="v1-preserve-published-at")
+        documents=({'lambda_function.py':BEFORE},{'lambda_function.py':AFTER})
+        self.assertEqual(classify_selection(selection, **CONTEXT, v1_documents=documents), "v1-preserve-published-at")
+        for bad in (None, ({'lambda_function.py':BEFORE},{'lambda_function.py':AFTER,'template.yaml':'infra drift'}), ({'lambda_function.py':BEFORE},{'lambda_function.py':AFTER.replace('"updatedAt": now','"updatedAt": published_at')})):
+            with self.subTest(documents=bad), self.assertRaises(PromotionSelectionError):
+                classify_selection(selection, **CONTEXT, v1_documents=bad)
+
+    def test_v1_mode_keeps_pinned_context_and_no_legacy_fallback(self):
+        value=json.loads(self.selection(mode="v1-preserve-published-at"));value['targetBaseSha']='e'*40
+        with self.assertRaises(PromotionSelectionError):
+            classify_selection(json.dumps(value),**CONTEXT,v1_documents=({'lambda_function.py':BEFORE},{'lambda_function.py':AFTER}))
